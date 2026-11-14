@@ -118,19 +118,19 @@ func TestAccountsCommandCheck(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"models": map[string]any{
 					"gemini-3.8-flash-high": map[string]any{
-						"maxTokens":         1048576,
-						"maxOutputTokens":   65536,
-						"supportsThinking":  true,
-						"supportsImages":    true,
+						"maxTokens":        1048576,
+						"maxOutputTokens":  65536,
+						"supportsThinking": true,
+						"supportsImages":   true,
 						"quotaInfo": map[string]any{
 							"remainingFraction": remaining,
 						},
 					},
 					"claude-sonnet-4-6": map[string]any{
-						"maxTokens":         1000000,
-						"maxOutputTokens":   64000,
-						"supportsThinking":  true,
-						"supportsImages":    true,
+						"maxTokens":        1000000,
+						"maxOutputTokens":  64000,
+						"supportsThinking": true,
+						"supportsImages":   true,
 						"quotaInfo": map[string]any{
 							"remainingFraction": 1.0,
 						},

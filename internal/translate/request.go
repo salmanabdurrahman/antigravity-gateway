@@ -24,10 +24,10 @@ import (
 const SkipSignature = "skip_thought_signature_validator"
 
 var (
-	cleanIDRegex        = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
-	geminiMajorRegex    = regexp.MustCompile(`^gemini-(\d+)`)
-	dataURLRegex        = regexp.MustCompile(`^data:([^;,]+);base64,(.+)$`)
-	schemaRejectRegex   = regexp.MustCompile(`(?i)parameters_?json_?schema`)
+	cleanIDRegex      = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	geminiMajorRegex  = regexp.MustCompile(`^gemini-(\d+)`)
+	dataURLRegex      = regexp.MustCompile(`^data:([^;,]+);base64,(.+)$`)
+	schemaRejectRegex = regexp.MustCompile(`(?i)parameters_?json_?schema`)
 )
 
 // CleanToolCallID normalizes tool call identifiers to match [A-Za-z0-9_-]{1,64} required by Google endpoints.

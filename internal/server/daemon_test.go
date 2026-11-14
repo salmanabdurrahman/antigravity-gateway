@@ -85,9 +85,9 @@ func TestIsProcessAlive(t *testing.T) {
 // TestCheckHealth verifies health check probing against simulated endpoints.
 func TestCheckHealth(t *testing.T) {
 	tests := []struct {
-		name       string
-		handler    http.HandlerFunc
-		wantErr    bool
+		name         string
+		handler      http.HandlerFunc
+		wantErr      bool
 		wantAccounts int
 	}{
 		{

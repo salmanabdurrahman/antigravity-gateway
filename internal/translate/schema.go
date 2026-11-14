@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	nameMaps = []string{"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+	nameMaps   = []string{"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
 	subschemas = []string{
 		"additionalProperties",
 		"unevaluatedProperties",

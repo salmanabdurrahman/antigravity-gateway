@@ -85,6 +85,7 @@ func ResolveCallbackEndpoint(rawURI string) (listenAddr string, callbackPath str
 
 	return listenAddr, callbackPath
 }
+
 // ParseRedirectURL parses a raw redirect URL string and extracts OAuth callback parameters (code, state, error).
 func ParseRedirectURL(rawURL string) (*CallbackResult, error) {
 	parsed, err := url.Parse(rawURL)

@@ -1,0 +1,55 @@
+#!/usr/bin/env sh
+set -eu
+
+# Bypass mechanism for emergency commits
+if [ "${SKIP_HOOKS:-0}" = "1" ] || [ "${NO_VERIFY:-0}" = "1" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$repo_root"
+
+# Get staged files (Added, Copied, Modified)
+staged_files="$(git diff --cached --name-only --diff-filter=ACM)"
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+# 1. Whitespace and merge conflict marker check
+echo "[pre-commit] checking git diff whitespace"
+git diff --cached --check
+
+# Filter staged Go files
+staged_go_files="$(printf '%s\n' "$staged_files" | grep '\.go$' || true)"
+
+# 2. Format Check (gofmt)
+if [ -n "$staged_go_files" ]; then
+  echo "[pre-commit] checking Go formatting"
+  unformatted="$(printf '%s\n' "$staged_go_files" | while IFS= read -r f; do
+    [ -f "$f" ] && gofmt -l "$f"
+  done || true)"
+
+  if [ -n "$unformatted" ]; then
+    echo "[pre-commit] ERROR: unformatted Go files detected:" >&2
+    printf '%s\n' "$unformatted" | sed 's/^/  - /' >&2
+    echo "[pre-commit] run 'make fmt' and re-stage before committing" >&2
+    exit 1
+  fi
+fi
+
+# 3. Static Analysis (go vet)
+if [ -n "$staged_go_files" ]; then
+  echo "[pre-commit] running static analysis (go vet)"
+  go vet ./...
+fi
+
+# 4. Fast Smoke Tests (go test -short)
+if [ -n "$staged_go_files" ]; then
+  if [ "${SKIP_TESTS:-0}" != "1" ]; then
+    echo "[pre-commit] running fast unit tests"
+    go test -short ./...
+  fi
+fi
+
+echo "[pre-commit] all pre-commit quality checks passed"
+exit 0
