@@ -1,0 +1,185 @@
+// Package server implements the local OpenAI-compatible reverse proxy daemon,
+// routing incoming completions requests to Google Cloud Code Assist upstream endpoints.
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
+)
+
+const (
+	// ServerName defines the identifier reported in health probes and model ownership metadata.
+	ServerName = "antigravity-gateway"
+
+	// DefaultReadTimeout defines the maximum duration for reading request headers and bodies.
+	DefaultReadTimeout = 60 * time.Second
+
+	// DefaultIdleTimeout defines the maximum amount of time to wait for the next request when keep-alives are enabled.
+	DefaultIdleTimeout = 120 * time.Second
+
+	// MaxRequestBodyBytes defines the maximum permissible incoming HTTP request body size (64 MB).
+	MaxRequestBodyBytes = 64 * 1024 * 1024
+
+	// EmptyStreamRetries defines how many times to retry an upstream request if Google returns an empty body.
+	EmptyStreamRetries = 2
+)
+
+// Server coordinates the local HTTP reverse proxy daemon, request routing, and upstream dispatching.
+type Server struct {
+	// mu guards mutable daemon lifecycle states.
+	mu sync.RWMutex
+
+	// cfg holds application-level settings and listener parameters.
+	cfg *config.Config
+
+	// rotator coordinates multi-account execution and failover.
+	rotator *rotator.Rotator
+
+	// catalog manages the dynamic model catalog and caching.
+	catalog *catalog.ModelCatalog
+
+	// logger is the structured logger instance.
+	logger *slog.Logger
+
+	// httpServer is the underlying net/http Server.
+	httpServer *http.Server
+
+	// legacySchemas tracks whether upstream rejected parametersJsonSchema, triggering legacy fallback.
+	legacySchemas atomic.Bool
+
+	// listener is the bound network listener.
+	listener net.Listener
+}
+
+// Options encapsulates configuration parameters for initializing a Server instance.
+type Options struct {
+	// Config is the mandatory application configuration pointer.
+	Config *config.Config
+
+	// Rotator is the mandatory multi-account request dispatcher.
+	Rotator *rotator.Rotator
+
+	// Catalog is the mandatory model catalog and quota tracker.
+	Catalog *catalog.ModelCatalog
+
+	// Logger is the optional structured slog logger.
+	Logger *slog.Logger
+
+	// Listener is an optional pre-bound network listener (useful for tests).
+	Listener net.Listener
+}
+
+// NewServer initializes a new Server with configured routes, middleware, and loopback enforcement.
+func NewServer(opts Options) (*Server, error) {
+	if opts.Config == nil {
+		return nil, errors.New("server options require non-nil Config")
+	}
+	if opts.Rotator == nil {
+		return nil, errors.New("server options require non-nil Rotator")
+	}
+	if opts.Catalog == nil {
+		return nil, errors.New("server options require non-nil Catalog")
+	}
+
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	s := &Server{
+		cfg:      opts.Config,
+		rotator:  opts.Rotator,
+		catalog:  opts.Catalog,
+		logger:   logger,
+		listener: opts.Listener,
+	}
+
+	handler := s.buildHandler()
+
+	// Enforce strict local loopback binding address
+	host := s.cfg.Host
+	ip := net.ParseIP(host)
+	if host != "127.0.0.1" && host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		host = config.DefaultHost
+	}
+	port := s.cfg.Port
+	if port <= 0 {
+		port = config.DefaultPort
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	s.httpServer = &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       DefaultReadTimeout,
+		IdleTimeout:       DefaultIdleTimeout,
+	}
+
+	return s, nil
+}
+
+// Addr returns the configured or actively listening network address of the server.
+func (s *Server) Addr() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.listener != nil {
+		return s.listener.Addr().String()
+	}
+	if s.httpServer != nil {
+		return s.httpServer.Addr
+	}
+	return ""
+}
+
+// Start initiates listening and serving incoming HTTP requests.
+// This call blocks until the server is shut down or encounters an unrecoverable listener error.
+func (s *Server) Start() error {
+	s.logger.Info("starting gateway server", "addr", s.Addr(), "version", config.Version)
+
+	s.mu.RLock()
+	ln := s.listener
+	s.mu.RUnlock()
+
+	if ln != nil {
+		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serving http requests: %w", err)
+		}
+		return nil
+	}
+
+	createdLn, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
+	}
+
+	s.mu.Lock()
+	s.listener = createdLn
+	s.mu.Unlock()
+
+	if err := s.httpServer.Serve(createdLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serving http requests: %w", err)
+	}
+
+	return nil
+}
+
+// Shutdown gracefully terminates the HTTP server, allowing active connections and streams to complete.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.logger.Info("shutting down gateway server")
+	if s.httpServer == nil {
+		return nil
+	}
+	return s.httpServer.Shutdown(ctx)
+}

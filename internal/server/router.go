@@ -1,0 +1,433 @@
+// Package server implements the local OpenAI-compatible reverse proxy daemon,
+// routing incoming completions requests to Google Cloud Code Assist upstream endpoints.
+package server
+
+import (
+	"cmp"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/translate"
+)
+
+// HealthResponse describes the health and identity status returned by /health.
+type HealthResponse struct {
+	// OK indicates daemon operational health.
+	OK bool `json:"ok"`
+
+	// Name is the service identifier (e.g. "antigravity-gateway").
+	Name string `json:"name"`
+
+	// Version reports the compiled semantic release version.
+	Version string `json:"version"`
+
+	// Accounts reports the count of usable accounts in the pool.
+	Accounts int `json:"accounts"`
+}
+
+// ModelMetadata represents supplemental model properties formatted for OpenAI client inspection.
+type ModelMetadata struct {
+	// DisplayName is the human-readable model label.
+	DisplayName string `json:"display_name"`
+
+	// ContextLength specifies input token context capacity.
+	ContextLength int `json:"context_length"`
+
+	// MaxOutputTokens specifies generation output ceiling.
+	MaxOutputTokens int `json:"max_output_tokens"`
+
+	// Thinking indicates chain-of-thought support.
+	Thinking bool `json:"thinking"`
+
+	// ThinkingBudget holds default reasoning budget if configured.
+	ThinkingBudget *int `json:"thinking_budget,omitempty"`
+
+	// Multimodal indicates image input support.
+	Multimodal bool `json:"multimodal"`
+
+	// ToolCalling indicates function calling support.
+	ToolCalling bool `json:"tool_calling"`
+}
+
+// ModelItem represents a single model in the OpenAI model listing response.
+type ModelItem struct {
+	// ID is the unique model identifier.
+	ID string `json:"id"`
+
+	// Object is always "model".
+	Object string `json:"object"`
+
+	// Created is the timestamp when the model was cataloged.
+	Created int64 `json:"created"`
+
+	// OwnedBy designates model ownership, typically "antigravity-gateway".
+	OwnedBy string `json:"owned_by"`
+
+	// ContextWindow reflects input context capacity.
+	ContextWindow int `json:"context_window"`
+
+	// Meta holds extended model limits and capabilities.
+	Meta ModelMetadata `json:"meta"`
+}
+
+// ModelListResponse represents the OpenAI list models response envelope.
+type ModelListResponse struct {
+	// Object is always "list".
+	Object string `json:"object"`
+
+	// Data contains the array of available model items.
+	Data []ModelItem `json:"data"`
+}
+
+// AccountsResponse represents the response containing safe account snapshots.
+type AccountsResponse struct {
+	// Accounts enumerates non-sensitive operational states for configured accounts.
+	Accounts []rotator.AccountSnapshot `json:"accounts"`
+}
+
+// buildHandler constructs the HTTP ServeMux and attaches logging, auth, and recovery middleware.
+func (s *Server) buildHandler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /{$}", s.handleHealth)
+	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("GET /v1/accounts", s.handleAccounts)
+
+	// Chain middlewares: Recovery -> Auth -> Logging -> ServeMux
+	handler := RecoveryMiddleware(s.logger)(
+		AuthMiddleware(s.cfg.APIKey, s.logger)(
+			LoggingMiddleware(s.logger)(mux),
+		),
+	)
+
+	return handler
+}
+
+// handleHealth answers liveness probes and reports gateway version and usable account counts.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	states := s.rotator.Pool().States()
+	usableCount := 0
+	for _, st := range states {
+		if st.Usable() {
+			usableCount++
+		}
+	}
+
+	sendJSON(w, http.StatusOK, HealthResponse{
+		OK:       true,
+		Name:     ServerName,
+		Version:  config.Version,
+		Accounts: usableCount,
+	})
+}
+
+// handleModels lists available chat completion models with their token boundaries and capabilities.
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if err := s.catalog.Ensure(r.Context()); err != nil {
+		snap, _ := s.catalog.Snapshot()
+		if len(snap.Models) == 0 {
+			var rotErr *rotator.RotatorError
+			status := http.StatusBadGateway
+			if errors.As(err, &rotErr) {
+				status = rotErr.StatusCode
+			}
+			sendJSONError(w, status, fmt.Sprintf("Could not list models: %v", err), 0)
+			return
+		}
+	}
+
+	snap, _ := s.catalog.Snapshot()
+	items := make([]ModelItem, len(snap.Models))
+	for i, m := range snap.Models {
+		items[i] = ModelItem{
+			ID:            m.ID,
+			Object:        "model",
+			Created:       0,
+			OwnedBy:       ServerName,
+			ContextWindow: m.ContextWindow,
+			Meta: ModelMetadata{
+				DisplayName:     m.DisplayName,
+				ContextLength:   m.ContextWindow,
+				MaxOutputTokens: m.MaxOutputTokens,
+				Thinking:        m.Thinking,
+				ThinkingBudget:  m.ThinkingBudget,
+				Multimodal:      m.Images,
+				ToolCalling:     true,
+			},
+		}
+	}
+
+	sendJSON(w, http.StatusOK, ModelListResponse{
+		Object: "list",
+		Data:   items,
+	})
+}
+
+// handleAccounts returns non-secret account diagnostics, request metrics, and cooldown states.
+func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	snapshots := s.rotator.Pool().Snapshots()
+	sendJSON(w, http.StatusOK, AccountsResponse{
+		Accounts: snapshots,
+	})
+}
+
+// handleChatCompletions processes OpenAI chat completions requests, coordinating schema translation,
+// transparent multi-account 429 rotation, thinking preservation, and SSE streaming.
+func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Reading request body: %v", err), 0)
+		return
+	}
+
+	var chatReq translate.ChatRequest
+	if err := json.Unmarshal(bodyBytes, &chatReq); err != nil {
+		sendJSONError(w, http.StatusBadRequest, "Request body is not valid JSON.", 0)
+		return
+	}
+
+	if err := translate.ValidateChatRequest(&chatReq); err != nil {
+		sendJSONError(w, http.StatusBadRequest, err.Error(), 0)
+		return
+	}
+
+	_ = s.catalog.Ensure(r.Context())
+	info := s.catalog.Info(chatReq.Model)
+	upstream := catalog.UpstreamModel(chatReq.Model)
+
+	sessionID := cmp.Or(
+		r.Header.Get("X-Session-Affinity"),
+		r.Header.Get("session_id"),
+		r.Header.Get("X-Session-Id"),
+	)
+
+	randID := make([]byte, 12)
+	_, _ = rand.Read(randID)
+	id := fmt.Sprintf("chatcmpl-%s", hex.EncodeToString(randID))
+	created := time.Now().Unix()
+
+	for attempt := range EmptyStreamRetries + 1 {
+		opts := translate.BuildOptions{
+			Info:          info,
+			LegacySchemas: s.legacySchemas.Load(),
+			SessionID:     sessionID,
+		}
+
+		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
+			opts.ProjectID = st.ProjectID()
+			return translate.BuildEnvelope(&chatReq, opts)
+		})
+		if err != nil {
+			var rotErr *rotator.RotatorError
+			if errors.As(err, &rotErr) {
+				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
+				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+					s.legacySchemas.Store(true)
+					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
+					continue
+				}
+				sendJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter)
+				return
+			}
+			sendJSONError(w, http.StatusBadGateway, err.Error(), 0)
+			return
+		}
+
+		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, id, created, upstream, attempt)
+		if retry {
+			continue
+		}
+		if done {
+			return
+		}
+	}
+}
+
+// processCompletionsResponse handles the upstream HTTP response, returning whether the request
+// finished successfully or requires a retry due to an empty upstream stream.
+func (s *Server) processCompletionsResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	chatReq *translate.ChatRequest,
+	result *rotator.AttemptResult,
+	id string,
+	created int64,
+	upstream string,
+	attempt int,
+) (done bool, retry bool) {
+	defer result.Response.Body.Close()
+
+	flusher, _ := w.(http.Flusher)
+
+	if chatReq.Stream {
+		var started bool
+		writeChunk := func(chunk translate.ChatCompletionChunk) {
+			b, err := translate.FormatSSEChunk(&chunk)
+			if err == nil {
+				_, _ = w.Write(b)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+
+		translator := translate.NewResponseTranslator(chatReq.Model, func(delta translate.Delta) {
+			if !started {
+				started = true
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.WriteHeader(http.StatusOK)
+
+				writeChunk(translate.ChatCompletionChunk{
+					ID:      id,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   chatReq.Model,
+					Choices: []translate.ChunkChoice{
+						{
+							Index: 0,
+							Delta: translate.Delta{Role: "assistant"},
+						},
+					},
+				})
+			}
+
+			writeChunk(translate.ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   chatReq.Model,
+				Choices: []translate.ChunkChoice{
+					{
+						Index: 0,
+						Delta: delta,
+					},
+				},
+			})
+		})
+
+		streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
+			translator.Push(event)
+			return nil
+		})
+
+		if !translator.SawOutput() && !started && attempt < EmptyStreamRetries {
+			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+			return false, true
+		}
+
+		if !started {
+			if streamErr != nil || !translator.SawOutput() {
+				errMsg := "Google returned an empty response."
+				if streamErr != nil {
+					errMsg = fmt.Sprintf("Upstream stream failed: %v", streamErr)
+				}
+				sendJSONError(w, http.StatusBadGateway, errMsg, 0)
+				return true, false
+			}
+			started = true
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(http.StatusOK)
+
+			writeChunk(translate.ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   chatReq.Model,
+				Choices: []translate.ChunkChoice{
+					{
+						Index: 0,
+						Delta: translate.Delta{Role: "assistant"},
+					},
+				},
+			})
+		}
+
+		if streamErr != nil {
+			s.logger.Error("upstream stream interrupted", "error", streamErr)
+			return true, false
+		}
+
+		if details := translator.ReasoningDetails(); len(details) > 0 {
+			writeChunk(translate.ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   chatReq.Model,
+				Choices: []translate.ChunkChoice{
+					{
+						Index: 0,
+						Delta: translate.Delta{ReasoningDetails: details},
+					},
+				},
+			})
+		}
+
+		writeChunk(translate.ChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   chatReq.Model,
+			Choices: []translate.ChunkChoice{
+				{
+					Index:        0,
+					Delta:        translate.Delta{},
+					FinishReason: translator.Finish(),
+				},
+			},
+		})
+
+		if usage := translator.Usage(); usage != nil {
+			writeChunk(translate.ChatCompletionChunk{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   chatReq.Model,
+				Choices: []translate.ChunkChoice{},
+				Usage:   usage,
+			})
+		}
+
+		_, _ = w.Write(translate.FormatSSEDone())
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true, false
+	}
+
+	// Non-streaming completion
+	translator := translate.NewResponseTranslator(chatReq.Model, func(delta translate.Delta) {})
+	streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
+		translator.Push(event)
+		return nil
+	})
+
+	if !translator.SawOutput() && attempt < EmptyStreamRetries {
+		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+		return false, true
+	}
+
+	if streamErr != nil && !translator.SawOutput() {
+		sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream stream failed: %v", streamErr), 0)
+		return true, false
+	}
+
+	completion := translator.Completion(id, created)
+	sendJSON(w, http.StatusOK, completion)
+	return true, false
+}

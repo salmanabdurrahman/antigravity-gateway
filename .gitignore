@@ -1,0 +1,25 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+*.db-shm
+*.db-wal
+
+# Local runtime directories
+.tmp/
+.agw/
+.pi/
+references/
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo
+*~

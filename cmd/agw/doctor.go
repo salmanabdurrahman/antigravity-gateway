@@ -1,0 +1,516 @@
+// Package main provides the command-line interface entrypoints and subcommands for agw.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/client"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/spf13/cobra"
+)
+
+// doctorCmd runs environment health diagnostics across ports, permissions, accounts, and integrations.
+var doctorCmd = &cobra.Command{
+	Use:   "doctor",
+	Short: "Run diagnostics on ports, permissions, accounts, and network connectivity",
+	Long: `Doctor performs a comprehensive diagnostic check of the local Antigravity Gateway environment.
+It inspects:
+  - Local port availability (51400 for daemon, 51121 for OAuth PKCE callback)
+  - POSIX filesystem permissions on ~/.agw (0700) and credential files (0600)
+  - Configured Google accounts and token validity
+  - Upstream network reachability to Google OAuth and Cloud Code Assist endpoints
+  - Integration status in Pi Coding Agent and OpenCode configurations`,
+	RunE: runDoctor,
+}
+
+func init() {
+	rootCmd.AddCommand(doctorCmd)
+}
+
+// CheckStatus represents the severity outcome of a diagnostic probe.
+type CheckStatus string
+
+const (
+	StatusOK   CheckStatus = "OK"
+	StatusWarn CheckStatus = "WARN"
+	StatusFail CheckStatus = "FAIL"
+)
+
+// CheckItem represents a single diagnostic evaluation.
+type CheckItem struct {
+	// Category groups related diagnostic checks (e.g. "Network", "Permissions").
+	Category string
+
+	// Name is the specific check identifier.
+	Name string
+
+	// Status represents check severity ("OK", "WARN", "FAIL").
+	Status CheckStatus
+
+	// Message is the detailed outcome explanation.
+	Message string
+
+	// Hint provides actionable recovery instructions if the check failed.
+	Hint string
+}
+
+// runDoctor executes all diagnostic suites and renders an actionable CLI report.
+func runDoctor(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	cfg, err := config.LoadOrCreate()
+	if err != nil {
+		return fmt.Errorf("loading configuration: %w", err)
+	}
+
+	cmd.Println("Running Antigravity Gateway environment diagnostics...")
+	cmd.Println()
+
+	var results []CheckItem
+
+	// 1. Ports Diagnostics
+	results = append(results, checkPorts(ctx, cfg)...)
+
+	// 2. Filesystem Permissions Diagnostics
+	results = append(results, checkPermissions()...)
+
+	// 3. Accounts Diagnostics
+	results = append(results, checkAccounts()...)
+
+	// 4. Upstream Google Connectivity
+	results = append(results, checkConnectivity(ctx)...)
+
+	// 5. Client Integrations
+	results = append(results, checkClientIntegrations()...)
+
+	// Render diagnostics report
+	hasFailures := false
+	hasWarnings := false
+
+	var currentCategory string
+	for _, item := range results {
+		if item.Category != currentCategory {
+			currentCategory = item.Category
+			cmd.Printf("[%s]\n", currentCategory)
+		}
+
+		icon := "✓"
+		switch item.Status {
+		case StatusFail:
+			icon = "✗"
+			hasFailures = true
+		case StatusWarn:
+			icon = "!"
+			hasWarnings = true
+		}
+
+		cmd.Printf("  %s %-32s : %s\n", icon, item.Name, item.Message)
+		if item.Hint != "" {
+			cmd.Printf("    └─ Hint: %s\n", item.Hint)
+		}
+	}
+
+	cmd.Println()
+	if hasFailures {
+		cmd.Println("Doctor found issues requiring attention before full operation.")
+		return errors.New("diagnostics completed with errors")
+	} else if hasWarnings {
+		cmd.Println("Doctor diagnostics completed with warnings. System is operational.")
+	} else {
+		cmd.Println("All diagnostics passed successfully! Antigravity Gateway is ready.")
+	}
+
+	return nil
+}
+
+// checkPorts verifies availability or health of daemon and callback ports.
+func checkPorts(ctx context.Context, cfg *config.Config) []CheckItem {
+	var items []CheckItem
+
+	// Check Gateway Port (default 51400)
+	port := cfg.Port
+	if port <= 0 {
+		port = config.DefaultPort
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	// Probe if AGW is already running
+	healthURL := fmt.Sprintf("http://%s/health", addr)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	httpClient := &http.Client{Timeout: 1 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var hResp struct {
+				Name     string `json:"name"`
+				Version  string `json:"version"`
+				Accounts int    `json:"accounts"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&hResp)
+			items = append(items, CheckItem{
+				Category: "Network Ports",
+				Name:     fmt.Sprintf("Gateway Port (%d)", port),
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("Active (running %s v%s, %d account(s))", hResp.Name, hResp.Version, hResp.Accounts),
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "Network Ports",
+				Name:     fmt.Sprintf("Gateway Port (%d)", port),
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("Service returned HTTP %d on /health", resp.StatusCode),
+			})
+		}
+	} else {
+		// Test if port is available to bind
+		ln, bindErr := net.Listen("tcp", addr)
+		if bindErr == nil {
+			_ = ln.Close()
+			items = append(items, CheckItem{
+				Category: "Network Ports",
+				Name:     fmt.Sprintf("Gateway Port (%d)", port),
+				Status:   StatusOK,
+				Message:  "Available to bind (gateway daemon stopped)",
+				Hint:     "Start daemon with 'agw start --detach'",
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "Network Ports",
+				Name:     fmt.Sprintf("Gateway Port (%d)", port),
+				Status:   StatusFail,
+				Message:  fmt.Sprintf("Port is in use by another process: %v", bindErr),
+				Hint:     fmt.Sprintf("Free port %d or specify a custom port in config.json", port),
+			})
+		}
+	}
+
+	// Check OAuth callback port (51121)
+	oauthAddr := "127.0.0.1:51121"
+	lnOAuth, bindErr := net.Listen("tcp", oauthAddr)
+	if bindErr == nil {
+		_ = lnOAuth.Close()
+		items = append(items, CheckItem{
+			Category: "Network Ports",
+			Name:     "OAuth Callback Port (51121)",
+			Status:   StatusOK,
+			Message:  "Available to bind",
+		})
+	} else {
+		items = append(items, CheckItem{
+			Category: "Network Ports",
+			Name:     "OAuth Callback Port (51121)",
+			Status:   StatusWarn,
+			Message:  fmt.Sprintf("Port is occupied: %v", bindErr),
+			Hint:     "Ensure no other OAuth listener is active when running 'agw login'",
+		})
+	}
+
+	return items
+}
+
+// checkPermissions audits POSIX directory (0700) and file (0600) permissions on ~/.agw.
+func checkPermissions() []CheckItem {
+	var items []CheckItem
+
+	dir, err := config.Dir()
+	if err != nil {
+		items = append(items, CheckItem{
+			Category: "File System & Security",
+			Name:     "Configuration Root Dir",
+			Status:   StatusFail,
+			Message:  fmt.Sprintf("Cannot resolve directory: %v", err),
+		})
+		return items
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Configuration Root Dir",
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("%s does not exist yet", dir),
+				Hint:     "Will be created automatically on 'agw start' or 'agw login'",
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Configuration Root Dir",
+				Status:   StatusFail,
+				Message:  fmt.Sprintf("Stat error: %v", err),
+			})
+		}
+	} else {
+		perm := dirInfo.Mode().Perm()
+		if perm&0o077 != 0 {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Configuration Root Dir",
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("%s permissions %04o (recommended 0700)", dir, perm),
+				Hint:     fmt.Sprintf("Run 'chmod 0700 %s'", dir),
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Configuration Root Dir",
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("%s has secure permissions (%04o)", dir, perm),
+			})
+		}
+	}
+
+	// Check config.json permissions
+	cfgPath, _ := config.ConfigFilePath()
+	if cfgInfo, err := os.Stat(cfgPath); err == nil {
+		perm := cfgInfo.Mode().Perm()
+		if perm&0o077 != 0 {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Config File (config.json)",
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("Permissions %04o (recommended 0600)", perm),
+				Hint:     fmt.Sprintf("Run 'chmod 0600 %s'", cfgPath),
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Config File (config.json)",
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("Secure permissions (%04o)", perm),
+			})
+		}
+	}
+
+	// Check accounts.json permissions
+	accPath, _ := config.AccountsFilePath()
+	if accInfo, err := os.Stat(accPath); err == nil {
+		perm := accInfo.Mode().Perm()
+		if perm&0o077 != 0 {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Accounts File (accounts.json)",
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("Permissions %04o (recommended 0600)", perm),
+				Hint:     fmt.Sprintf("Run 'chmod 0600 %s'", accPath),
+			})
+		} else {
+			items = append(items, CheckItem{
+				Category: "File System & Security",
+				Name:     "Accounts File (accounts.json)",
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("Secure permissions (%04o)", perm),
+			})
+		}
+	}
+
+	return items
+}
+
+// checkAccounts inspects accounts.json and verifies token presence.
+func checkAccounts() []CheckItem {
+	var items []CheckItem
+
+	accPath, err := config.AccountsFilePath()
+	if err != nil {
+		items = append(items, CheckItem{
+			Category: "Account Pool",
+			Name:     "Stored Accounts",
+			Status:   StatusFail,
+			Message:  fmt.Sprintf("Cannot resolve accounts path: %v", err),
+		})
+		return items
+	}
+
+	store := auth.NewStore(accPath)
+	accounts, err := store.Load()
+	if err != nil {
+		items = append(items, CheckItem{
+			Category: "Account Pool",
+			Name:     "Stored Accounts",
+			Status:   StatusFail,
+			Message:  fmt.Sprintf("Failed loading accounts: %v", err),
+		})
+		return items
+	}
+
+	if len(accounts) == 0 {
+		items = append(items, CheckItem{
+			Category: "Account Pool",
+			Name:     "Google Accounts",
+			Status:   StatusWarn,
+			Message:  "0 accounts configured",
+			Hint:     "Add accounts using 'agw login'",
+		})
+		return items
+	}
+
+	usable := 0
+	for _, a := range accounts {
+		if !a.Disabled && a.RefreshToken != "" && a.ProjectID != "" {
+			usable++
+		}
+	}
+
+	if usable == 0 {
+		items = append(items, CheckItem{
+			Category: "Account Pool",
+			Name:     "Google Accounts",
+			Status:   StatusFail,
+			Message:  fmt.Sprintf("%d account(s) found but none are active with valid credentials", len(accounts)),
+			Hint:     "Run 'agw login' to authenticate an account",
+		})
+	} else {
+		disabledCount := len(accounts) - usable
+		msg := fmt.Sprintf("%d active account(s) ready", usable)
+		if disabledCount > 0 {
+			msg += fmt.Sprintf(" (%d disabled)", disabledCount)
+		}
+		items = append(items, CheckItem{
+			Category: "Account Pool",
+			Name:     "Google Accounts",
+			Status:   StatusOK,
+			Message:  msg,
+		})
+	}
+
+	return items
+}
+
+// checkConnectivity tests outbound network reachability to Google OAuth and Cloud Code Assist endpoints.
+func checkConnectivity(ctx context.Context) []CheckItem {
+	var items []CheckItem
+
+	endpoints := []struct {
+		name string
+		host string
+	}{
+		{"Google OAuth 2.0 Endpoint", "oauth2.googleapis.com:443"},
+		{"Cloud Code Assist PA Endpoint", "cloudcode-pa.googleapis.com:443"},
+	}
+
+	for _, ep := range endpoints {
+		dialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: 3 * time.Second},
+			Config:    &tls.Config{MinVersion: tls.VersionTLS12},
+		}
+		start := time.Now()
+		conn, err := dialer.DialContext(ctx, "tcp", ep.host)
+		duration := time.Since(start)
+
+		if err != nil {
+			items = append(items, CheckItem{
+				Category: "Upstream Connectivity",
+				Name:     ep.name,
+				Status:   StatusFail,
+				Message:  fmt.Sprintf("Unreachable (%v)", err),
+				Hint:     "Check your internet connection or DNS resolver",
+			})
+		} else {
+			_ = conn.Close()
+			items = append(items, CheckItem{
+				Category: "Upstream Connectivity",
+				Name:     ep.name,
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("Reachable (%s latency)", duration.Round(time.Millisecond)),
+			})
+		}
+	}
+
+	return items
+}
+
+// checkClientIntegrations audits configuration files for Pi Coding Agent and OpenCode.
+func checkClientIntegrations() []CheckItem {
+	var items []CheckItem
+
+	// Check Pi Coding Agent configuration
+	piDir, err := client.DefaultPiDir()
+	if err == nil {
+		modelsPath := filepath.Join(piDir, "models.json")
+		if raw, err := os.ReadFile(modelsPath); err == nil {
+			var parsed struct {
+				Providers map[string]any `json:"providers"`
+			}
+			if parseErr := json.Unmarshal(raw, &parsed); parseErr == nil {
+				if _, ok := parsed.Providers[client.DefaultProviderID]; ok {
+					items = append(items, CheckItem{
+						Category: "Client Integrations",
+						Name:     "Pi Coding Agent",
+						Status:   StatusOK,
+						Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
+					})
+				} else {
+					items = append(items, CheckItem{
+						Category: "Client Integrations",
+						Name:     "Pi Coding Agent",
+						Status:   StatusWarn,
+						Message:  "Installed but Antigravity Gateway is not configured",
+						Hint:     "Run 'agw setup pi' to configure automatically",
+					})
+				}
+			} else {
+				items = append(items, CheckItem{
+					Category: "Client Integrations",
+					Name:     "Pi Coding Agent",
+					Status:   StatusWarn,
+					Message:  fmt.Sprintf("Configuration exists at %s but contains invalid JSON", modelsPath),
+					Hint:     "Repair or re-run 'agw setup pi' to backup and replace",
+				})
+			}
+		}
+	}
+
+	// Check OpenCode configuration
+	opencodePath, err := client.DefaultOpenCodeConfigPath()
+	if err == nil {
+		if raw, err := os.ReadFile(opencodePath); err == nil {
+			var parsed struct {
+				Providers map[string]any `json:"providers"`
+			}
+			if parseErr := json.Unmarshal(raw, &parsed); parseErr == nil {
+				if _, ok := parsed.Providers[client.DefaultProviderID]; ok {
+					items = append(items, CheckItem{
+						Category: "Client Integrations",
+						Name:     "OpenCode CLI",
+						Status:   StatusOK,
+						Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
+					})
+				} else {
+					items = append(items, CheckItem{
+						Category: "Client Integrations",
+						Name:     "OpenCode CLI",
+						Status:   StatusWarn,
+						Message:  "Config exists but Antigravity Gateway is not configured",
+						Hint:     "Run 'agw setup opencode' to configure automatically",
+					})
+				}
+			} else {
+				items = append(items, CheckItem{
+					Category: "Client Integrations",
+					Name:     "OpenCode CLI",
+					Status:   StatusWarn,
+					Message:  fmt.Sprintf("Configuration exists at %s but contains invalid JSON", opencodePath),
+					Hint:     "Repair or re-run 'agw setup opencode' to backup and replace",
+				})
+			}
+		}
+	}
+
+	return items
+}

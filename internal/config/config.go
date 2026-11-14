@@ -1,0 +1,255 @@
+// Package config provides application settings, filesystem paths, and upstream HTTP header builders.
+package config
+
+import (
+	"cmp"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+// Version defines the current semantic version of the gateway application.
+const Version = "0.1.0"
+
+const (
+	// DefaultHost defines the default local loopback binding address.
+	DefaultHost = "127.0.0.1"
+
+	// DefaultPort defines the standard HTTP port for the local reverse proxy.
+	DefaultPort = 51400
+
+	// DefaultStrategy defines the initial account rotation algorithm (sticky prompt caching).
+	DefaultStrategy = "sticky"
+
+	// DefaultClientID represents the OAuth application client ID used by the Antigravity IDE.
+	DefaultClientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+
+	// DefaultClientSecret represents the OAuth client secret used by the Antigravity IDE.
+	DefaultClientSecret = "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"
+
+	// DefaultAuthURL is the Google OAuth 2.0 authorization endpoint.
+	DefaultAuthURL = "https://accounts.google.com/o/oauth2/v2/auth"
+
+	// DefaultTokenURL is the Google OAuth 2.0 token exchange endpoint.
+	DefaultTokenURL = "https://oauth2.googleapis.com/token"
+
+	// DefaultUserInfoURL is the Google endpoint used to retrieve authenticated account email and profile.
+	DefaultUserInfoURL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
+
+	// DefaultRedirectURI is the local loopback callback URI used during OAuth PKCE login.
+	DefaultRedirectURI = "http://localhost:51121/oauth-callback"
+
+	// APIKeyPrefix defines the human-readable prefix used for generated local gateway API keys.
+	APIKeyPrefix = "agw_"
+)
+
+// DefaultEndpoints returns the default ordered list of Google Cloud Code Assist upstream endpoints.
+func DefaultEndpoints() []string {
+	return []string{
+		"https://daily-cloudcode-pa.googleapis.com",
+		"https://cloudcode-pa.googleapis.com",
+	}
+}
+
+// Config represents runtime settings for the local daemon, rotation engine, and upstream integrations.
+type Config struct {
+	// Host defines the local loopback network interface to bind the HTTP reverse proxy daemon to.
+	Host string `json:"host"`
+
+	// Port defines the local TCP port number where the gateway listens for OpenAI-compatible requests.
+	Port int `json:"port"`
+
+	// APIKey is the local Bearer authorization secret required from clients connecting to the gateway.
+	APIKey string `json:"api_key"`
+
+	// Strategy specifies the account rotation algorithm used by the rotator (e.g. "sticky" or "round-robin").
+	Strategy string `json:"strategy"`
+
+	// ClientID is the Google OAuth 2.0 application client identifier utilized for PKCE authentication.
+	ClientID string `json:"client_id"`
+
+	// ClientSecret is the Google OAuth 2.0 application client secret paired with ClientID.
+	ClientSecret string `json:"client_secret"`
+
+	// AuthURL represents the Google OAuth 2.0 authorization endpoint initiating browser consent.
+	AuthURL string `json:"auth_url"`
+
+	// TokenURL represents the Google OAuth 2.0 endpoint for code exchange and token refreshes.
+	TokenURL string `json:"token_url"`
+
+	// UserInfoURL represents the Google userinfo endpoint used to verify account email addresses.
+	UserInfoURL string `json:"user_info_url"`
+
+	// RedirectURI is the local HTTP loopback address receiving the OAuth PKCE authorization callback.
+	RedirectURI string `json:"redirect_uri"`
+
+	// Endpoints holds the ordered list of upstream Cloud Code Assist endpoints with automatic failover.
+	Endpoints []string `json:"endpoints"`
+
+	// UserAgent optionally overrides the User-Agent header dispatched to upstream Google endpoints.
+	UserAgent string `json:"user_agent,omitempty"`
+
+	// APIClient optionally overrides the X-Goog-Api-Client header dispatched upstream.
+	APIClient string `json:"api_client,omitempty"`
+
+	// ClientMetadata optionally overrides the JSON Client-Metadata header dispatched upstream.
+	ClientMetadata string `json:"client_metadata,omitempty"`
+}
+
+// DefaultConfig instantiates a Config initialized with standard production defaults and fallback endpoints.
+func DefaultConfig() *Config {
+	return &Config{
+		Host:         DefaultHost,
+		Port:         DefaultPort,
+		Strategy:     DefaultStrategy,
+		ClientID:     DefaultClientID,
+		ClientSecret: DefaultClientSecret,
+		AuthURL:      DefaultAuthURL,
+		TokenURL:     DefaultTokenURL,
+		UserInfoURL:  DefaultUserInfoURL,
+		RedirectURI:  DefaultRedirectURI,
+		Endpoints:    DefaultEndpoints(),
+	}
+}
+
+// GenerateAPIKey generates a cryptographically random local gateway Bearer API key.
+func GenerateAPIKey() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generating random bytes for API key: %w", err)
+	}
+	return APIKeyPrefix + hex.EncodeToString(raw), nil
+}
+
+// Load reads and parses the JSON configuration from the given file path.
+// If the configuration file does not exist, a default configuration is generated with
+// a new local API key and written atomically with POSIX 0600 permissions.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			cfg := DefaultConfig()
+			apiKey, keyErr := GenerateAPIKey()
+			if keyErr != nil {
+				return nil, fmt.Errorf("generating initial API key: %w", keyErr)
+			}
+			cfg.APIKey = apiKey
+
+			if saveErr := Save(path, cfg); saveErr != nil {
+				return nil, fmt.Errorf("creating initial config file at %s: %w", path, saveErr)
+			}
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("reading config file %s: %w", path, err)
+	}
+
+	cfg := DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parsing config json from %s: %w", path, err)
+	}
+
+	// Ensure required zero-value fields are safely backfilled with defaults
+	cfg.Host = cmp.Or(cfg.Host, DefaultHost)
+	cfg.Port = cmp.Or(cfg.Port, DefaultPort)
+	cfg.Strategy = cmp.Or(cfg.Strategy, DefaultStrategy)
+	cfg.ClientID = cmp.Or(cfg.ClientID, DefaultClientID)
+	cfg.ClientSecret = cmp.Or(cfg.ClientSecret, DefaultClientSecret)
+	cfg.AuthURL = cmp.Or(cfg.AuthURL, DefaultAuthURL)
+	cfg.TokenURL = cmp.Or(cfg.TokenURL, DefaultTokenURL)
+	cfg.UserInfoURL = cmp.Or(cfg.UserInfoURL, DefaultUserInfoURL)
+	cfg.RedirectURI = cmp.Or(cfg.RedirectURI, DefaultRedirectURI)
+	if len(cfg.Endpoints) == 0 {
+		cfg.Endpoints = DefaultEndpoints()
+	}
+	if cfg.APIKey == "" {
+		apiKey, keyErr := GenerateAPIKey()
+		if keyErr != nil {
+			return nil, fmt.Errorf("generating missing API key: %w", keyErr)
+		}
+		cfg.APIKey = apiKey
+		if saveErr := Save(path, cfg); saveErr != nil {
+			return nil, fmt.Errorf("persisting generated API key to %s: %w", path, saveErr)
+		}
+	}
+
+	return cfg, nil
+}
+
+// Save writes the given configuration atomically to the destination path with POSIX 0600 permissions.
+func Save(path string, cfg *Config) error {
+	if cfg == nil {
+		return errors.New("cannot save nil configuration")
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, DirPerm); err != nil {
+		return fmt.Errorf("ensuring directory %s exists: %w", dir, err)
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling configuration: %w", err)
+	}
+	data = append(data, '\n')
+
+	tempFile, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temporary config file in %s: %w", dir, err)
+	}
+	tempPath := tempFile.Name()
+
+	// Ensure cleanup in case of write failure
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	if err := tempFile.Chmod(FilePerm); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("setting file mode 0600 on %s: %w", tempPath, err)
+	}
+
+	if _, err := tempFile.Write(data); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("writing configuration data to %s: %w", tempPath, err)
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("flushing configuration data to disk %s: %w", tempPath, err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("closing temporary config file %s: %w", tempPath, err)
+	}
+
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("renaming %s to destination %s: %w", tempPath, path, err)
+	}
+
+	return nil
+}
+
+// LoadOrCreate loads configuration from the resolved default path, initializing it if absent.
+func LoadOrCreate() (*Config, error) {
+	path, err := ConfigFilePath()
+	if err != nil {
+		return nil, fmt.Errorf("resolving config file path: %w", err)
+	}
+
+	return Load(path)
+}
+
+// Clone creates a deep copy of the configuration structure.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.Endpoints = slices.Clone(c.Endpoints)
+	return &cp
+}
