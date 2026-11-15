@@ -42,6 +42,9 @@ jobs:
       - name: Run end-to-end integration tests
         run: go test -v -race -tags=integration ./test/integration/...
 
+      - name: Run automated installer verification
+        run: ./scripts/test-installer.sh
+
   matrix-build-check:
     name: Cross-Platform Build Check (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ubuntu-latest

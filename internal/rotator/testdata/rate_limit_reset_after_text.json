@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Resource has been exhausted. Your quota will reset after 2h15m30s.",
+    "status": "RESOURCE_EXHAUSTED"
+  }
+}

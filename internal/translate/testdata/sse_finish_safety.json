@@ -1,0 +1,17 @@
+{
+  "response": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Sensitive content blocked by safety policy"
+            }
+          ]
+        },
+        "finishReason": "SAFETY"
+      }
+    ]
+  }
+}

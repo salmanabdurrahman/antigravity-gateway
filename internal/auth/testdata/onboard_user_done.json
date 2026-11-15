@@ -1,0 +1,9 @@
+{
+  "name": "operations/onboard-op-12345",
+  "done": true,
+  "response": {
+    "cloudaicompanionProject": {
+      "id": "projects/cloud-ai-companion-sample-02"
+    }
+  }
+}

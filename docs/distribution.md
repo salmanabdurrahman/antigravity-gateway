@@ -93,9 +93,42 @@ make release
 ./scripts/build-release.sh 0.1.0
 ```
 
-## 3. Filesystem Installation Contract
+## 3. Automated Checksum-Verifying Installer
 
-### 3.1 Executable Location
+Antigravity Gateway provides a checksum-verifying, architecture-detecting installer script (`scripts/install.sh`) that installs released binaries to the user-local bin directory (`~/.local/bin`) without requiring elevated/root privileges.
+
+### Security & Invariants
+
+- **Explicit Version Enforced**: Unpinned `latest` downloads are strictly rejected to ensure reproducible, auditable installations.
+- **Cryptographic Verification**: The installer downloads the release archive and companion `SHA256SUMS`, calculates the local SHA-256 digest, and halts immediately if checksums do not match.
+- **Unmanaged Binary Protection**: The installer will not overwrite an existing binary unless `--force` is explicitly provided.
+- **Zero Elevated Privileges**: Installs to user-local directory (`~/.local/bin` by default), preventing unwanted mutation of system directories.
+
+### Usage
+
+```bash
+# Download and install a specific pinned release version
+./scripts/install.sh --version 0.1.0
+
+# Install to a custom directory
+./scripts/install.sh --version 0.1.0 --install-dir ~/bin
+
+# Overwrite an existing installation
+./scripts/install.sh --version 0.1.0 --force
+
+# Dry-run validation (verifies platform and checksums without writing)
+./scripts/install.sh --version 0.1.0 --dry-run
+```
+
+To run the automated installer test suite:
+
+```bash
+make test-installer
+```
+
+## 4. Filesystem Installation Contract
+
+### 4.1 Executable Location
 
 The single binary executable should be placed in a directory already present in the user's `$PATH`:
 
@@ -106,7 +139,7 @@ The single binary executable should be placed in a directory already present in 
   - macOS / Linux: `/usr/local/bin/agw`
   - Windows: `C:\Program Files\agw\agw.exe`
 
-### 3.2 Runtime State & Configuration Directory
+### 4.2 Runtime State & Configuration Directory
 
 All runtime states, cached models, logs, and credentials reside in the user's home configuration directory:
 
@@ -124,9 +157,9 @@ All runtime states, cached models, logs, and credentials reside in the user's ho
 | `~/.agw/agw.pid`           | Process ID of background daemon              | `0600` (`-rw-------`) | Written by `agw start --detach`; removed by `agw stop`.    |
 | `~/.agw/agw.log`           | Background daemon standard output & error    | `0600` (`-rw-------`) | Appended during detached daemon execution.                 |
 
-## 4. Lifecycle & Upgrade Contract
+## 5. Lifecycle & Upgrade Contract
 
-### 4.1 In-Place Upgrade Flow
+### 5.1 In-Place Upgrade Flow
 
 Upgrading to a newer binary version preserves all configuration, cached models, and authenticated accounts:
 
@@ -145,17 +178,17 @@ Upgrading to a newer binary version preserves all configuration, cached models, 
    agw start --detach
    ```
 
-### 4.2 Downgrade Compatibility
+### 5.2 Downgrade Compatibility
 
 All configuration and credential files maintain backward compatibility with default fallback values. In the event of a downgrade, prior versions will safely read existing configuration without loss of credentials.
 
-### 4.3 Stale PID Recovery
+### 5.3 Stale PID Recovery
 
 If a process is killed uncleanly (e.g. system reboot or SIGKILL), the gateway detects whether the PID stored in `agw.pid` is active:
 
 - If inactive or owned by another process, `agw start` automatically clears the stale PID and restarts cleanly.
 
-## 5. Uninstallation Contract
+## 6. Uninstallation Contract
 
 To completely remove Antigravity Gateway and restore agent configurations:
 

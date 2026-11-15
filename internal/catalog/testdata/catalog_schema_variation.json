@@ -1,0 +1,29 @@
+{
+  "models": {
+    "gemini-3.8-flash-high": {
+      "displayName": "Gemini 3.8 Flash (High)",
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "supportsThinking": true,
+      "supportsImages": true,
+      "thinkingBudget": -1,
+      "minThinkingBudget": 32,
+      "quotaInfo": {
+        "remainingFraction": 0.85,
+        "resetTime": "2026-11-16T12:00:00Z"
+      }
+    },
+    "chat_internal_legacy": {
+      "displayName": "Internal Chat",
+      "maxTokens": 32768
+    },
+    "tab_flash_lite_preview": {
+      "displayName": "Tab Flash Preview",
+      "maxTokens": 32768
+    },
+    "gemini-3.1-flash-image": {
+      "displayName": "Image Model Only",
+      "maxTokens": 32768
+    }
+  }
+}

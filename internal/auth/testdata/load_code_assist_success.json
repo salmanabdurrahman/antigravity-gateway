@@ -1,0 +1,15 @@
+{
+  "cloudaicompanionProject": "projects/cloud-ai-companion-sample-01",
+  "allowedTiers": [
+    {
+      "id": "tier-free",
+      "name": "Free Tier",
+      "isDefault": true
+    },
+    {
+      "id": "tier-premium",
+      "name": "Premium Tier",
+      "isDefault": false
+    }
+  ]
+}

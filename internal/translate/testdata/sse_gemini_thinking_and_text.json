@@ -1,0 +1,29 @@
+{
+  "response": {
+    "responseId": "resp-sample-gemini-01",
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Analyzing the input problem and planning solution...",
+              "thought": true,
+              "thoughtSignature": "sig-thought-abc123xyz"
+            },
+            {
+              "text": "Here is the concise answer based on analysis."
+            }
+          ]
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 25,
+      "thoughtsTokenCount": 18,
+      "candidatesTokenCount": 10,
+      "totalTokenCount": 53
+    }
+  }
+}

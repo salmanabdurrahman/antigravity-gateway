@@ -1,6 +1,6 @@
 # Antigravity Gateway (AGW) Makefile
 
-.PHONY: all help build run clean fmt fmt-check lint test test-short test-integration test-all check release hooks-install pre-commit
+.PHONY: all help build run clean fmt fmt-check lint test test-short test-integration test-installer test-all check release hooks-install pre-commit
 
 # Default target: build binary
 all: build
@@ -17,8 +17,9 @@ help:
 	@echo "  make test              - Run unit tests with race detection"
 	@echo "  make test-short        - Run fast unit tests"
 	@echo "  make test-integration  - Run end-to-end integration tests"
-	@echo "  make test-all          - Run both unit and integration tests"
-	@echo "  make check             - Run full preflight verification (fmt-check, lint, test)"
+	@echo "  make test-installer    - Run automated verification for install.sh"
+	@echo "  make test-all          - Run unit, integration, and installer tests"
+	@echo "  make check             - Run full preflight verification (fmt-check, lint, test, test-installer)"
 	@echo "  make release           - Package cross-platform release archives with checksums (dist/)"
 	@echo "  make hooks-install     - Configure git pre-commit hook via core.hooksPath"
 	@echo "  make pre-commit        - Run pre-commit checks manually"
@@ -66,9 +67,13 @@ test-integration:
 	@echo "[test-integration] running end-to-end integration tests"
 	@go test -v -race -tags=integration ./test/integration/...
 
-test-all: test test-integration
+test-installer:
+	@echo "[test-installer] running automated installer verification suite"
+	@./scripts/test-installer.sh
 
-check: fmt-check lint test
+test-all: test test-integration test-installer
+
+check: fmt-check lint test test-installer
 
 release:
 	@echo "[release] packaging cross-platform release artifacts with checksums"

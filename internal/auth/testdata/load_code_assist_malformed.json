@@ -1,0 +1,6 @@
+{
+  "unexpected_key": 12345,
+  "nested": {
+    "unknown": true
+  }
+}
