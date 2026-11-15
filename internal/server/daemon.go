@@ -3,6 +3,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
@@ -65,7 +65,7 @@ func WritePID(pidFile string, pid int) error {
 	}
 
 	if err := os.Rename(tmpFile, pidFile); err != nil {
-		_ = os.Remove(tmpFile)
+		_ = os.Remove(tmpFile) // Best-effort cleanup of temporary pid file if atomic rename fails.
 		return fmt.Errorf("renaming temp pid file to %s: %w", pidFile, err)
 	}
 
@@ -79,45 +79,6 @@ func ClearPID(pidFile string) error {
 		return err
 	}
 	return nil
-}
-
-// IsProcessAlive checks whether the specified process ID currently exists in the operating system.
-func IsProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	// First check if target process is a child of the current process to reap any terminated zombie.
-	var status syscall.WaitStatus
-	wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
-	if err == nil {
-		if wpid == pid {
-			// Child process has exited and has now been reaped.
-			return false
-		}
-		if wpid == 0 {
-			// Child process is still actively running.
-			return true
-		}
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// Sending signal 0 checks for process existence without actually delivering a signal
-	err = proc.Signal(syscall.Signal(0))
-	if err == nil {
-		return true
-	}
-
-	// If errno is EPERM, process exists but belongs to another user
-	if errors.Is(err, syscall.EPERM) {
-		return true
-	}
-
-	return false
 }
 
 // CheckHealth queries the /health endpoint of a local gateway instance and verifies identity.
@@ -177,14 +138,8 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 
 	// Check if already running
 	if existingPID, readErr := ReadPID(pidFile); readErr == nil && IsProcessAlive(existingPID) {
-		host := cfg.Host
-		if host == "" {
-			host = config.DefaultHost
-		}
-		port := cfg.Port
-		if port <= 0 {
-			port = config.DefaultPort
-		}
+		host := cmp.Or(cfg.Host, config.DefaultHost)
+		port := cmp.Or(cfg.Port, config.DefaultPort)
 		healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
 
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
@@ -193,7 +148,7 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 			return existingPID, logFile, fmt.Errorf("antigravity-gateway daemon is already running (PID: %d)", existingPID)
 		}
 		// Stale or dead process; clean up pid file
-		_ = ClearPID(pidFile)
+		_ = ClearPID(pidFile) // Best-effort removal of stale pid file.
 	}
 
 	execPath := os.Getenv("AGW_BIN")
@@ -211,7 +166,7 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 	cmd.Stderr = logWriter
 	cmd.Stdin = nil
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachedSysProcAttr()
 
 	if err := cmd.Start(); err != nil {
 		return 0, "", fmt.Errorf("spawning background server process: %w", err)
@@ -219,25 +174,19 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 
 	pid := cmd.Process.Pid
 	if err := WritePID(pidFile, pid); err != nil {
-		_ = cmd.Process.Kill()
+		_ = cmd.Process.Kill() // Terminate spawned process if pid file writing fails.
 		return 0, "", fmt.Errorf("saving pid file %s: %w", pidFile, err)
 	}
 
-	host := cfg.Host
-	if host == "" {
-		host = config.DefaultHost
-	}
-	port := cfg.Port
-	if port <= 0 {
-		port = config.DefaultPort
-	}
+	host := cmp.Or(cfg.Host, config.DefaultHost)
+	port := cmp.Or(cfg.Port, config.DefaultPort)
 	healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
 
 	// Poll until server answers /health or deadline expires
 	deadline := time.Now().Add(DetachedStartupTimeout)
 	for time.Now().Before(deadline) {
 		if !IsProcessAlive(pid) {
-			_ = ClearPID(pidFile)
+			_ = ClearPID(pidFile) // Remove stale pid file if daemon process died unexpectedly.
 			return 0, logFile, fmt.Errorf("daemon process exited immediately. See log: %s", logFile)
 		}
 
@@ -251,13 +200,14 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	_ = cmd.Process.Kill()
-	_ = ClearPID(pidFile)
+	_ = cmd.Process.Kill() // Terminate process that failed to become healthy within deadline.
+	_ = ClearPID(pidFile)  // Remove pid file after failed startup.
 	return 0, logFile, fmt.Errorf("daemon did not respond healthy within %s. See log: %s", DetachedStartupTimeout, logFile)
 }
 
 // StopDetached stops the background daemon process identified by the PID file.
-// It sends SIGTERM, waits for graceful shutdown, and falls back to SIGKILL if necessary.
+// It initiates process termination (SIGTERM on Unix, forceful termination on Windows),
+// waits for graceful exit, and falls back to SIGKILL on Unix if necessary.
 func StopDetached(cfg *config.Config) (int, error) {
 	pidFile, err := config.PIDFilePath()
 	if err != nil {
@@ -273,33 +223,38 @@ func StopDetached(cfg *config.Config) (int, error) {
 	}
 
 	if !IsProcessAlive(pid) {
-		_ = ClearPID(pidFile)
+		_ = ClearPID(pidFile) // Clean up pid file if process is already dead.
 		return 0, nil
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		_ = ClearPID(pidFile)
+		_ = ClearPID(pidFile) // Clean up pid file if process handle resolution fails.
 		return 0, nil
 	}
 
-	// Send graceful termination signal
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		return 0, fmt.Errorf("sending SIGTERM to pid %d: %w", pid, err)
+	// Send termination signal
+	if err := terminateProcess(proc); err != nil {
+		if isProcessDoneErr(err) {
+			// Process exited concurrently before termination signal was delivered.
+			_ = ClearPID(pidFile) // Best-effort cleanup of stale pid file.
+			return pid, nil
+		}
+		return 0, fmt.Errorf("terminating process pid %d: %w", pid, err)
 	}
 
 	// Wait up to StopTimeout for graceful termination
 	deadline := time.Now().Add(StopTimeout)
 	for time.Now().Before(deadline) {
 		if !IsProcessAlive(pid) {
-			_ = ClearPID(pidFile)
+			_ = ClearPID(pidFile) // Clean up pid file once process has exited.
 			return pid, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Force kill if process failed to terminate gracefully
-	_ = proc.Kill()
-	_ = ClearPID(pidFile)
+	_ = proc.Kill()       // Force kill if process failed to terminate within deadline.
+	_ = ClearPID(pidFile) // Clean up pid file after forceful termination.
 	return pid, nil
 }
