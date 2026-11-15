@@ -77,7 +77,7 @@ func (t *TokenResult) String() string {
 }
 
 // IsExpiredOrExpiringSoon returns true if the token is expired or expires within the given margin.
-// Default margin should be at least 120s as specified in PRD.
+// Default margin should be at least 120s to ensure proactive refresh before token expiration.
 func (t *TokenResult) IsExpiredOrExpiringSoon(margin time.Duration) bool {
 	if t.Expiry.IsZero() {
 		return true

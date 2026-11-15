@@ -164,7 +164,7 @@ data: [DONE]
 				Role:       "tool",
 				ToolCallID: toolCall.ID,
 				Name:       toolCall.Function.Name,
-				Content:    `["README.md", "main.go", "TODOS.md"]`,
+				Content:    `["README.md", "main.go", "go.mod"]`,
 			},
 		},
 	}
