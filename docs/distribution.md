@@ -29,24 +29,68 @@ agw_<version>_<os>_<arch>.tar.gz   (macOS, Linux)
 agw_<version>_<os>_<arch>.zip      (Windows)
 ```
 
-Example artifacts for version `v0.1.0`:
+Example artifacts for version `0.1.0`:
 
 - `agw_0.1.0_darwin_arm64.tar.gz`
 - `agw_0.1.0_darwin_amd64.tar.gz`
 - `agw_0.1.0_linux_amd64.tar.gz`
 - `agw_0.1.0_linux_arm64.tar.gz`
 - `agw_0.1.0_windows_amd64.zip`
+- `agw_0.1.0_windows_arm64.zip`
 
 ### Integrity & Verification
 
-Every release includes a companion `SHA256SUMS` file signed or published alongside the binaries. Users can verify package integrity prior to execution:
+Every release includes a companion `SHA256SUMS` file published alongside the binaries containing SHA-256 cryptographic digests for each release archive. Users should always verify package integrity prior to unpacking or executing binaries:
+
+#### On Linux
 
 ```bash
-# On Linux / macOS
-shasum -a 256 -c SHA256SUMS
+# Verify checksums (checks matching files in current directory)
+sha256sum --check --ignore-missing SHA256SUMS
+```
 
-# On Windows (PowerShell)
-Get-FileHash -Algorithm SHA256 .\agw_*.zip
+#### On macOS
+
+```bash
+# Verify checksums using shasum (ignoring archives for other platforms)
+shasum -a 256 --check --ignore-missing SHA256SUMS
+```
+
+#### On Windows (PowerShell)
+
+```powershell
+# Compute SHA-256 hash
+(Get-FileHash -Algorithm SHA256 .\agw_0.1.0_windows_amd64.zip).Hash.ToLower()
+
+# Compare against the hash listed in SHA256SUMS
+Get-Content SHA256SUMS | Select-String "agw_0.1.0_windows_amd64.zip"
+```
+
+### Unpacking & Initial Execution Verification
+
+Once checksum verification passes, extract the binary and confirm functionality:
+
+```bash
+# Linux / macOS
+tar -xzf agw_0.1.0_darwin_arm64.tar.gz
+./agw version
+./agw --help
+
+# Move binary to local user PATH
+mkdir -p ~/.local/bin
+mv agw ~/.local/bin/
+```
+
+### Building Release Artifacts Locally
+
+Developers can reproduce official release packages and checksums locally:
+
+```bash
+# Build all platform archives and generate dist/SHA256SUMS
+make release
+
+# Or invoke the release builder directly with a custom version tag
+./scripts/build-release.sh 0.1.0
 ```
 
 ## 3. Filesystem Installation Contract

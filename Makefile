@@ -1,6 +1,6 @@
 # Antigravity Gateway (AGW) Makefile
 
-.PHONY: all help build run clean fmt fmt-check lint test test-short test-integration test-all check hooks-install pre-commit
+.PHONY: all help build run clean fmt fmt-check lint test test-short test-integration test-all check release hooks-install pre-commit
 
 # Default target: build binary
 all: build
@@ -19,6 +19,7 @@ help:
 	@echo "  make test-integration  - Run end-to-end integration tests"
 	@echo "  make test-all          - Run both unit and integration tests"
 	@echo "  make check             - Run full preflight verification (fmt-check, lint, test)"
+	@echo "  make release           - Package cross-platform release archives with checksums (dist/)"
 	@echo "  make hooks-install     - Configure git pre-commit hook via core.hooksPath"
 	@echo "  make pre-commit        - Run pre-commit checks manually"
 
@@ -33,7 +34,7 @@ run:
 
 clean:
 	@echo "[clean] removing build artifacts"
-	@rm -rf bin
+	@rm -rf bin dist
 
 fmt:
 	@echo "[fmt] formatting Go code with gofmt"
@@ -68,6 +69,10 @@ test-integration:
 test-all: test test-integration
 
 check: fmt-check lint test
+
+release:
+	@echo "[release] packaging cross-platform release artifacts with checksums"
+	@./scripts/build-release.sh
 
 hooks-install:
 	@./scripts/install-hooks.sh
