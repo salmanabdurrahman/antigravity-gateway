@@ -193,3 +193,54 @@ func sendJSONError(w http.ResponseWriter, status int, message string, retryAfter
 		},
 	})
 }
+
+// AnthropicError defines the nested error structure for Anthropic API error responses.
+type AnthropicError struct {
+	// Type indicates the error category (e.g. "invalid_request_error", "rate_limit_error").
+	Type string `json:"type"`
+
+	// Message is the descriptive error explanation.
+	Message string `json:"message"`
+}
+
+// AnthropicErrorResponse wraps the Anthropic error envelope.
+type AnthropicErrorResponse struct {
+	// Type is always "error".
+	Type string `json:"type"`
+
+	// Error contains the nested error details.
+	Error AnthropicError `json:"error"`
+}
+
+// sendAnthropicJSONError formats and sends an Anthropic-compatible error JSON response.
+func sendAnthropicJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration) {
+	errType := "invalid_request_error"
+	switch {
+	case status == http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case status == http.StatusUnauthorized:
+		errType = "authentication_error"
+	case status == http.StatusForbidden:
+		errType = "permission_error"
+	case status == http.StatusNotFound:
+		errType = "not_found_error"
+	case status >= http.StatusInternalServerError:
+		errType = "api_error"
+	}
+
+	if retryAfter > 0 {
+		seconds := int(retryAfter.Seconds())
+		if seconds <= 0 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+	}
+
+	sendJSON(w, status, AnthropicErrorResponse{
+		Type: "error",
+		Error: AnthropicError{
+			Type:    errType,
+			Message: message,
+		},
+	})
+}

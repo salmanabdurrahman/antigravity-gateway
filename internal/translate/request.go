@@ -499,14 +499,14 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 func extractText(content any) string {
 	switch v := content.(type) {
 	case string:
-		return v
+		return StripBillingHeader(v)
 	case []any:
 		var sb strings.Builder
 		for _, item := range v {
 			if m, ok := item.(map[string]any); ok {
 				if t, ok := m["type"].(string); ok && t == "text" {
 					if txt, ok := m["text"].(string); ok {
-						sb.WriteString(txt)
+						sb.WriteString(StripBillingHeader(txt))
 					}
 				}
 			}

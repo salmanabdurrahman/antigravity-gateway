@@ -119,3 +119,53 @@ func TestSetupOpenCodeCommand(t *testing.T) {
 		t.Fatalf("opencode.json was not created: %v", err)
 	}
 }
+
+// TestSetupClaudeCommand verifies executing agw setup claude to configure Claude Code CLI.
+func TestSetupClaudeCommand(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	claudeSettings := filepath.Join(tempHome, "claude", "settings.json")
+
+	// Mock gateway answering /v1/messages
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":   "msg_test",
+			"type": "message",
+			"role": "assistant",
+			"content": []map[string]any{
+				{"type": "text", "text": "ok"},
+			},
+			"model": "claude-sonnet-4-6",
+		})
+	}))
+	defer srv.Close()
+
+	buf := new(bytes.Buffer)
+	setupClaudeCmd.SetOut(buf)
+	setupClaudeCmd.SetErr(buf)
+
+	setupURL = srv.URL
+	setupAPIKey = "test-key"
+	setupNoVerify = false
+	setupDryRun = false
+	setupClaudeSettingsPath = claudeSettings
+	setupClaudeModel = "claude-sonnet-4-6"
+
+	if err := setupClaudeCmd.RunE(setupClaudeCmd, []string{}); err != nil {
+		t.Fatalf("setupClaudeCmd failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Configured Claude Code CLI") {
+		t.Errorf("expected success message, got: %s", out)
+	}
+	if !strings.Contains(out, "Verified end-to-end connectivity") {
+		t.Errorf("expected connectivity verification, got: %s", out)
+	}
+
+	if _, err := os.Stat(claudeSettings); err != nil {
+		t.Fatalf("settings.json was not created: %v", err)
+	}
+}

@@ -102,6 +102,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleHealth)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("GET /v1/accounts", s.handleAccounts)
 
 	// Chain middlewares: Recovery -> Auth -> Logging -> ServeMux
@@ -429,5 +430,163 @@ func (s *Server) processCompletionsResponse(
 
 	completion := translator.Completion(id, created)
 	sendJSON(w, http.StatusOK, completion)
+	return true, false
+}
+
+// handleAnthropicMessages processes Anthropic Messages API requests (used by Claude Code CLI and OpenClaw),
+// coordinating schema translation, transparent multi-account 429 rotation, thinking preservation, and SSE streaming.
+func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		sendAnthropicJSONError(w, http.StatusBadRequest, fmt.Sprintf("Reading request body: %v", err), 0)
+		return
+	}
+
+	var anthReq translate.AnthropicRequest
+	if err := json.Unmarshal(bodyBytes, &anthReq); err != nil {
+		sendAnthropicJSONError(w, http.StatusBadRequest, "Request body is not valid JSON.", 0)
+		return
+	}
+
+	if err := translate.ValidateAnthropicRequest(&anthReq); err != nil {
+		sendAnthropicJSONError(w, http.StatusBadRequest, err.Error(), 0)
+		return
+	}
+
+	_ = s.catalog.Ensure(r.Context())
+	info := s.catalog.Info(anthReq.Model)
+	upstream := catalog.UpstreamModel(anthReq.Model)
+
+	sessionID := cmp.Or(
+		r.Header.Get("X-Session-Affinity"),
+		r.Header.Get("session_id"),
+		r.Header.Get("X-Session-Id"),
+	)
+
+	for attempt := range EmptyStreamRetries + 1 {
+		opts := translate.BuildOptions{
+			Info:          info,
+			LegacySchemas: s.legacySchemas.Load(),
+			SessionID:     sessionID,
+		}
+
+		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
+			opts.ProjectID = st.ProjectID()
+			return translate.BuildAnthropicEnvelope(&anthReq, opts)
+		})
+		if err != nil {
+			var rotErr *rotator.RotatorError
+			if errors.As(err, &rotErr) {
+				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
+				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+					s.legacySchemas.Store(true)
+					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
+					continue
+				}
+				sendAnthropicJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter)
+				return
+			}
+			sendAnthropicJSONError(w, http.StatusBadGateway, err.Error(), 0)
+			return
+		}
+
+		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, upstream, attempt)
+		if retry {
+			continue
+		}
+		if done {
+			return
+		}
+	}
+}
+
+// processAnthropicResponse handles the upstream HTTP response for Anthropic Messages requests.
+func (s *Server) processAnthropicResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	anthReq *translate.AnthropicRequest,
+	result *rotator.AttemptResult,
+	upstream string,
+	attempt int,
+) (done bool, retry bool) {
+	defer result.Response.Body.Close()
+
+	flusher, _ := w.(http.Flusher)
+
+	if anthReq.Stream {
+		var started bool
+		writeChunk := func(eventType string, data any) {
+			b, err := translate.FormatAnthropicSSEEvent(eventType, data)
+			if err == nil {
+				if !started {
+					started = true
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Set("Connection", "keep-alive")
+					w.WriteHeader(http.StatusOK)
+				}
+				_, _ = w.Write(b)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+
+		translator := translate.NewAnthropicStreamTranslator(anthReq.Model, writeChunk)
+
+		streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
+			translator.Push(event)
+			return nil
+		})
+
+		if !translator.SawOutput() && !started && attempt < EmptyStreamRetries {
+			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+			return false, true
+		}
+
+		if !started {
+			if streamErr != nil || !translator.SawOutput() {
+				errMsg := "Google returned an empty response."
+				if streamErr != nil {
+					errMsg = fmt.Sprintf("Upstream stream failed: %v", streamErr)
+				}
+				sendAnthropicJSONError(w, http.StatusBadGateway, errMsg, 0)
+				return true, false
+			}
+		}
+
+		if streamErr != nil {
+			s.logger.Error("upstream stream interrupted", "error", streamErr)
+			return true, false
+		}
+
+		translator.Finish()
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true, false
+	}
+
+	// Non-streaming completion
+	translator := translate.NewAnthropicStreamTranslator(anthReq.Model, nil)
+	streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
+		translator.Push(event)
+		return nil
+	})
+
+	if !translator.SawOutput() && attempt < EmptyStreamRetries {
+		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+		return false, true
+	}
+
+	if streamErr != nil && !translator.SawOutput() {
+		sendAnthropicJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream stream failed: %v", streamErr), 0)
+		return true, false
+	}
+
+	translator.Finish()
+	resp := translator.Response()
+	sendJSON(w, http.StatusOK, resp)
 	return true, false
 }

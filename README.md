@@ -9,9 +9,10 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 ## Key Features
 
-- **OpenAI-Compatible Local Endpoint**: Exposes standard `/v1/chat/completions` and `/v1/models` endpoints bounded strictly to local loopback (`127.0.0.1`).
+- **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
 - **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally, maintaining sticky prompt cache affinity or round-robin balancing, with automatic quota rate-limit cooldown handling.
-- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers and tool schema defenses against `$ref` validation collisions.
+- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, tool schema defenses, proactive `cache_control` stripping, and billing header sanitization.
+- **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
 - **Zero Runtime Dependencies**: Compiled into a single self-contained binary built on Go 1.24+ standard library and Cobra CLI.
 
@@ -19,16 +20,16 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 A benchmark using `gemini-3.8-flash` on the same machine highlights key architectural and resource trade-offs between Antigravity Gateway (`agw`) and multi-provider Node.js proxies like `9router`:
 
-| Metric / Capability             | Antigravity Gateway (`agw`)                            | 9router                                     |
-| :------------------------------ | :----------------------------------------------------- | :------------------------------------------ |
-| **Runtime Architecture**        | Single compiled Go binary (zero dependencies)          | Node.js + Next.js + SQLite                  |
-| **Memory Footprint (RSS)**      | **~19 MB**                                             | **~135 MB** (7x higher RAM footprint)       |
-| **Startup Latency**             | Instant (< 5 ms)                                       | ~2 – 4 seconds                              |
-| **Network Security**            | **Strict Loopback (`127.0.0.1:51400`)**                | `0.0.0.0` (Exposed to local LAN by default) |
-| **Gemini 3 Thought-Signatures** | **Lossless Preservation (`pga.v1` format)**            | Stripped / normalized                       |
-| **Multi-Turn Tool Calling**     | **100% Reliable** (`skip_thought_signature_validator`) | Prone to Google HTTP 400 on turn 2+         |
-| **Claude Interleaved Thinking** | Automatic `anthropic-beta` header injection            | Adapter-dependent                           |
-| **Client Auto-Setup**           | Transactional CLI setup (`agw setup pi` / `opencode`)  | Manual client configuration                 |
+| Metric / Capability             | Antigravity Gateway (`agw`)                                      | 9router                                     |
+| :------------------------------ | :--------------------------------------------------------------- | :------------------------------------------ |
+| **Runtime Architecture**        | Single compiled Go binary (zero dependencies)                    | Node.js + Next.js + SQLite                  |
+| **Memory Footprint (RSS)**      | **~19 MB**                                                       | **~135 MB** (7x higher RAM footprint)       |
+| **Startup Latency**             | Instant (< 5 ms)                                                 | ~2 – 4 seconds                              |
+| **Network Security**            | **Strict Loopback (`127.0.0.1:51400`)**                          | `0.0.0.0` (Exposed to local LAN by default) |
+| **Gemini 3 Thought-Signatures** | **Lossless Preservation (`pga.v1` format)**                      | Stripped / normalized                       |
+| **Multi-Turn Tool Calling**     | **100% Reliable** (`skip_thought_signature_validator`)           | Prone to Google HTTP 400 on turn 2+         |
+| **Claude Interleaved Thinking** | Automatic `anthropic-beta` header injection                      | Adapter-dependent                           |
+| **Client Auto-Setup**           | Transactional CLI setup (`agw setup pi` / `opencode` / `claude`) | Manual client configuration                 |
 
 ## Supported Platforms
 
@@ -276,6 +277,23 @@ Optional flags:
 - `--no-verify`: Skip 1-token connectivity test probe
 - `--dry-run`: Preview generated JSON without writing to disk
 - `--config`: Custom OpenCode configuration file path
+
+#### Configure Claude Code CLI
+
+Configures Claude Code CLI to communicate with Antigravity Gateway's Anthropic Messages API (`/v1/messages`) by updating `~/.claude/settings.json`:
+
+```bash
+agw setup claude
+```
+
+Optional flags:
+
+- `--model`: Primary model configured for Claude CLI (default: `claude-sonnet-4-6`)
+- `--no-verify`: Skip 1-token connectivity test probe
+- `--dry-run`: Preview generated JSON without writing to disk
+- `--settings`: Custom settings file path (defaults to `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR`)
+
+Once configured, simply launch `claude` in your terminal to route through Antigravity Gateway.
 
 ### Environment Diagnostics (`doctor`)
 

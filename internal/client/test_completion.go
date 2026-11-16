@@ -141,3 +141,101 @@ func TestChatCompletion(ctx context.Context, baseURL string, apiKey string, mode
 		Success:  true,
 	}, nil
 }
+
+// TestAnthropicCompletion performs a lightweight single-token completion against the gateway's /v1/messages endpoint.
+func TestAnthropicCompletion(ctx context.Context, baseURL string, apiKey string, model string) (*TestResult, error) {
+	if model == "" {
+		return nil, errors.New("cannot perform test completion without target model")
+	}
+
+	normBase := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(normBase, "/v1") {
+		normBase += "/v1"
+	}
+	endpoint := normBase + "/messages"
+
+	reqBody := map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": "Reply with the single word: ok",
+			},
+		},
+		"max_tokens": 1,
+		"stream":     false,
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling test completion request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("creating http request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		httpReq.Header.Set("x-api-key", apiKey)
+	}
+
+	start := time.Now()
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("dispatching test completion request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	duration := time.Since(start)
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading test completion response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		errMsg := string(bodyBytes)
+		if json.Unmarshal(bodyBytes, &errResp) == nil && errResp.Error.Message != "" {
+			errMsg = errResp.Error.Message
+		}
+		return nil, fmt.Errorf("gateway returned HTTP %d: %s", resp.StatusCode, errMsg)
+	}
+
+	var anthResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &anthResp); err != nil {
+		return nil, fmt.Errorf("decoding test completion response: %w", err)
+	}
+
+	text := ""
+	for _, c := range anthResp.Content {
+		if c.Type == "text" && c.Text != "" {
+			text = c.Text
+			break
+		}
+	}
+
+	return &TestResult{
+		Model:    model,
+		Text:     text,
+		Duration: duration,
+		Success:  true,
+	}, nil
+}

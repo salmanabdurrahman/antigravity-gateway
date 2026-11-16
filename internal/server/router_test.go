@@ -395,3 +395,236 @@ func TestChatCompletionsSchemaRejectionFallback(t *testing.T) {
 		t.Errorf("unexpected content: %v", completion.Choices[0].Message.Content)
 	}
 }
+
+// TestAnthropicMessagesStreaming verifies streaming translation of Google Cloud Code parts
+// into Anthropic SSE events on POST /v1/messages.
+func TestAnthropicMessagesStreaming(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+
+			event1 := `data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking...","thoughtSignature":"sig_1"}]}}]}}` + "\n\n"
+			event2 := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Hello from Claude endpoint!"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6}}}` + "\n\n"
+
+			_, _ = w.Write([]byte(event1))
+			_, _ = w.Write([]byte(event2))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Hi"}],
+		"stream": true,
+		"max_tokens": 1024
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: message_start") {
+		t.Error("missing event: message_start")
+	}
+	if !strings.Contains(body, "event: content_block_start") {
+		t.Error("missing event: content_block_start")
+	}
+	if !strings.Contains(body, "event: content_block_delta") {
+		t.Error("missing event: content_block_delta")
+	}
+	if !strings.Contains(body, "event: message_delta") {
+		t.Error("missing event: message_delta")
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Error("missing event: message_stop")
+	}
+	if !strings.Contains(body, "Hello from Claude endpoint!") {
+		t.Error("missing generation text in stream response")
+	}
+}
+
+// TestAnthropicMessagesNonStreaming verifies non-streaming message generation on POST /v1/messages.
+func TestAnthropicMessagesNonStreaming(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+
+			event := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Direct answer."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}}` + "\n\n"
+			_, _ = w.Write([]byte(event))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Hi"}],
+		"stream": false,
+		"max_tokens": 1024
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp translate.AnthropicResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed decoding response: %v", err)
+	}
+
+	if resp.Type != "message" {
+		t.Errorf("expected type message, got %s", resp.Type)
+	}
+	if resp.Role != "assistant" {
+		t.Errorf("expected role assistant, got %s", resp.Role)
+	}
+	if len(resp.Content) == 0 || resp.Content[0].Text != "Direct answer." {
+		t.Errorf("unexpected content: %+v", resp.Content)
+	}
+	if resp.StopReason != "end_turn" {
+		t.Errorf("expected stop_reason end_turn, got %s", resp.StopReason)
+	}
+}
+
+// TestAnthropicMessagesValidationError verifies structured 400 error responses on invalid requests.
+func TestAnthropicMessagesValidationError(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {})
+	handler := harness.server.buildHandler()
+
+	// Missing model field
+	payload := `{"messages": [{"role": "user", "content": "Hi"}]}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+
+	var errResp AnthropicErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("failed decoding error response: %v", err)
+	}
+
+	if errResp.Type != "error" || errResp.Error.Type != "invalid_request_error" {
+		t.Errorf("unexpected error payload: %+v", errResp)
+	}
+}
+
+// TestAnthropicMessagesToolCallAndSchemaFallback verifies tool calling and automatic schema fallback retry on /v1/messages.
+func TestAnthropicMessagesToolCallAndSchemaFallback(t *testing.T) {
+	var attempts atomic.Int64
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			curr := attempts.Add(1)
+			if curr == 1 {
+				// Simulate Google rejecting parametersJsonSchema
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":400,"message":"Invalid value at parameters_json_schema"}}`))
+				return
+			}
+
+			// Second attempt succeeds under legacySchemas mode
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			event := `data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","id":"call_123","args":{"q":"test"}}}]},"finishReason":"TOOL_USE"}]}}` + "\n\n"
+			_, _ = w.Write([]byte(event))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "gemini-2.5-flash",
+		"messages": [{"role": "user", "content": "Run tool"}],
+		"tools": [
+			{
+				"name": "lookup",
+				"description": "Lookup entity",
+				"input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}
+			}
+		],
+		"stream": false,
+		"max_tokens": 512
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after schema fallback, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if attempts.Load() < 2 {
+		t.Errorf("expected at least 2 attempts for schema fallback, got %d", attempts.Load())
+	}
+
+	var resp translate.AnthropicResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response failed: %v", err)
+	}
+
+	if resp.StopReason != "tool_use" {
+		t.Errorf("expected stop_reason tool_use, got %s", resp.StopReason)
+	}
+	if len(resp.Content) == 0 || resp.Content[0].Type != "tool_use" {
+		t.Fatalf("expected tool_use block, got %+v", resp.Content)
+	}
+	if resp.Content[0].Name != "lookup" {
+		t.Errorf("expected tool name lookup, got %s", resp.Content[0].Name)
+	}
+}

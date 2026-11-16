@@ -42,12 +42,18 @@ var (
 	// setupOpenCodePath specifies a custom opencode.json path.
 	setupOpenCodePath string
 
+	// setupClaudeSettingsPath specifies a custom Claude CLI settings.json path.
+	setupClaudeSettingsPath string
+
+	// setupClaudeModel specifies the model configured for Claude Code CLI.
+	setupClaudeModel string
+
 	// setupCmd registers gateway settings into local AI coding agent configurations.
 	setupCmd = &cobra.Command{
 		Use:   "setup",
 		Short: "Configure AI coding agents to use Antigravity Gateway",
 		Long: `Setup automatically registers Antigravity Gateway as an OpenAI-compatible
-model provider in your coding agent configurations (Pi Coding Agent or OpenCode).
+model provider in your coding agent configurations (Pi Coding Agent, OpenCode, or Claude Code CLI).
 It preserves existing custom settings, creates timestamped backups of existing files,
 and performs a quick 1-token connectivity test against the local gateway.`,
 	}
@@ -71,6 +77,16 @@ It registers the "@opencode/ai/providers/openai-compatible" provider block into
 ~/.config/opencode/opencode.json, backs up previous configuration, and verifies connectivity.`,
 		RunE: runSetupOpenCode,
 	}
+
+	// setupClaudeCmd configures Claude Code CLI's settings.json file.
+	setupClaudeCmd = &cobra.Command{
+		Use:   "claude",
+		Short: "Configure Claude Code CLI (~/.claude/settings.json)",
+		Long: `Claude configures Claude Code CLI to route requests through Antigravity Gateway's
+Anthropic Messages API endpoint (/v1/messages). It registers ANTHROPIC_BASE_URL and
+ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json and verifies connectivity.`,
+		RunE: runSetupClaude,
+	}
 )
 
 func init() {
@@ -85,8 +101,12 @@ func init() {
 
 	setupOpenCodeCmd.Flags().StringVar(&setupOpenCodePath, "config", "", "OpenCode configuration file (default ~/.config/opencode/opencode.json)")
 
+	setupClaudeCmd.Flags().StringVar(&setupClaudeSettingsPath, "settings", "", "Claude settings file (default ~/.claude/settings.json)")
+	setupClaudeCmd.Flags().StringVar(&setupClaudeModel, "model", client.DefaultClaudeModel, "Default model configured for Claude CLI")
+
 	setupCmd.AddCommand(setupPiCmd)
 	setupCmd.AddCommand(setupOpenCodeCmd)
+	setupCmd.AddCommand(setupClaudeCmd)
 	rootCmd.AddCommand(setupCmd)
 }
 
@@ -313,5 +333,59 @@ func runSetupOpenCode(cmd *cobra.Command, args []string) error {
 	}
 
 	cmd.Println("\nRun \"opencode\" and select an antigravity model under /models.")
+	return nil
+}
+
+// runSetupClaude executes configuration injection for Claude Code CLI.
+func runSetupClaude(cmd *cobra.Command, args []string) error {
+	cfg, err := config.LoadOrCreate()
+	if err != nil {
+		return fmt.Errorf("loading configuration: %w", err)
+	}
+
+	baseURL, apiKey := resolveGatewayEndpoint(cfg)
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	settingsPath := setupClaudeSettingsPath
+	if settingsPath == "" {
+		settingsPath, err = client.DefaultClaudeSettingsPath()
+		if err != nil {
+			return fmt.Errorf("resolving claude settings path: %w", err)
+		}
+	}
+
+	opts := client.ClaudeSetupOptions{
+		SettingsPath: settingsPath,
+		GatewayURL:   baseURL,
+		APIKey:       apiKey,
+		Model:        setupClaudeModel,
+		NoVerify:     setupNoVerify,
+		DryRun:       setupDryRun,
+	}
+
+	res, err := client.SetupClaude(ctx, opts)
+	if err != nil {
+		return err
+	}
+
+	if setupDryRun {
+		cmd.Println(res.WrittenJSON)
+		return nil
+	}
+
+	cmd.Println("✓ Configured Claude Code CLI (~/.claude/settings.json)")
+	cmd.Printf("  Target config: %s\n", res.SettingsPath)
+	if res.BackupPath != "" {
+		cmd.Printf("  Backup created: %s\n", filepath.Base(res.BackupPath))
+	}
+
+	if res.TestResult != nil && res.TestResult.Success {
+		cmd.Printf("✓ Verified end-to-end connectivity (%s in %v)\n", res.TestResult.Model, res.TestResult.Duration.Round(time.Millisecond))
+	}
+
+	cmd.Println("\nRun \"claude\" in your terminal to use Antigravity Gateway.")
 	return nil
 }

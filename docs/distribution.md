@@ -223,6 +223,7 @@ To completely remove Antigravity Gateway and restore agent configurations:
 2. **Revert client configurations**:
    - For Pi Coding Agent: Revert `~/.pi/agent/models.json` using the automatic backup file (`models.json.bak-<timestamp>`) created during `agw setup pi`.
    - For OpenCode: Remove the `antigravity` provider entry from the OpenCode configuration.
+   - For Claude Code CLI: Revert `~/.claude/settings.json` using the automatic backup file (`settings.json.bak-<timestamp>`) created during `agw setup claude`.
 3. **Remove binary executable**:
    ```bash
    rm -f ~/.local/bin/agw

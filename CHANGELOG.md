@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native Anthropic Messages API endpoint (`POST /v1/messages`) supporting both real-time SSE streaming and non-streaming modes for Claude Code CLI and OpenClaw.
+- Transactional Claude Code CLI configuration injector (`agw setup claude`) updating `~/.claude/settings.json` with timestamped atomic backup and live completion probe.
+- Integration diagnostics for Claude Code CLI in `agw doctor`.
+- Outbound corporate proxy support honoring standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables across all HTTP clients.
+- Proactive `cache_control` attribute stripping across all message blocks to eliminate Google Cloud Code HTTP 400 "Extra inputs are not permitted" rejections.
+- Claude Code `x-anthropic-billing-header` line removal preventing false HTTP 429 quota exhaustion errors.
 - Local reverse proxy on `http://127.0.0.1:51400/v1` exposing OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoints.
 - Multi-account management with sticky prompt cache affinity and round-robin balancing across stored Google Antigravity subscriptions.
 - Transparent failover upon encountering HTTP 429 rate limits, parsing upstream `resetTime` / `RetryInfo` and absorbing short waits ($\le 20$s).
