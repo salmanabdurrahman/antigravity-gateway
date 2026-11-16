@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
@@ -23,6 +25,21 @@ import (
 
 // AntigravityAuthPort defines the local HTTP port exposed by the running Antigravity IDE.
 const AntigravityAuthPort = 9092
+
+const (
+	// maxLocalTokenLength bounds an accepted imported bearer token so a malformed database page
+	// cannot smuggle an arbitrarily large payload into the credential store.
+	maxLocalTokenLength = 4096
+
+	// maxLocalResponseBytes bounds how much of the Antigravity local listener page is read while
+	// looking for the base64 chatParams payload.
+	maxLocalResponseBytes = 2 << 20
+)
+
+// sqlite3Candidates lists the absolute sqlite3 locations probed on POSIX systems. Absolute paths
+// are used deliberately: resolving the executable through PATH would let any earlier directory
+// shadow the binary that is handed the credential database.
+var sqlite3Candidates = []string{"/usr/bin/sqlite3", "/bin/sqlite3", "/usr/local/bin/sqlite3", "/opt/homebrew/bin/sqlite3"}
 
 // LocalSession represents authentication credentials extracted from a local Antigravity installation.
 type LocalSession struct {
@@ -74,15 +91,23 @@ func ExtractSessionFromDB(dbPath string) (*LocalSession, error) {
 		return nil, fmt.Errorf("antigravity database not accessible: %w", err)
 	}
 
-	// Method 1: Try system sqlite3 CLI if available in PATH
-	if sqlitePath, err := exec.LookPath("sqlite3"); err == nil && sqlitePath != "" {
+	// Method 1: query the database with a trusted absolute sqlite3 binary when one is installed.
+	for _, sqlitePath := range sqlite3Candidates {
+		if _, err := os.Stat(sqlitePath); err != nil {
+			continue
+		}
 		cmd := exec.Command(sqlitePath, dbPath, "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus' LIMIT 1;")
 		out, cmdErr := cmd.Output()
-		if cmdErr == nil && len(out) > 0 {
-			var session LocalSession
-			if jsonErr := json.Unmarshal(bytes.TrimSpace(out), &session); jsonErr == nil && session.APIKey != "" {
-				return &session, nil
-			}
+		if cmdErr != nil || len(out) == 0 {
+			continue
+		}
+
+		var session LocalSession
+		if jsonErr := json.Unmarshal(bytes.TrimSpace(out), &session); jsonErr != nil {
+			continue
+		}
+		if validateErr := validateLocalSession(&session); validateErr == nil {
+			return &session, nil
 		}
 	}
 
@@ -124,8 +149,8 @@ func ExtractSessionFromBytes(data []byte) (*LocalSession, error) {
 	if err := json.NewDecoder(bytes.NewReader(slice)).Decode(&sess); err != nil {
 		return nil, fmt.Errorf("decoding auth status JSON payload: %w", err)
 	}
-	if sess.APIKey == "" {
-		return nil, errors.New("auth status JSON payload is missing apiKey")
+	if err := validateLocalSession(&sess); err != nil {
+		return nil, err
 	}
 
 	return &sess, nil
@@ -150,7 +175,7 @@ func ExtractSessionFromHTTP(ctx context.Context, port int) (*LocalSession, error
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxLocalResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading response from port %d: %w", port, err)
 	}
@@ -170,11 +195,40 @@ func ExtractSessionFromHTTP(ctx context.Context, port int) (*LocalSession, error
 		return nil, fmt.Errorf("parsing chatParams JSON: %w", err)
 	}
 
-	if sess.APIKey == "" {
-		return nil, errors.New("chatParams missing apiKey")
+	if err := validateLocalSession(&sess); err != nil {
+		return nil, err
 	}
 
 	return &sess, nil
+}
+
+// validateLocalSession rejects payloads that cannot be a genuine desktop bearer token: the token is
+// trimmed, must be present, must stay within a sane length, and must not contain whitespace or
+// control characters that would corrupt the Authorization header on replay. Errors never echo the
+// credential value, only the reason.
+func validateLocalSession(sess *LocalSession) error {
+	if sess == nil {
+		return errors.New("local session payload is empty")
+	}
+
+	sess.APIKey = strings.TrimSpace(sess.APIKey)
+	sess.Email = strings.TrimSpace(sess.Email)
+	sess.Name = strings.TrimSpace(sess.Name)
+
+	if sess.APIKey == "" {
+		return errors.New("local session payload is missing apiKey")
+	}
+	if len(sess.APIKey) > maxLocalTokenLength {
+		return fmt.Errorf("local session apiKey exceeds the %d byte limit", maxLocalTokenLength)
+	}
+
+	for _, r := range sess.APIKey {
+		if r <= ' ' || r == 0x7f {
+			return errors.New("local session apiKey contains whitespace or control characters")
+		}
+	}
+
+	return nil
 }
 
 // DetectLocalSession attempts all detection vectors (DB first, HTTP port second) to discover active credentials.
@@ -216,13 +270,24 @@ func ImportLocalSession(ctx context.Context, cfg *config.Config, store *Store) (
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	account := &Account{
-		Email:        email,
-		RefreshToken: sess.APIKey, // Store token for local bearer access
-		ProjectID:    projectID,
-		AddedAt:      now,
+		Email:            email,
+		AccessToken:      sess.APIKey,
+		CredentialSource: CredentialSourceLocalDesktop,
+		ProjectID:        projectID,
+		AddedAt:          now,
 	}
 
 	if store != nil {
+		// Never downgrade a refreshable OAuth account to a short-lived desktop token: the refresh
+		// token cannot be recovered once overwritten, while the desktop token expires within hours.
+		if existing, loadErr := store.Load(); loadErr == nil {
+			if idx := slices.IndexFunc(existing, func(a *Account) bool {
+				return strings.EqualFold(a.Email, email)
+			}); idx != -1 && existing[idx].RefreshToken != "" {
+				return existing[idx], nil
+			}
+		}
+
 		if _, saveErr := store.Upsert(account); saveErr != nil {
 			return nil, fmt.Errorf("saving imported account to store: %w", saveErr)
 		}

@@ -226,3 +226,37 @@ func TestStartCallbackListener(t *testing.T) {
 		t.Fatal("timed out waiting for callback listener result")
 	}
 }
+
+// TestAccessTokenForLocalDesktopSession verifies that an imported desktop account returns its stored
+// bearer token without contacting the OAuth token endpoint, and that an account without any
+// credential reports the actionable re-import error instead of a misleading OAuth failure.
+func TestAccessTokenForLocalDesktopSession(t *testing.T) {
+	cfg := config.DefaultConfig()
+	// Point the token endpoint at an unroutable URL: any refresh attempt would fail the test.
+	cfg.TokenURL = "http://127.0.0.1:1/token"
+
+	local := &Account{
+		Email:            "desktop@example.com",
+		AccessToken:      "desktop-token-123",
+		CredentialSource: CredentialSourceLocalDesktop,
+	}
+
+	res, err := AccessTokenFor(t.Context(), cfg, local)
+	if err != nil {
+		t.Fatalf("AccessTokenFor(local session) returned error: %v", err)
+	}
+	if res.AccessToken != "desktop-token-123" {
+		t.Errorf("expected imported bearer token, got %q", maskSecret(res.AccessToken))
+	}
+	if res.RefreshToken != "" {
+		t.Errorf("expected no refresh token for a desktop session, got %q", maskSecret(res.RefreshToken))
+	}
+
+	if _, err := AccessTokenFor(t.Context(), cfg, &Account{Email: "empty@example.com"}); !errors.Is(err, ErrLocalSessionExpired) {
+		t.Errorf("expected ErrLocalSessionExpired for credential-less account, got %v", err)
+	}
+
+	if _, err := AccessTokenFor(t.Context(), cfg, nil); err == nil {
+		t.Error("expected error for nil account")
+	}
+}

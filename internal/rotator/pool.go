@@ -120,11 +120,11 @@ func (s *AccountState) ProjectID() string {
 	return s.account.ProjectID
 }
 
-// Usable checks if the account is active and not disabled.
+// Usable checks if the account holds credentials and is not disabled.
 func (s *AccountState) Usable() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.account != nil && !s.account.Disabled
+	return s.account != nil && !s.account.Disabled && s.account.HasCredentials()
 }
 
 // CoolingUntil returns the expiration time until which the account is cooling for the model or wildcard.
@@ -208,8 +208,10 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 		return token, nil
 	}
 	refreshToken := ""
+	localAccessToken := ""
 	if s.account != nil {
 		refreshToken = s.account.RefreshToken
+		localAccessToken = s.account.AccessToken
 	}
 	s.mu.RUnlock()
 
@@ -226,8 +228,19 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 	}
 	if s.account != nil {
 		refreshToken = s.account.RefreshToken
+		localAccessToken = s.account.AccessToken
 	}
 	s.mu.RUnlock()
+
+	// Accounts imported from a desktop session carry a short-lived bearer token and no refresh token.
+	// Google's token endpoint cannot exchange it, so return it verbatim instead of attempting a
+	// refresh grant that is guaranteed to fail with a misleading OAuth error.
+	if refreshToken == "" {
+		if localAccessToken == "" {
+			return "", auth.ErrLocalSessionExpired
+		}
+		return localAccessToken, nil
+	}
 
 	res, err := auth.RefreshAccessToken(ctx, cfg, refreshToken)
 	if err != nil {
@@ -389,7 +402,12 @@ func (p *Pool) SetAccounts(accounts []*auth.Account) {
 		}
 		if prev, ok := oldMap[acc.Email]; ok {
 			prev.mu.Lock()
-			sameToken := prev.account != nil && prev.account.RefreshToken == acc.RefreshToken
+			// Compare both credential kinds: an account imported from a desktop session stores its
+			// bearer token in AccessToken, so comparing refresh tokens alone would keep serving a
+			// stale token after the operator re-imports a fresh desktop session.
+			sameToken := prev.account != nil &&
+				prev.account.RefreshToken == acc.RefreshToken &&
+				prev.account.AccessToken == acc.AccessToken
 			if sameToken {
 				prev.account = acc
 				prev.mu.Unlock()

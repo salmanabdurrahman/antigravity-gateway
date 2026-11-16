@@ -16,13 +16,26 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 )
 
+// CredentialSourceLocalDesktop marks accounts whose credential was imported from a running
+// Antigravity desktop session instead of an OAuth PKCE login. Such accounts hold a short-lived
+// bearer access token that Google's token endpoint cannot exchange for a new one.
+const CredentialSourceLocalDesktop = "local_desktop"
+
 // Account represents a configured Google Antigravity account with associated credentials and companion project.
 type Account struct {
 	// Email is the primary Google user email address associated with this account.
 	Email string `json:"email"`
 
 	// RefreshToken is the long-lived OAuth refresh token used to mint fresh access tokens.
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+
+	// AccessToken holds a short-lived Bearer token imported from a desktop session. It is kept
+	// separate from RefreshToken because it cannot be exchanged at the OAuth token endpoint.
+	AccessToken string `json:"access_token,omitempty"`
+
+	// CredentialSource records how the credentials were obtained (empty for OAuth PKCE logins,
+	// CredentialSourceLocalDesktop for imported desktop sessions).
+	CredentialSource string `json:"credential_source,omitempty"`
 
 	// ProjectID is the Google Cloud Code companion project identifier hosting quota resources.
 	ProjectID string `json:"project_id"`
@@ -37,19 +50,41 @@ type Account struct {
 	LastError string `json:"last_error,omitempty"`
 }
 
+// HasCredentials reports whether the account holds at least one usable credential: an OAuth refresh
+// token or an imported desktop access token.
+func (a *Account) HasCredentials() bool {
+	if a == nil {
+		return false
+	}
+	return strings.TrimSpace(a.RefreshToken) != "" || strings.TrimSpace(a.AccessToken) != ""
+}
+
+// IsLocalDesktopSession reports whether the account credentials came from a local desktop import,
+// which can never be refreshed and must be re-imported once the bearer token expires.
+func (a *Account) IsLocalDesktopSession() bool {
+	return a != nil && a.CredentialSource == CredentialSourceLocalDesktop
+}
+
 // String returns a redacted representation of Account to prevent token leakage in logs.
 func (a *Account) String() string {
 	if a == nil {
 		return "<nil>"
 	}
-	refMasked := "<empty>"
-	if len(a.RefreshToken) > 8 {
-		refMasked = a.RefreshToken[:4] + "..." + a.RefreshToken[len(a.RefreshToken)-4:]
-	} else if a.RefreshToken != "" {
-		refMasked = "***"
+	return fmt.Sprintf("Account{Email:%s, ProjectID:%s, RefreshToken:%s, AccessToken:%s, Source:%s, Disabled:%t, AddedAt:%s}",
+		a.Email, a.ProjectID, maskSecret(a.RefreshToken), maskSecret(a.AccessToken), a.CredentialSource, a.Disabled, a.AddedAt)
+}
+
+// maskSecret renders a credential with only its first and last four characters, so logs and error
+// messages can identify a token without leaking it.
+func maskSecret(secret string) string {
+	switch {
+	case secret == "":
+		return "<empty>"
+	case len(secret) > 8:
+		return secret[:4] + "..." + secret[len(secret)-4:]
+	default:
+		return "***"
 	}
-	return fmt.Sprintf("Account{Email:%s, ProjectID:%s, RefreshToken:%s, Disabled:%t, AddedAt:%s}",
-		a.Email, a.ProjectID, refMasked, a.Disabled, a.AddedAt)
 }
 
 // accountsFilePayload defines the JSON file structure used to persist accounts to disk.
@@ -109,7 +144,7 @@ func (s *Store) loadUnlocked() ([]*Account, error) {
 	// Filter valid accounts
 	var valid []*Account
 	for _, acc := range payload.Accounts {
-		if acc == nil || strings.TrimSpace(acc.Email) == "" || strings.TrimSpace(acc.RefreshToken) == "" {
+		if acc == nil || strings.TrimSpace(acc.Email) == "" || !acc.HasCredentials() {
 			continue
 		}
 		valid = append(valid, acc)

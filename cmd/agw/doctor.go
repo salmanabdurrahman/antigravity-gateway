@@ -366,8 +366,12 @@ func checkAccounts() []CheckItem {
 	}
 
 	usable := 0
+	localSessions := 0
 	for _, a := range accounts {
-		if !a.Disabled && a.RefreshToken != "" && a.ProjectID != "" {
+		if a.IsLocalDesktopSession() {
+			localSessions++
+		}
+		if !a.Disabled && a.HasCredentials() && a.ProjectID != "" {
 			usable++
 		}
 	}
@@ -386,15 +390,28 @@ func checkAccounts() []CheckItem {
 		if disabledCount > 0 {
 			msg += fmt.Sprintf(" (%d disabled)", disabledCount)
 		}
+		if localSessions > 0 {
+			msg += fmt.Sprintf(" · %d imported desktop session(s) expire without refresh", localSessions)
+		}
 		items = append(items, CheckItem{
 			Category: "Account Pool",
 			Name:     "Google Accounts",
 			Status:   StatusOK,
 			Message:  msg,
+			Hint:     localSessionHint(localSessions),
 		})
 	}
 
 	return items
+}
+
+// localSessionHint returns the re-import guidance shown when imported desktop sessions are present,
+// since those credentials carry no refresh token and cannot be renewed by the gateway.
+func localSessionHint(localSessions int) string {
+	if localSessions == 0 {
+		return ""
+	}
+	return "Imported desktop tokens cannot be refreshed: re-run 'agw login --local' after they expire"
 }
 
 // checkConnectivity tests outbound network reachability to Google OAuth and Cloud Code Assist endpoints.

@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind failures now name the process holding the port and point at `agw stop`, and starting a second daemon reports the running instance and its version.
 - `agw start` probes the configured port before spawning, so an orphaned daemon is reported and its `agw.pid` restored instead of launching a process that cannot bind.
 - Socket table lookups used for daemon discovery are bounded by a timeout and their `lsof`/`netstat` output parsing is unit tested on every platform.
+- Imported desktop sessions store their bearer token in a dedicated `access_token` field with `credential_source: local_desktop`, so it is never sent to the OAuth token endpoint as a refresh token.
+- Accounts without a refresh token resolve their token through `auth.AccessTokenFor`, and an expired desktop session reports an actionable re-import message instead of a misleading OAuth failure.
+- `agw accounts` and `agw doctor` surface imported desktop sessions and remind operators to re-run `agw login --local` once the token expires.
+- Hot reload compares both credential kinds, so re-importing a desktop session replaces the stale bearer token in a running daemon.
+- Credential database discovery only executes `sqlite3` from absolute trusted paths, never from `PATH`.
+- Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
+- Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
 [Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0

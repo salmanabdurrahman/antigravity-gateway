@@ -2,6 +2,7 @@
 package rotator_test
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -222,5 +223,106 @@ func TestPoolDisableAccount(t *testing.T) {
 	}
 	if len(reloaded) != 1 || !reloaded[0].Disabled {
 		t.Fatalf("expected store account to have disabled=true")
+	}
+}
+
+// TestAccountStateTokenLocalDesktopSession verifies that an account imported from a desktop session
+// returns its bearer token directly without contacting the OAuth token endpoint, and that an account
+// without any usable credential reports the actionable re-import error.
+func TestAccountStateTokenLocalDesktopSession(t *testing.T) {
+	cfg := config.DefaultConfig()
+	// Unroutable token endpoint: any refresh attempt would fail this test.
+	cfg.TokenURL = "http://127.0.0.1:1/token"
+
+	state := rotator.NewAccountState(&auth.Account{
+		Email:            "desktop@example.com",
+		AccessToken:      "desktop-token-123",
+		CredentialSource: auth.CredentialSourceLocalDesktop,
+		ProjectID:        "proj-desktop",
+		AddedAt:          time.Now().UTC().Format(time.RFC3339),
+	})
+
+	token, err := state.Token(t.Context(), cfg, time.Now)
+	if err != nil {
+		t.Fatalf("Token() for local desktop session returned error: %v", err)
+	}
+	if token != "desktop-token-123" {
+		t.Errorf("expected imported bearer token, got masked %q", token[:4]+"...")
+	}
+
+	empty := rotator.NewAccountState(&auth.Account{Email: "empty@example.com", ProjectID: "proj-empty"})
+	if _, err := empty.Token(t.Context(), cfg, time.Now); !errors.Is(err, auth.ErrLocalSessionExpired) {
+		t.Errorf("expected ErrLocalSessionExpired for credential-less account, got %v", err)
+	}
+}
+
+// TestAccountStateUsableRequiresCredentials verifies that accounts without any stored credential are
+// reported as unusable so the rotator never dispatches requests that must fail authentication.
+func TestAccountStateUsableRequiresCredentials(t *testing.T) {
+	withRefresh := rotator.NewAccountState(newTestAccount("with-refresh@example.com"))
+	if !withRefresh.Usable() {
+		t.Error("expected account with refresh token to be usable")
+	}
+
+	local := rotator.NewAccountState(&auth.Account{Email: "local@example.com", AccessToken: "token", ProjectID: "proj"})
+	if !local.Usable() {
+		t.Error("expected imported desktop session to be usable")
+	}
+
+	credentialLess := rotator.NewAccountState(&auth.Account{Email: "empty@example.com", ProjectID: "proj"})
+	if credentialLess.Usable() {
+		t.Error("expected account without credentials to be unusable")
+	}
+}
+
+// TestPoolRefreshUpdatesImportedDesktopToken verifies that hot reloading accounts replaces a state
+// whose imported desktop bearer token changed, instead of keeping the stale credential in rotation.
+func TestPoolRefreshUpdatesImportedDesktopToken(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "accounts.json")
+	store := auth.NewStore(storePath)
+
+	seed := &auth.Account{
+		Email:            "desktop@example.com",
+		AccessToken:      "old-token",
+		CredentialSource: auth.CredentialSourceLocalDesktop,
+		ProjectID:        "proj-desktop",
+		AddedAt:          time.Now().UTC().Format(time.RFC3339),
+	}
+	if _, err := store.Upsert(seed); err != nil {
+		t.Fatalf("seeding account: %v", err)
+	}
+
+	pool, err := rotator.NewPool(store, config.DefaultConfig(), time.Now)
+	if err != nil {
+		t.Fatalf("NewPool failed: %v", err)
+	}
+
+	// Simulate `agw login --local` re-importing a fresh desktop session.
+	refreshed := *seed
+	refreshed.AccessToken = "new-token"
+	if _, err := store.Upsert(&refreshed); err != nil {
+		t.Fatalf("updating account: %v", err)
+	}
+
+	// Bypass the file check throttle so the reload is observed immediately.
+	time.Sleep(rotator.FileCheckInterval + 100*time.Millisecond)
+	if err := pool.RefreshIfChanged(); err != nil {
+		t.Fatalf("RefreshIfChanged failed: %v", err)
+	}
+
+	states := pool.States()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 state, got %d", len(states))
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.TokenURL = "http://127.0.0.1:1/token"
+	token, err := states[0].Token(t.Context(), cfg, time.Now)
+	if err != nil {
+		t.Fatalf("Token() failed: %v", err)
+	}
+	if token != "new-token" {
+		t.Errorf("expected re-imported token to be served, got masked %q", token[:3]+"...")
 	}
 }

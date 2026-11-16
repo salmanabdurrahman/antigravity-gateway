@@ -122,7 +122,34 @@ func ExchangeCode(ctx context.Context, cfg *config.Config, code string, verifier
 	return executeTokenRequest(ctx, cfg, data)
 }
 
+// ErrLocalSessionExpired reports that an account imported from a local desktop session holds no
+// usable bearer token and cannot mint a new one, because desktop sessions do not expose a refresh
+// token. The operator has to re-import the running session.
+var ErrLocalSessionExpired = errors.New("imported desktop session credentials expired: run 'agw login --local' again while the Antigravity IDE is signed in")
+
+// AccessTokenFor returns a usable Bearer token for the given account. OAuth accounts mint a fresh
+// access token from their stored refresh token, while accounts imported from a desktop session
+// return their short-lived bearer token verbatim: Google's token endpoint cannot exchange it, so a
+// refresh attempt would only produce a misleading OAuth failure.
+func AccessTokenFor(ctx context.Context, cfg *config.Config, acc *Account) (*TokenResult, error) {
+	if acc == nil {
+		return nil, errors.New("cannot resolve access token for nil account")
+	}
+
+	if refreshToken := strings.TrimSpace(acc.RefreshToken); refreshToken != "" {
+		return RefreshAccessToken(ctx, cfg, refreshToken)
+	}
+
+	if accessToken := strings.TrimSpace(acc.AccessToken); accessToken != "" {
+		return &TokenResult{AccessToken: accessToken}, nil
+	}
+
+	return nil, fmt.Errorf("%w: account %s", ErrLocalSessionExpired, acc.Email)
+}
+
 // RefreshAccessToken requests a new access token from Google using the given refresh token.
+// Callers holding an Account should prefer AccessTokenFor, which also handles accounts imported
+// from a desktop session that have no refresh token at all.
 func RefreshAccessToken(ctx context.Context, cfg *config.Config, refreshToken string) (*TokenResult, error) {
 	if refreshToken == "" {
 		return nil, errors.New("refresh token cannot be empty")

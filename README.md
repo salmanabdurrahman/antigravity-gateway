@@ -167,6 +167,16 @@ agw login --no-browser
 
 _(If port binding fails or browser redirect does not hit the loopback server, paste the final redirect URL into the terminal prompt to complete authentication)_
 
+#### Import a Local Desktop Session
+
+Reuse the session already signed in to the Antigravity IDE instead of running a browser OAuth flow:
+
+```bash
+agw login --local
+```
+
+The command reads `antigravityAuthStatus` from the IDE SQLite state database (`state.vscdb`) or the IDE's local listener on port `9092`, whichever is reachable. Desktop sessions expose only a short-lived bearer token, so the import is stored separately from OAuth refresh tokens (`access_token` plus `credential_source: local_desktop`) and is never sent to the OAuth token endpoint. When that token expires, requests start returning `401`; re-run `agw login --local` while the IDE is signed in. `agw doctor` reports imported sessions and reminds you to re-import. If an account with the same email already holds an OAuth refresh token, the import is skipped so refreshable credentials are never downgraded to a short-lived token.
+
 #### List Accounts
 
 Inspect configured accounts and their linked Cloud Code companion projects:

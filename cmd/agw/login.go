@@ -66,8 +66,14 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("importing local Antigravity session: %w", err)
 		}
+		if acc.RefreshToken != "" && !acc.IsLocalDesktopSession() {
+			cmd.Printf("Account %s is already authenticated via OAuth; keeping refreshable credentials and skipping the desktop import.\n", acc.Email)
+			return nil
+		}
 		cmd.Printf("✓ Successfully imported local Antigravity account: %s\n", acc.Email)
 		cmd.Printf("  Companion Project ID: %s\n", acc.ProjectID)
+		cmd.Println("  Credential: desktop session bearer token (no refresh token issued)")
+		cmd.Println("  Re-run 'agw login --local' when the token expires and requests start returning 401.")
 		cmd.Println("\nRun 'agw accounts' to view stored accounts.")
 		return nil
 	}

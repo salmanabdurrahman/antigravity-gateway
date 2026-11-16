@@ -108,13 +108,16 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 		if cfgErr != nil {
 			status = "Error (config)"
 		} else {
-			tokenRes, refreshErr := auth.RefreshAccessToken(ctx, cfg, acc.RefreshToken)
+			tokenRes, refreshErr := auth.AccessTokenFor(ctx, cfg, acc)
 			if refreshErr != nil {
 				var oauthErr *auth.OAuthError
-				if errors.As(refreshErr, &oauthErr) && oauthErr.InvalidGrant {
+				switch {
+				case errors.Is(refreshErr, auth.ErrLocalSessionExpired):
+					status = "Local session expired (run 'agw login --local')"
+				case errors.As(refreshErr, &oauthErr) && oauthErr.InvalidGrant:
 					_ = accountStore.SetDisabled(acc.Email, true, "refresh token revoked")
 					status = "Disabled (refresh token revoked)"
-				} else {
+				default:
 					status = "Error (refresh failed)"
 				}
 			} else {

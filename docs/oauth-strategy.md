@@ -71,13 +71,16 @@ The gateway requests the following 5 OAuth scopes during authentication:
 1. **Authorization Code Exchange**: Exchanged against `https://oauth2.googleapis.com/token` using the code verifier generated in Step 2.
 2. **Offline Access**: Requests `access_type=offline` and `prompt=consent` during login to ensure a durable `refresh_token` is issued.
 3. **Proactive Refresh Engine**: Tokens within 120 seconds of expiration are proactively refreshed before dispatching upstream requests.
-4. **Credential Storage Isolation**:
+4. **Desktop Session Import**: `agw login --local` can reuse the session already signed in to the Antigravity IDE. Desktop sessions expose a short-lived bearer token but no `refresh_token`, so the credential is stored as `access_token` with `credential_source: local_desktop` and is never sent to the token endpoint as a refresh grant. Accounts without a refresh token resolve their bearer token directly, and an expired import reports an actionable re-import message. Re-importing never downgrades an account that already holds a refresh token.
+5. **Credential Storage Isolation**:
    - Stored in `~/.agw/accounts.json` with strict POSIX `0600` permissions (`-rw-------`).
    - Atomic rename pattern (`temp file` -> `flush` -> `rename`) prevents corrupted state.
-5. **Zero Secret Leakage**:
+   - The SQLite credential database is only read by an absolute-path `sqlite3` binary, never one resolved through `PATH`.
+6. **Zero Secret Leakage**:
    - Access tokens, refresh tokens, and client secrets implement string redaction (`fmt.Stringer`).
    - Logging never outputs raw authorization headers or bearer credentials.
    - Status commands (`agw accounts`) mask tokens and display only email, project ID, and status.
+   - Imported payloads are validated (length, control characters) and error messages report only the reason, never the token value.
 
 ## 6. Pre-Distribution Requirements
 
