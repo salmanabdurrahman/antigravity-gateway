@@ -42,7 +42,22 @@ For details on packaging, filesystem layout, upgrade flow, and uninstallation, s
 
 ## Installation & Build
 
-### Download Pre-built Release & Verify Checksums
+### One-Liner Install (Recommended)
+
+Install the pre-compiled, checksum-verified binary directly to your local user directory without manual cloning:
+
+```bash
+# macOS & Linux (curl)
+curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh
+
+# macOS & Linux (pinned version)
+curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1 | iex
+```
+
+### Manual Download Pre-built Release & Verify Checksums
 
 Pre-compiled standalone binaries for macOS, Linux, and Windows are available for each release. Every release provides a companion `SHA256SUMS` file for cryptographic integrity verification.
 
@@ -70,11 +85,12 @@ Pre-compiled standalone binaries for macOS, Linux, and Windows are available for
    mv agw ~/.local/bin/
    ```
 
-Alternatively, use the automated checksum-verifying installer script:
+Alternatively, invoke the local automated installer script:
 
 ```bash
 # Downloads binary and SHA256SUMS, verifies digest, and installs to ~/.local/bin
-./scripts/install.sh --version 0.1.0
+./scripts/install.sh
+./scripts/install.sh 0.1.0
 ```
 
 For Windows PowerShell verification, unattended installs, and system installation paths, see the [Binary Installation Contract](docs/distribution.md).

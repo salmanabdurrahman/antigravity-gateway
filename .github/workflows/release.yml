@@ -12,7 +12,7 @@ on:
         default: 'v0.1.0'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-release:
@@ -34,6 +34,10 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.version }}"
           fi
+          case "$TAG" in
+            v*) ;;
+            *)  TAG="v${TAG}" ;;
+          esac
           ./scripts/build-release.sh "$TAG"
 
       - name: Verify checksum integrity
@@ -47,3 +51,20 @@ jobs:
           name: release-artifacts
           path: dist/
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          fi
+          case "$TAG" in
+            v*) ;;
+            *)  TAG="v${TAG}" ;;
+          esac
+          gh release create "${TAG}" dist/* \
+            --title "Release ${TAG}" \
+            --generate-notes

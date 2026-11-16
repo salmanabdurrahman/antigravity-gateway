@@ -18,13 +18,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# 1. Test missing --version fails with non-zero exit code
-echo "[test 1] missing --version requirement"
-if "$INSTALLER" >/dev/null 2>&1; then
-    echo "FAIL: Expected installer to fail without --version flag" >&2
+# 1. Test missing/unresolvable version fails with non-zero exit code
+echo "[test 1] unresolvable release fails safely"
+if "$INSTALLER" --repo "nonexistent-owner/nonexistent-repo-agw-test" >/dev/null 2>&1; then
+    echo "FAIL: Expected installer to fail when repository releases cannot be resolved" >&2
     exit 1
 fi
-echo "PASS: missing --version rejected"
+echo "PASS: unresolvable release rejected"
 
 # 2. Build mock release archive and SHA256SUMS in a local directory
 MOCK_DIST="${TMP_TEST_DIR}/mock-dist"
@@ -59,11 +59,11 @@ else
     (cd "$MOCK_DIST" && shasum -a 256 "$MOCK_ARCHIVE_NAME" > SHA256SUMS)
 fi
 
-# 3. Test valid local installation via --dist-url
-echo "[test 2] valid installation with verified checksum"
+# 3. Test valid local installation via positional argument and --dist-url
+echo "[test 2] valid installation with positional version and verified checksum"
 TEST_INSTALL_DIR="${TMP_TEST_DIR}/bin"
 "$INSTALLER" \
-    --version "$MOCK_VERSION" \
+    "$MOCK_VERSION" \
     --dist-url "$MOCK_DIST" \
     --install-dir "$TEST_INSTALL_DIR"
 
@@ -138,5 +138,41 @@ if "$INSTALLER" \
     exit 1
 fi
 echo "PASS: missing SHA256SUMS entry safely rejected"
+
+# 8. Test CRLF line endings in SHA256SUMS
+echo "[test 7] CRLF line endings in SHA256SUMS handled properly"
+CRLF_DIST="${TMP_TEST_DIR}/crlf-dist"
+mkdir -p "$CRLF_DIST"
+awk '{printf "%s\r\n", $0}' "${MOCK_DIST}/SHA256SUMS" > "${CRLF_DIST}/SHA256SUMS"
+cp "${MOCK_DIST}/${MOCK_ARCHIVE_NAME}" "$CRLF_DIST/"
+
+CRLF_INSTALL_DIR="${TMP_TEST_DIR}/bin-crlf"
+"$INSTALLER" \
+    "$MOCK_VERSION" \
+    --dist-url "$CRLF_DIST" \
+    --install-dir "$CRLF_INSTALL_DIR"
+if [ ! -x "${CRLF_INSTALL_DIR}/agw" ]; then
+    echo "FAIL: Installation with CRLF SHA256SUMS failed" >&2
+    exit 1
+fi
+echo "PASS: CRLF line endings in SHA256SUMS handled successfully"
+
+# 9. Test pipe execution from stdin (simulates curl ... | sh -s -- <args>)
+echo "[test 8] stdin piped execution (curl | sh -s --)"
+PIPE_INSTALL_DIR="${TMP_TEST_DIR}/bin-pipe"
+cat "$INSTALLER" | sh -s -- \
+    "$MOCK_VERSION" \
+    --dist-url "$MOCK_DIST" \
+    --install-dir "$PIPE_INSTALL_DIR"
+if [ ! -x "${PIPE_INSTALL_DIR}/agw" ]; then
+    echo "FAIL: Piped stdin installation failed" >&2
+    exit 1
+fi
+OUTPUT="$("${PIPE_INSTALL_DIR}/agw")"
+if [ "$OUTPUT" != "agw version 9.9.9-mock" ]; then
+    echo "FAIL: Piped binary execution output mismatch: $OUTPUT" >&2
+    exit 1
+fi
+echo "PASS: stdin piped execution succeeded"
 
 echo "=== All Installer Tests Passed Successfully ==="

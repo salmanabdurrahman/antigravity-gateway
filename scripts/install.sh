@@ -3,10 +3,12 @@
 # Checksum-verifying, architecture-detecting, user-local installer for Antigravity Gateway (agw).
 #
 # Usage:
-#   ./scripts/install.sh --version <version> [--install-dir <dir>] [--repo <owner/repo>] [--force]
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/antigravity-gateway/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
+#   ./scripts/install.sh [vX.Y.Z] [--version <version>] [--install-dir <dir>] [--repo <owner/repo>] [--force]
 #
 # Invariants:
-#   - Explicit version required (no unpinned 'latest' / silent tag updates).
+#   - Pinned semantic version or automatic latest release resolution.
 #   - Validates platform (OS/Arch) before fetching.
 #   - Fetches and verifies SHA-256 checksums from companion SHA256SUMS file before extracting.
 #   - Installs to user-local directory (default: ~/.local/bin) without requiring root/sudo.
@@ -27,12 +29,14 @@ usage() {
 Antigravity Gateway (agw) Installer
 
 Usage:
+  install.sh [version] [options]
   install.sh --version <vX.Y.Z|X.Y.Z> [options]
 
-Required:
-  --version <version>       Exact semantic version to install (e.g. 0.1.0 or v0.1.0)
+Arguments:
+  version                   Semantic version to install (optional, defaults to latest release)
 
 Options:
+  --version <version>       Exact semantic version to install (e.g. 0.1.0 or v0.1.0)
   --install-dir <path>      Directory to place the agw binary (default: ~/.local/bin or \$AGW_INSTALL_DIR)
   --repo <owner/repo>       GitHub repository hosting releases (default: salmanabdurrahman/antigravity-gateway)
   --dist-url <url_or_dir>   Custom base URL or local directory containing release archives and SHA256SUMS
@@ -93,17 +97,95 @@ while [ $# -gt 0 ]; do
     -h|--help)
       usage 0
       ;;
-    *)
+    -*)
       echo "Error: Unknown argument: $1" >&2
       usage 1
+      ;;
+    *)
+      if [ -z "$VERSION" ]; then
+        VERSION="$1"
+        shift
+      else
+        echo "Error: Unexpected argument: $1" >&2
+        usage 1
+      fi
       ;;
   esac
 done
 
-if [ -z "$VERSION" ]; then
-  echo "Error: Explicit version is required. Unpinned 'latest' is forbidden." >&2
-  echo "Specify --version <version> (e.g. --version 0.1.0)." >&2
+# 1. Check downloader utility early
+DOWNLOADER=""
+if command -v curl >/dev/null 2>&1; then
+  DOWNLOADER="curl"
+elif command -v wget >/dev/null 2>&1; then
+  DOWNLOADER="wget"
+elif [ -z "$CUSTOM_DIST_URL" ] || [ ! -d "$CUSTOM_DIST_URL" ]; then
+  echo "Error: Neither 'curl' nor 'wget' is available for downloading release artifacts." >&2
   exit 1
+fi
+
+download_file() {
+  _src="$1"
+  _dst="$2"
+
+  # Support local directory or file:// URL
+  case "$_src" in
+    file://*)
+      _local_path="${_src#file://}"
+      cp "$_local_path" "$_dst"
+      return 0
+      ;;
+    *)
+      if [ -f "$_src" ]; then
+        cp "$_src" "$_dst"
+        return 0
+      fi
+      ;;
+  esac
+
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL --retry 2 "$_src" -o "$_dst"
+  elif [ "$DOWNLOADER" = "wget" ]; then
+    wget -q --tries=2 "$_src" -O "$_dst"
+  else
+    echo "Error: No utility to fetch $_src" >&2
+    return 1
+  fi
+}
+
+# 2. Resolve version (if not specified, auto-detect latest release)
+if [ -z "$VERSION" ]; then
+  echo "--> No version specified. Resolving latest release for ${REPO}..."
+  TAG_NAME=""
+
+  # Try HTTP redirect resolution first (immune to unauthenticated GitHub API rate limits)
+  if [ "$DOWNLOADER" = "curl" ]; then
+    LATEST_REDIRECT="$(curl -fsSLI -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+    if [ -n "$LATEST_REDIRECT" ]; then
+      CANDIDATE="${LATEST_REDIRECT##*/}"
+      if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "latest" ]; then
+        TAG_NAME="$CANDIDATE"
+      fi
+    fi
+  fi
+
+  # Fallback to GitHub REST API if redirect did not resolve to a tag
+  if [ -z "$TAG_NAME" ]; then
+    if [ "$DOWNLOADER" = "curl" ]; then
+      TAG_NAME="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+    elif [ "$DOWNLOADER" = "wget" ]; then
+      TAG_NAME="$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+    fi
+  fi
+
+  if [ -n "$TAG_NAME" ] && [ "$TAG_NAME" != "latest" ]; then
+    VERSION="$TAG_NAME"
+    echo "--> Detected latest release: ${VERSION}"
+  else
+    echo "Error: Could not determine latest release version for ${REPO}." >&2
+    echo "Specify version explicitly: --version <version> (e.g. --version 0.1.0)." >&2
+    exit 1
+  fi
 fi
 
 # Clean version (strip leading 'v' if present)
@@ -161,46 +243,6 @@ if [ -f "$TARGET_BIN" ] && [ "$FORCE" -ne 1 ]; then
   exit 1
 fi
 
-# 4. Check downloader utility
-DOWNLOADER=""
-if command -v curl >/dev/null 2>&1; then
-  DOWNLOADER="curl"
-elif command -v wget >/dev/null 2>&1; then
-  DOWNLOADER="wget"
-elif [ -z "$CUSTOM_DIST_URL" ] || [ ! -d "$CUSTOM_DIST_URL" ]; then
-  echo "Error: Neither 'curl' nor 'wget' is available for downloading release artifacts." >&2
-  exit 1
-fi
-
-download_file() {
-  _src="$1"
-  _dst="$2"
-
-  # Support local directory or file:// URL
-  case "$_src" in
-    file://*)
-      _local_path="${_src#file://}"
-      cp "$_local_path" "$_dst"
-      return 0
-      ;;
-    *)
-      if [ -f "$_src" ]; then
-        cp "$_src" "$_dst"
-        return 0
-      fi
-      ;;
-  esac
-
-  if [ "$DOWNLOADER" = "curl" ]; then
-    curl -fsSL --retry 2 "$_src" -o "$_dst"
-  elif [ "$DOWNLOADER" = "wget" ]; then
-    wget -q --tries=2 "$_src" -O "$_dst"
-  else
-    echo "Error: No utility to fetch $_src" >&2
-    return 1
-  fi
-}
-
 # 5. Check SHA-256 utility
 compute_sha256() {
   _file="$1"
@@ -218,6 +260,7 @@ compute_sha256() {
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'agw-install')"
 cleanup() {
   rm -rf "$TMP_DIR"
+  rm -f "${TARGET_BIN}.tmp.$$" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -243,10 +286,10 @@ if ! download_file "$CHECKSUMS_URL" "$CHECKSUMS_PATH"; then
   exit 1
 fi
 
-EXPECTED_HASH="$(grep " ${ARCHIVE_NAME}\$" "$CHECKSUMS_PATH" | awk '{print $1}' | head -n1 || true)"
+EXPECTED_HASH="$(tr -d '\r' < "$CHECKSUMS_PATH" | awk -v arch="$ARCHIVE_NAME" '$2 == arch || $2 == "*"arch {print $1}' | head -n1 || true)"
 if [ -z "$EXPECTED_HASH" ]; then
-  # Try matching without leading space or tab
-  EXPECTED_HASH="$(awk -v arch="$ARCHIVE_NAME" '$2 == arch {print $1}' "$CHECKSUMS_PATH" | head -n1 || true)"
+  # Fallback matching with grep
+  EXPECTED_HASH="$(tr -d '\r' < "$CHECKSUMS_PATH" | grep " ${ARCHIVE_NAME}\$" | awk '{print $1}' | head -n1 || true)"
 fi
 
 if [ -z "$EXPECTED_HASH" ]; then

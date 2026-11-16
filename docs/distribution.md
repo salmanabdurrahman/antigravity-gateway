@@ -95,19 +95,43 @@ make release
 
 ## 3. Automated Checksum-Verifying Installer
 
-Antigravity Gateway provides a checksum-verifying, architecture-detecting installer script (`scripts/install.sh`) that installs released binaries to the user-local bin directory (`~/.local/bin`) without requiring elevated/root privileges.
+Antigravity Gateway provides checksum-verifying, architecture-detecting installer scripts for POSIX systems (`scripts/install.sh`) and Windows PowerShell (`scripts/install.ps1`) that install released binaries to user-local directories without requiring elevated/root privileges.
 
 ### Security & Invariants
 
-- **Explicit Version Enforced**: Unpinned `latest` downloads are strictly rejected to ensure reproducible, auditable installations.
 - **Cryptographic Verification**: The installer downloads the release archive and companion `SHA256SUMS`, calculates the local SHA-256 digest, and halts immediately if checksums do not match.
-- **Unmanaged Binary Protection**: The installer will not overwrite an existing binary unless `--force` is explicitly provided.
-- **Zero Elevated Privileges**: Installs to user-local directory (`~/.local/bin` by default), preventing unwanted mutation of system directories.
+- **Unmanaged Binary Protection**: The installer will not overwrite an existing binary unless `--force` (or `-Force`) is explicitly provided.
+- **Zero Elevated Privileges**: Installs to user-local directory (`~/.local/bin` on POSIX, `%LOCALAPPDATA%\Programs\agw` on Windows by default), preventing unwanted mutation of system directories.
+- **Flexible Versioning**: Supports automatic resolution of the latest GitHub release or explicit pinned semantic versions (`vX.Y.Z`).
 
-### Usage
+### Quick Start (One-Liner Install)
+
+#### macOS & Linux (curl / sh)
 
 ```bash
-# Download and install a specific pinned release version
+# Install latest release
+curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh
+
+# Install a specific pinned release version
+curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
+```
+
+#### Windows (PowerShell)
+
+```powershell
+# Install latest release
+irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1 | iex
+
+# Install a specific pinned release version
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1))) -Version "0.1.0"
+```
+
+### Local Script Options
+
+```bash
+# Install latest or pinned version via local script
+./scripts/install.sh
+./scripts/install.sh 0.1.0
 ./scripts/install.sh --version 0.1.0
 
 # Install to a custom directory
