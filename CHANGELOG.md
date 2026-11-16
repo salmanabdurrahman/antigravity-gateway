@@ -40,5 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automated CI verification workflows, Git pre-commit hooks, and cross-platform release packaging matrix (`make release`).
 - Open-source governance including MIT license (`LICENSE`), security policy (`SECURITY.md`), contributing guide (`CONTRIBUTING.md`), code of conduct (`CODE_OF_CONDUCT.md`), and GitHub issue/PR templates.
 
+### Fixed
+
+- WebUI strategy switching now re-reads `config.json` and rewrites only the `strategy` field, so a stale in-memory configuration can no longer overwrite the stored API key, port, endpoints, or model mapping.
+- Gateway API key format validated at daemon startup and by `agw doctor`, warning when the stored key no longer matches the `agw_` prefix plus 64 hexadecimal characters that clients were configured with.
+- `agw doctor` flags configured clients (Pi, OpenCode, Claude Code) whose stored API key differs from `config.json`, surfacing the root cause of unexpected HTTP 401 responses.
+- Daemon startup logs the active configuration file path so operators can confirm which `config.json` the reverse proxy actually loaded.
+
 [Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0

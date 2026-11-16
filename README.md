@@ -252,7 +252,7 @@ Launch your default browser to open the embedded zero-dependency dashboard hoste
 agw ui
 ```
 
-Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching.
+Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of `config.json`, leaving every other stored setting untouched.
 
 ### Client Configuration & Agent Setup
 
@@ -316,10 +316,10 @@ agw doctor
 Audits and reports:
 
 1. **Network Ports**: Verifies gateway port (`51400`) and OAuth callback port (`51121`).
-2. **File System Permissions**: Confirms `0700` directory and `0600` credential file security.
+2. **File System Permissions**: Confirms `0700` directory and `0600` credential file security, and validates that the stored gateway API key still matches the generated `agw_` format.
 3. **Account Pool**: Validates configured Google accounts, refresh tokens, and companion project IDs.
 4. **Upstream Connectivity**: Tests TLS reachability and latency to Google OAuth (`oauth2.googleapis.com`) and Cloud Code PA (`cloudcode-pa.googleapis.com`).
-5. **Client Integrations**: Checks whether Pi Coding Agent and OpenCode configurations are installed and configured.
+5. **Client Integrations**: Checks whether Pi Coding Agent, OpenCode, and Claude Code configurations are installed, configured, and carrying the same gateway API key as `config.json`.
 
 ### HTTP API Endpoints
 
@@ -368,6 +368,8 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 | `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings                                  | `0600`           |
 | `~/.agw/models-cache.json` | Cached model catalog and token limits                                                        | `0600`           |
 | `~/.agw/agw.pid`           | Background daemon process ID                                                                 | `0600`           |
+
+`config.json` is the single source of truth for gateway settings. Runtime mutations rewrite only the field being changed after re-reading the file first, so a running daemon never persists stale or partial state over your API key, endpoints, or model mapping. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
 
 ### Environment Overrides
 

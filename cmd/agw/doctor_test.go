@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,5 +47,90 @@ func TestDoctorCommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "[Account Pool]") {
 		t.Errorf("expected Account Pool section, got: %s", out)
+	}
+}
+
+// TestDoctorReportsInvalidAPIKey verifies that doctor flags a stored gateway key whose shape no
+// longer matches the generated format, without echoing the key value into the report.
+func TestDoctorReportsInvalidAPIKey(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	cfg := config.DefaultConfig()
+	cfg.APIKey = "test-gateway-key-999"
+	if err := config.Save(filepath.Join(tempHome, "config.json"), cfg); err != nil {
+		t.Fatalf("seeding config file: %v", err)
+	}
+
+	buf := new(bytes.Buffer)
+	doctorCmd.SetOut(buf)
+	doctorCmd.SetErr(buf)
+	_ = doctorCmd.RunE(doctorCmd, []string{})
+
+	out := buf.String()
+	if !strings.Contains(out, "Gateway API Key") {
+		t.Errorf("expected Gateway API Key diagnostic, got: %s", out)
+	}
+	if !strings.Contains(out, "does not match the generated format") {
+		t.Errorf("expected invalid key warning, got: %s", out)
+	}
+	if strings.Contains(out, "test-gateway-key-999") {
+		t.Errorf("doctor must never render the raw API key, got: %s", out)
+	}
+}
+
+// TestDoctorDetectsClientKeyMismatch verifies that doctor warns when a configured client stores a
+// different gateway key than config.json, which is the direct cause of HTTP 401 responses.
+func TestDoctorDetectsClientKeyMismatch(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	gatewayKey, err := config.GenerateAPIKey()
+	if err != nil {
+		t.Fatalf("generating gateway key: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.APIKey = gatewayKey
+	if err := config.Save(filepath.Join(tempHome, "config.json"), cfg); err != nil {
+		t.Fatalf("seeding config file: %v", err)
+	}
+
+	piDir := t.TempDir()
+	t.Setenv("PI_AGENT_DIR", piDir)
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	opencodePath := filepath.Join(t.TempDir(), "opencode.json")
+	t.Setenv("OPENCODE_CONFIG", opencodePath)
+
+	staleKey := "agw_" + strings.Repeat("b", config.APIKeyHexLen)
+	mustWriteFile(t, filepath.Join(piDir, "models.json"), `{"providers":{"antigravity":{"apiKey":"`+staleKey+`"}}}`)
+	mustWriteFile(t, opencodePath, `{"providers":{"antigravity":{"options":{"apiKey":"`+staleKey+`"}}}}`)
+	mustWriteFile(t, filepath.Join(claudeDir, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:51400","ANTHROPIC_AUTH_TOKEN":"`+staleKey+`"}}`)
+
+	buf := new(bytes.Buffer)
+	doctorCmd.SetOut(buf)
+	doctorCmd.SetErr(buf)
+	_ = doctorCmd.RunE(doctorCmd, []string{})
+
+	out := buf.String()
+	for _, clientName := range []string{"Pi Coding Agent", "OpenCode CLI", "Claude Code CLI"} {
+		if !strings.Contains(out, clientName) {
+			t.Fatalf("expected %s diagnostic in output, got: %s", clientName, out)
+		}
+	}
+	if got := strings.Count(out, "differs from config.json"); got < 2 {
+		t.Errorf("expected mismatch warnings for each configured client, found %d: %s", got, out)
+	}
+	if strings.Contains(out, staleKey) || strings.Contains(out, gatewayKey) {
+		t.Errorf("doctor must never render raw API keys, got: %s", out)
+	}
+}
+
+// mustWriteFile writes fixture content to path, failing the test when the write cannot complete.
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("writing fixture %s: %v", path, err)
 	}
 }

@@ -266,12 +266,12 @@ func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.rotator.SetStrategy(strat)
-	s.cfg.Strategy = string(strat)
 
-	// Persist best-effort: the in-memory strategy is already active, so a write failure
-	// only affects the next daemon restart and must not fail the UI request.
+	// Persist best-effort: the in-memory strategy is already active, so a write failure only
+	// affects the next daemon restart and must not fail the UI request. Only the strategy field
+	// is written back; the config file on disk remains the source of truth for every other value.
 	if cfgPath, err := config.ConfigFilePath(); err == nil {
-		if saveErr := config.Save(cfgPath, s.cfg); saveErr != nil {
+		if saveErr := config.SaveStrategy(cfgPath, string(strat)); saveErr != nil {
 			s.logger.Warn("failed persisting strategy to config file", "error", saveErr)
 		}
 	}

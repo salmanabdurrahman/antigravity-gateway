@@ -2,6 +2,8 @@
 package config
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,5 +175,165 @@ func TestSaveNilConfigFails(t *testing.T) {
 
 	if err := Save(configPath, nil); err == nil {
 		t.Error("expected Save(path, nil) to return error, got nil")
+	}
+}
+
+// TestValidateAPIKey verifies the gateway API key format validator accepts keys produced by
+// GenerateAPIKey and rejects empty, foreign, truncated, and non-hexadecimal keys. The rejected
+// error must stay generic so the secret value is never echoed back to callers or logs.
+func TestValidateAPIKey(t *testing.T) {
+	validKey, err := GenerateAPIKey()
+	if err != nil {
+		t.Fatalf("GenerateAPIKey() error: %v", err)
+	}
+	if err := ValidateAPIKey(validKey); err != nil {
+		t.Fatalf("ValidateAPIKey(generated) returned error: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		key  string
+	}{
+		{"empty", ""},
+		{"missing prefix", strings.Repeat("a", APIKeyHexLen)},
+		{"foreign prefix", "sk-" + strings.Repeat("a", APIKeyHexLen)},
+		{"truncated", validKey[:len(validKey)-1]},
+		{"non hexadecimal", APIKeyPrefix + strings.Repeat("z", APIKeyHexLen)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verr := ValidateAPIKey(tc.key)
+			if verr == nil {
+				t.Fatalf("expected error for %s key, got nil", tc.name)
+			}
+			if !errors.Is(verr, ErrInvalidAPIKey) {
+				t.Errorf("expected error wrapping ErrInvalidAPIKey, got %v", verr)
+			}
+			if tc.key != "" && strings.Contains(verr.Error(), tc.key) {
+				t.Errorf("validation error leaked the raw key value: %v", verr)
+			}
+		})
+	}
+}
+
+// TestSaveStrategyPreservesUnrelatedFields verifies that persisting a new rotation strategy only
+// rewrites the strategy field: port, API key, endpoints, custom headers, and model mapping stored
+// on disk must survive untouched, guarding against whole-config overwrites by stale processes.
+func TestSaveStrategyPreservesUnrelatedFields(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	original := DefaultConfig()
+	original.Port = 59999
+	original.APIKey = APIKeyPrefix + strings.Repeat("a", APIKeyHexLen)
+	original.Endpoints = []string{"https://example.invalid/upstream"}
+	original.UserAgent = "custom-agent/1.0"
+	original.ModelMapping = map[string]string{"custom-model": "gemini-4-argon-high"}
+
+	if err := Save(configPath, original); err != nil {
+		t.Fatalf("Save() returned error: %v", err)
+	}
+
+	if err := SaveStrategy(configPath, "hybrid"); err != nil {
+		t.Fatalf("SaveStrategy() returned error: %v", err)
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+
+	if loaded.Strategy != "hybrid" {
+		t.Errorf("Strategy = %q, expected 'hybrid'", loaded.Strategy)
+	}
+	if loaded.Port != 59999 {
+		t.Errorf("Port = %d, expected 59999", loaded.Port)
+	}
+	if loaded.APIKey != original.APIKey {
+		t.Errorf("APIKey = %q, expected the on-disk key to be preserved", loaded.APIKey)
+	}
+	if len(loaded.Endpoints) != 1 || loaded.Endpoints[0] != "https://example.invalid/upstream" {
+		t.Errorf("Endpoints = %v, expected the on-disk endpoints to be preserved", loaded.Endpoints)
+	}
+	if loaded.UserAgent != "custom-agent/1.0" {
+		t.Errorf("UserAgent = %q, expected 'custom-agent/1.0'", loaded.UserAgent)
+	}
+	if got := loaded.ResolveModel("custom-model"); got != "gemini-4-argon-high" {
+		t.Errorf("ResolveModel('custom-model') = %q, expected 'gemini-4-argon-high'", got)
+	}
+
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("os.Stat() failed: %v", err)
+	}
+	if info.Mode().Perm() != FilePerm {
+		t.Errorf("expected permissions %o, got %o", FilePerm, info.Mode().Perm())
+	}
+}
+
+// TestSaveStrategyPreservesUnknownFields verifies that persisting a strategy leaves JSON keys this
+// binary does not model untouched, so configuration written by a newer agw release is never
+// silently dropped by a running daemon.
+func TestSaveStrategyPreservesUnknownFields(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+
+	seeded := `{
+  "strategy": "sticky",
+  "api_key": "agw_` + strings.Repeat("a", APIKeyHexLen) + `",
+  "future_feature": {"enabled": true, "weight": 0.5},
+  "future_list": ["alpha", "beta"]
+}`
+	if err := os.WriteFile(configPath, []byte(seeded), FilePerm); err != nil {
+		t.Fatalf("seeding config file: %v", err)
+	}
+
+	if err := SaveStrategy(configPath, "hybrid"); err != nil {
+		t.Fatalf("SaveStrategy() returned error: %v", err)
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading persisted config: %v", err)
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("parsing persisted config: %v", err)
+	}
+	if got := string(fields["strategy"]); got != `"hybrid"` {
+		t.Errorf("persisted strategy = %s, expected \"hybrid\"", got)
+	}
+	if _, ok := fields["future_feature"]; !ok {
+		t.Error("expected unknown key future_feature to survive strategy persistence")
+	}
+	if _, ok := fields["future_list"]; !ok {
+		t.Error("expected unknown key future_list to survive strategy persistence")
+	}
+
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() after SaveStrategy returned error: %v", err)
+	}
+	if loaded.Strategy != "hybrid" {
+		t.Errorf("Strategy = %q, expected 'hybrid'", loaded.Strategy)
+	}
+}
+
+// TestSaveStrategyMissingFileFails verifies that SaveStrategy refuses to create a configuration
+// file from scratch, since doing so would mint a new API key and invalidate configured clients.
+func TestSaveStrategyMissingFileFails(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "missing", "config.json")
+
+	err := SaveStrategy(configPath, "hybrid")
+	if err == nil {
+		t.Fatal("expected SaveStrategy() on absent file to return error, got nil")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected error wrapping os.ErrNotExist, got %v", err)
+	}
+	if _, statErr := os.Stat(configPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("expected config file to remain absent, stat error: %v", statErr)
 	}
 }

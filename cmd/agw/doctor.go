@@ -86,6 +86,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// 2. Filesystem Permissions Diagnostics
 	results = append(results, checkPermissions()...)
+	results = append(results, checkAPIKey(cfg)...)
 
 	// 3. Accounts Diagnostics
 	results = append(results, checkAccounts()...)
@@ -94,7 +95,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	results = append(results, checkConnectivity(ctx)...)
 
 	// 5. Client Integrations
-	results = append(results, checkClientIntegrations()...)
+	results = append(results, checkClientIntegrations(cfg)...)
 
 	// Render diagnostics report
 	hasFailures := false
@@ -439,8 +440,39 @@ func checkConnectivity(ctx context.Context) []CheckItem {
 	return items
 }
 
-// checkClientIntegrations audits configuration files for Pi Coding Agent and OpenCode.
-func checkClientIntegrations() []CheckItem {
+// checkAPIKey verifies that the configured gateway API key still follows the generated format.
+// The key value is never rendered: only its shape is reported, so a stale, truncated, or
+// foreign key can be spotted before clients start failing with HTTP 401.
+func checkAPIKey(cfg *config.Config) []CheckItem {
+	if err := config.ValidateAPIKey(cfg.APIKey); err != nil {
+		return []CheckItem{{
+			Category: "File System & Security",
+			Name:     "Gateway API Key",
+			Status:   StatusWarn,
+			Message:  fmt.Sprintf("Stored key does not match the generated format (%v)", err),
+			Hint:     "Restore the original key or regenerate it, then re-run 'agw setup pi' to resynchronize clients",
+		}}
+	}
+
+	return []CheckItem{{
+		Category: "File System & Security",
+		Name:     "Gateway API Key",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("Valid generated format (%d hexadecimal characters)", config.APIKeyHexLen),
+	}}
+}
+
+// clientKeyMismatch reports whether a client stores a bearer key that differs from the gateway key.
+// A mismatch is the direct cause of "401 Invalid API key" responses seen from an otherwise
+// correctly configured agent, so doctor surfaces it without ever printing either key.
+func clientKeyMismatch(clientKey, gatewayKey string) bool {
+	return clientKey != "" && gatewayKey != "" && clientKey != gatewayKey
+}
+
+// checkClientIntegrations audits Pi Coding Agent, OpenCode, and Claude Code configuration files,
+// reporting both whether the gateway provider is configured and whether the stored client key
+// still matches the gateway key in config.json.
+func checkClientIntegrations(cfg *config.Config) []CheckItem {
 	var items []CheckItem
 
 	// Check Pi Coding Agent configuration
@@ -452,13 +484,28 @@ func checkClientIntegrations() []CheckItem {
 				Providers map[string]any `json:"providers"`
 			}
 			if parseErr := json.Unmarshal(raw, &parsed); parseErr == nil {
-				if _, ok := parsed.Providers[client.DefaultProviderID]; ok {
-					items = append(items, CheckItem{
-						Category: "Client Integrations",
-						Name:     "Pi Coding Agent",
-						Status:   StatusOK,
-						Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
-					})
+				if provider, ok := parsed.Providers[client.DefaultProviderID]; ok {
+					key := ""
+					if fields, isMap := provider.(map[string]any); isMap {
+						key, _ = fields["apiKey"].(string)
+					}
+
+					if clientKeyMismatch(key, cfg.APIKey) {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "Pi Coding Agent",
+							Status:   StatusWarn,
+							Message:  "Configured but its API key differs from config.json",
+							Hint:     "Run 'agw setup pi' to resynchronize the gateway key",
+						})
+					} else {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "Pi Coding Agent",
+							Status:   StatusOK,
+							Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
+						})
+					}
 				} else {
 					items = append(items, CheckItem{
 						Category: "Client Integrations",
@@ -488,13 +535,30 @@ func checkClientIntegrations() []CheckItem {
 				Providers map[string]any `json:"providers"`
 			}
 			if parseErr := json.Unmarshal(raw, &parsed); parseErr == nil {
-				if _, ok := parsed.Providers[client.DefaultProviderID]; ok {
-					items = append(items, CheckItem{
-						Category: "Client Integrations",
-						Name:     "OpenCode CLI",
-						Status:   StatusOK,
-						Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
-					})
+				if provider, ok := parsed.Providers[client.DefaultProviderID]; ok {
+					key := ""
+					if fields, isMap := provider.(map[string]any); isMap {
+						if options, isOptions := fields["options"].(map[string]any); isOptions {
+							key, _ = options["apiKey"].(string)
+						}
+					}
+
+					if clientKeyMismatch(key, cfg.APIKey) {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "OpenCode CLI",
+							Status:   StatusWarn,
+							Message:  "Configured but its API key differs from config.json",
+							Hint:     "Run 'agw setup opencode' to resynchronize the gateway key",
+						})
+					} else {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "OpenCode CLI",
+							Status:   StatusOK,
+							Message:  fmt.Sprintf("Configured with %q provider", client.DefaultProviderID),
+						})
+					}
 				} else {
 					items = append(items, CheckItem{
 						Category: "Client Integrations",
@@ -525,12 +589,23 @@ func checkClientIntegrations() []CheckItem {
 			}
 			if parseErr := json.Unmarshal(raw, &parsed); parseErr == nil {
 				if baseURL, ok := parsed.Env["ANTHROPIC_BASE_URL"].(string); ok && baseURL != "" {
-					items = append(items, CheckItem{
-						Category: "Client Integrations",
-						Name:     "Claude Code CLI",
-						Status:   StatusOK,
-						Message:  fmt.Sprintf("Configured with ANTHROPIC_BASE_URL=%s", baseURL),
-					})
+					token, _ := parsed.Env["ANTHROPIC_AUTH_TOKEN"].(string)
+					if clientKeyMismatch(token, cfg.APIKey) {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "Claude Code CLI",
+							Status:   StatusWarn,
+							Message:  "Configured but ANTHROPIC_AUTH_TOKEN differs from config.json",
+							Hint:     "Run 'agw setup claude' to resynchronize the gateway key",
+						})
+					} else {
+						items = append(items, CheckItem{
+							Category: "Client Integrations",
+							Name:     "Claude Code CLI",
+							Status:   StatusOK,
+							Message:  fmt.Sprintf("Configured with ANTHROPIC_BASE_URL=%s", baseURL),
+						})
+					}
 				} else {
 					items = append(items, CheckItem{
 						Category: "Client Integrations",

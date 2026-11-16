@@ -148,6 +148,17 @@ func (s *Server) Addr() string {
 func (s *Server) Start() error {
 	s.logger.Info("starting gateway server", "addr", s.Addr(), "version", config.Version)
 
+	// Surface the active configuration file and any API-key shape anomaly before serving: a key
+	// that does not match the generated format makes every client request fail with HTTP 401,
+	// which is hard to diagnose from the client side alone.
+	if cfgPath, err := config.ConfigFilePath(); err == nil {
+		s.logger.Info("active configuration file", "path", cfgPath, "strategy", s.rotator.Strategy())
+	}
+	if err := config.ValidateAPIKey(s.cfg.APIKey); err != nil {
+		s.logger.Warn("gateway api key is not in the generated format; clients holding a different key will receive HTTP 401",
+			"reason", err, "hint", "run 'agw setup <client>' with the key stored in config.json")
+	}
+
 	s.mu.RLock()
 	ln := s.listener
 	s.mu.RUnlock()

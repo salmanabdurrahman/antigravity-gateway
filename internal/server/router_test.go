@@ -742,6 +742,20 @@ func TestUIEndpoints(t *testing.T) {
 	}
 
 	// 4. POST /ui/api/strategy updates active strategy
+	// Seed a config file on disk whose values intentionally differ from the in-memory harness
+	// config, so the assertion below proves the handler never overwrites the file with process state.
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	diskCfg := config.DefaultConfig()
+	diskCfg.Port = 52400
+	diskCfg.APIKey = config.APIKeyPrefix + strings.Repeat("a", config.APIKeyHexLen)
+	diskCfg.UserAgent = "disk-agent/1.0"
+	if err := config.Save(cfgPath, diskCfg); err != nil {
+		t.Fatalf("seeding config file: %v", err)
+	}
+
 	reqStrat := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "hybrid"}`))
 	reqStrat.Header.Set("Content-Type", "application/json")
 	recStrat := httptest.NewRecorder()
@@ -752,6 +766,23 @@ func TestUIEndpoints(t *testing.T) {
 	}
 	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
 		t.Errorf("expected strategy updated to hybrid, got %s", harness.server.rotator.Strategy())
+	}
+
+	persisted, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reloading persisted config: %v", err)
+	}
+	if persisted.Strategy != string(rotator.StrategyHybrid) {
+		t.Errorf("persisted strategy = %q, expected %q", persisted.Strategy, rotator.StrategyHybrid)
+	}
+	if persisted.Port != 52400 {
+		t.Errorf("persisted port = %d, expected the on-disk value 52400", persisted.Port)
+	}
+	if persisted.APIKey != diskCfg.APIKey {
+		t.Errorf("persisted api_key was replaced by the in-memory key")
+	}
+	if persisted.UserAgent != "disk-agent/1.0" {
+		t.Errorf("persisted user_agent = %q, expected 'disk-agent/1.0'", persisted.UserAgent)
 	}
 
 	// 5. POST /ui/api/strategy rejects unsupported strategy names

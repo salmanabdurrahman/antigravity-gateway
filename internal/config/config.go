@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // Version defines the current semantic version of the gateway application.
@@ -48,7 +49,14 @@ const (
 
 	// APIKeyPrefix defines the human-readable prefix used for generated local gateway API keys.
 	APIKeyPrefix = "agw_"
+
+	// APIKeyHexLen defines the number of hexadecimal characters following APIKeyPrefix in a generated key.
+	APIKeyHexLen = 64
 )
+
+// ErrInvalidAPIKey indicates that a gateway API key does not match the locally generated format
+// (APIKeyPrefix followed by APIKeyHexLen lowercase hexadecimal characters).
+var ErrInvalidAPIKey = errors.New("gateway API key does not match the generated format")
 
 // DefaultEndpoints returns the default ordered list of Google Cloud Code Assist upstream endpoints.
 func DefaultEndpoints() []string {
@@ -129,11 +137,35 @@ func DefaultConfig() *Config {
 
 // GenerateAPIKey generates a cryptographically random local gateway Bearer API key.
 func GenerateAPIKey() (string, error) {
-	raw := make([]byte, 32)
+	raw := make([]byte, APIKeyHexLen/2)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generating random bytes for API key: %w", err)
 	}
 	return APIKeyPrefix + hex.EncodeToString(raw), nil
+}
+
+// ValidateAPIKey verifies that key follows the format produced by GenerateAPIKey, so operators
+// can detect truncated, hand-edited, or foreign keys before clients start receiving HTTP 401.
+// The key value itself is never echoed back in the returned error.
+func ValidateAPIKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("%w: key is empty", ErrInvalidAPIKey)
+	}
+
+	suffix, ok := strings.CutPrefix(key, APIKeyPrefix)
+	if !ok {
+		return fmt.Errorf("%w: missing %q prefix", ErrInvalidAPIKey, APIKeyPrefix)
+	}
+	if len(suffix) != APIKeyHexLen {
+		return fmt.Errorf("%w: expected %d hexadecimal characters, got %d", ErrInvalidAPIKey, APIKeyHexLen, len(suffix))
+	}
+	if _, err := hex.DecodeString(suffix); err != nil {
+		// The suffix is deliberately not echoed: it is the secret itself, and a partially valid key
+		// would otherwise be partially printed in logs and diagnostic reports.
+		return fmt.Errorf("%w: suffix contains non-hexadecimal characters", ErrInvalidAPIKey)
+	}
+
+	return nil
 }
 
 // Load reads and parses the JSON configuration from the given file path.
@@ -190,15 +222,46 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// SaveStrategy persists only the account rotation strategy into the configuration file at path.
+// The file itself is the source of truth: it is read straight from disk and only the strategy key
+// is replaced inside the raw JSON object, so values held by a long-running process (or a stale
+// in-memory configuration) can never leak into the persisted file, and fields written by a newer
+// agw release survive untouched. A missing configuration file is reported as an error instead of
+// silently creating a new file with a freshly generated API key.
+func SaveStrategy(path, strategy string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading config file %s before persisting strategy: %w", path, err)
+	}
+
+	fields := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return fmt.Errorf("parsing config json from %s before persisting strategy: %w", path, err)
+	}
+
+	encoded, err := json.Marshal(strategy)
+	if err != nil {
+		return fmt.Errorf("encoding strategy %q: %w", strategy, err)
+	}
+	fields["strategy"] = encoded
+
+	data, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling configuration for %s: %w", path, err)
+	}
+	data = append(data, '\n')
+
+	if err := writeFileAtomic(path, data); err != nil {
+		return fmt.Errorf("writing strategy %q to %s: %w", strategy, path, err)
+	}
+
+	return nil
+}
+
 // Save writes the given configuration atomically to the destination path with POSIX 0600 permissions.
 func Save(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("cannot save nil configuration")
-	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, DirPerm); err != nil {
-		return fmt.Errorf("ensuring directory %s exists: %w", dir, err)
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -206,6 +269,18 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("marshaling configuration: %w", err)
 	}
 	data = append(data, '\n')
+
+	return writeFileAtomic(path, data)
+}
+
+// writeFileAtomic replaces path with data using a temporary file in the same directory, so an
+// interrupted write can never truncate or corrupt the destination. The temporary file is chmodded
+// to 0600 before any payload is written and flushed before the rename.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, DirPerm); err != nil {
+		return fmt.Errorf("ensuring directory %s exists: %w", dir, err)
+	}
 
 	tempFile, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
