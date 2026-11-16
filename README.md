@@ -1,5 +1,10 @@
 # Antigravity Gateway (`agw`)
 
+[![CI](https://github.com/salmanabdurrahman/antigravity-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/salmanabdurrahman/antigravity-gateway/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/go-1.24%2B-00ADD8?logo=go&logoColor=white)](https://golang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/salmanabdurrahman/antigravity-gateway?color=brightgreen)](https://github.com/salmanabdurrahman/antigravity-gateway/releases)
+
 Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy and CLI daemon. It connects modern AI coding agents (such as Pi Coding Agent, OpenCode, and Cursor) to personal Google Antigravity / Google AI subscriptions over a local OpenAI-compatible HTTP interface (`http://127.0.0.1:51400/v1`).
 
 ## Key Features
@@ -457,6 +462,12 @@ While drawing inspiration from these predecessors, `agw` introduces significant 
 - **Lossless Thought Signature Protocol**: Retains authentic reasoning signatures across multi-turn tool invocations, ensuring coding agents (Pi, OpenCode, Cursor) never encounter upstream HTTP 400 schema rejections.
 - **Transactional Client Injector**: Single-command automated configuration (`agw setup pi`, `agw setup opencode`) with timestamped atomic backups and live completion verification probes.
 
+## Contributing
+
+Contributions, bug reports, and feature requests are welcome! Please review our [Contributing Guidelines](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting pull requests.
+
+If you discover a security vulnerability, please follow our responsible disclosure instructions in [SECURITY.md](SECURITY.md).
+
 ## License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

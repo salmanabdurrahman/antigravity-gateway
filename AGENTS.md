@@ -171,6 +171,7 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 | `scripts/`            | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer |
 | `Makefile`            | Standard task runner                              | Canonical build, format, test, and verification commands                   |
 | `.agents/skills/`     | Project-scoped skill definitions                  | Read-only; consult `use-modern-go` before writing Go                       |
+| `LICENSE` / `*.md`    | Open source governance, security, and guidance    | Standard MIT license, security policy (`SECURITY.md`), contributor guide   |
 
 ## 6. Request Workflow
 

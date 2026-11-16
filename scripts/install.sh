@@ -3,8 +3,8 @@
 # Checksum-verifying, architecture-detecting, user-local installer for Antigravity Gateway (agw).
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/antigravity-gateway/main/scripts/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
 #   ./scripts/install.sh [vX.Y.Z] [--version <version>] [--install-dir <dir>] [--repo <owner/repo>] [--force]
 #
 # Invariants:
