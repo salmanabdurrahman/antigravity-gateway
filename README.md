@@ -244,6 +244,16 @@ Terminate the running background daemon gracefully via SIGTERM:
 agw stop
 ```
 
+### Web Management Dashboard
+
+Launch your default browser to open the embedded zero-dependency dashboard hosted by the running gateway daemon:
+
+```bash
+agw ui
+```
+
+Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching.
+
 ### Client Configuration & Agent Setup
 
 Antigravity Gateway automatically configures AI coding agents to use the local reverse proxy as an OpenAI-compatible provider. Before modifying existing configurations, `agw` creates a timestamped atomic backup (`*.bak-<timestamp>`) and performs a 1-token test chat completion probe to verify end-to-end connectivity.
@@ -352,12 +362,12 @@ The gateway transparently translates between OpenAI Chat Completions requests an
 
 The gateway configuration directory defaults to `~/.agw` and can be overridden via the `AGW_HOME` environment variable.
 
-| File                       | Purpose                                                      | File Permissions |
-| :------------------------- | :----------------------------------------------------------- | :--------------- |
+| File                       | Purpose                                                                                      | File Permissions |
+| :------------------------- | :------------------------------------------------------------------------------------------- | :--------------- |
 | `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy, quota threshold, model mapping | `0600`           |
-| `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings  | `0600`           |
-| `~/.agw/models-cache.json` | Cached model catalog and token limits                        | `0600`           |
-| `~/.agw/agw.pid`           | Background daemon process ID                                 | `0600`           |
+| `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings                                  | `0600`           |
+| `~/.agw/models-cache.json` | Cached model catalog and token limits                                                        | `0600`           |
+| `~/.agw/agw.pid`           | Background daemon process ID                                                                 | `0600`           |
 
 ### Environment Overrides
 

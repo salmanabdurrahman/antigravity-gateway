@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,5 +101,47 @@ func TestAccountsAndLogoutCommands(t *testing.T) {
 	}
 	if !strings.Contains(logoutBuf.String(), "Account not found: nonexistent@example.com") {
 		t.Errorf("expected not found message, got %s", logoutBuf.String())
+	}
+}
+
+// TestLoginLocalCommand verifies importing local desktop session via agw login --local.
+func TestLoginLocalCommand(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	dbPath := filepath.Join(tempHome, "state.vscdb")
+	t.Setenv("ANTIGRAVITY_DB_PATH", dbPath)
+
+	jsonPayload := `{"apiKey":"desktop-token-123","email":"desktop@example.com","name":"Desktop User"}`
+	data := append([]byte("prefix_antigravityAuthStatus_pad"), []byte(jsonPayload)...)
+	if err := os.WriteFile(dbPath, data, 0o600); err != nil {
+		t.Fatalf("writing mock db: %v", err)
+	}
+
+	buf := new(bytes.Buffer)
+	loginCmd.SetOut(buf)
+	loginCmd.SetErr(buf)
+
+	localImport = true
+	defer func() { localImport = false }()
+
+	if err := loginCmd.RunE(loginCmd, []string{}); err != nil {
+		t.Fatalf("login --local failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Successfully imported local Antigravity account: desktop@example.com") {
+		t.Errorf("unexpected output: %s", out)
+	}
+
+	// Verify account saved in accounts.json
+	accPath, _ := config.AccountsFilePath()
+	store := auth.NewStore(accPath)
+	accounts, err := store.Load()
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("expected 1 imported account, got %d (err: %v)", len(accounts), err)
+	}
+	if accounts[0].Email != "desktop@example.com" {
+		t.Errorf("expected desktop@example.com, got %s", accounts[0].Email)
 	}
 }

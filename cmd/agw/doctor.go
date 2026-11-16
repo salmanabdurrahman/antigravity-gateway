@@ -350,12 +350,16 @@ func checkAccounts() []CheckItem {
 	}
 
 	if len(accounts) == 0 {
+		hint := "Add accounts using 'agw login'"
+		if sess, detectErr := auth.DetectLocalSession(context.Background()); detectErr == nil && sess != nil {
+			hint = fmt.Sprintf("Local Antigravity session found for %s! Run 'agw login --local' to import", sess.Email)
+		}
 		items = append(items, CheckItem{
 			Category: "Account Pool",
 			Name:     "Google Accounts",
 			Status:   StatusWarn,
 			Message:  "0 accounts configured",
-			Hint:     "Add accounts using 'agw login'",
+			Hint:     hint,
 		})
 		return items
 	}

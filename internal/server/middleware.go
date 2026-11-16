@@ -91,9 +91,9 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Public liveness probe endpoints require no API key
+			// Public liveness probe and local WebUI dashboard endpoints require no API key
 			path := strings.TrimRight(r.URL.Path, "/")
-			if path == "" || path == "/health" {
+			if path == "" || path == "/health" || path == "/ui" || strings.HasPrefix(path, "/ui/") {
 				next.ServeHTTP(w, r)
 				return
 			}

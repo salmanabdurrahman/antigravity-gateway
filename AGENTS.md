@@ -155,23 +155,24 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 
 ## 5. Repository Map & Boundaries
 
-| Path                    | Responsibility                                    | Invariants & Rules                                                                 |
-| :---------------------- | :------------------------------------------------ | :--------------------------------------------------------------------------------- |
-| `cmd/agw/`              | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages                      |
-| `docs/`                 | Architectural specifications & contracts          | OAuth strategy, binary distribution, and installation contracts                    |
-| `internal/config/`      | Config, paths, upstream headers                   | Handles `~/.agw` path resolution and env overrides                                 |
-| `internal/auth/`        | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                    |
-| `internal/rotator/`     | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                         |
-| `internal/catalog/`     | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                 |
-| `internal/translate/`   | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                              |
-| `internal/server/`      | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth middleware                       |
-| `internal/client/`      | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs           |
-| `.github/`              | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); zero secrets in logs          |
-| `.githooks/`            | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests               |
-| `scripts/`              | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer         |
-| `Makefile`              | Standard task runner                              | Canonical build, format, test, and verification commands                           |
-| `.agents/skills/`       | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases         |
-| `CHANGELOG.md` / `*.md` | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide |
+| Path                     | Responsibility                                    | Invariants & Rules                                                                 |
+| :----------------------- | :------------------------------------------------ | :--------------------------------------------------------------------------------- |
+| `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages                      |
+| `docs/`                  | Architectural specifications & contracts          | OAuth strategy, binary distribution, and installation contracts                    |
+| `internal/config/`       | Config, paths, upstream headers                   | Handles `~/.agw` path resolution and env overrides                                 |
+| `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                    |
+| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                         |
+| `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                 |
+| `internal/translate/`    | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                              |
+| `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth middleware                       |
+| `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; no external runtime assets                  |
+| `internal/client/`       | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs           |
+| `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); zero secrets in logs          |
+| `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests               |
+| `scripts/`               | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer         |
+| `Makefile`               | Standard task runner                              | Canonical build, format, test, and verification commands                           |
+| `.agents/skills/`        | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases         |
+| `CHANGELOG.md` / `*.md`  | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide |
 
 ## 6. Request Workflow
 

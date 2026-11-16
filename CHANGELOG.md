@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Embedded zero-dependency WebUI dashboard (`internal/server/webui`) served at `http://127.0.0.1:51400/ui` featuring real-time account health bars, token bucket status, quota monitors, and dynamic strategy switching.
+- Dedicated CLI command `agw ui` to inspect daemon status and open the web management dashboard in the default system browser.
+- Local desktop session auto-import via `agw login --local`, extracting active tokens from Antigravity IDE SQLite state databases (`state.vscdb`) or local listener port 9092.
+- Environment diagnostics auto-detection in `agw doctor` suggesting `agw login --local` when unimported desktop credentials exist.
 - Multi-strategy account load balancing introducing `hybrid` selection alongside `sticky` and `round-robin`, combining operational health scoring, token bucket burst rate limiting, quota threshold awareness, and LRU freshness.
 - Quota-aware protection with proactive account parking when remaining fractional quota drops below threshold (`quota_threshold`, default 5%).
 - Dynamic model aliasing and custom mapping (`model_mapping` in `config.json`) resolving friendly or codename IDs to upstream model identifiers.

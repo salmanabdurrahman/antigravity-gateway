@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Gateway Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-muted: #8b949e;
+      --text-bright: #f0f6fc;
+      --accent: #58a6ff;
+      --accent-hover: #1f6feb;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand h1 { font-size: 20px; font-weight: 600; color: var(--text-bright); }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 12px;
+      background: rgba(63, 185, 80, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(63, 185, 80, 0.4);
+    }
+    .badge.warn {
+      background: rgba(210, 153, 34, 0.15);
+      color: var(--warning);
+      border-color: rgba(210, 153, 34, 0.4);
+    }
+    .controls { display: flex; align-items: center; gap: 12px; }
+    select, button {
+      background: var(--card-bg);
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: var(--accent-hover);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    button.primary:hover { background: var(--accent); }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 24px; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
+    th { color: var(--text-muted); font-weight: 500; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    .progress-bar-bg {
+      width: 100%;
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--success);
+      border-radius: 3px;
+    }
+    .progress-bar-fill.low { background: var(--warning); }
+    .progress-bar-fill.critical { background: var(--danger); }
+    .code-box {
+      background: #090d13;
+      padding: 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: #79c0ff;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <h1>Antigravity Gateway</h1>
+        <span class="badge" id="status-badge">● Active</span>
+        <span style="color: var(--text-muted); font-size: 13px;" id="version-label">v0.1.0</span>
+      </div>
+      <div class="controls">
+        <label for="strategy-select" style="font-size: 13px; color: var(--text-muted);">Strategy:</label>
+        <select id="strategy-select">
+          <option value="hybrid">Hybrid (Smart Load Balance)</option>
+          <option value="sticky">Sticky (Prompt Cache)</option>
+          <option value="round-robin">Round-Robin (Sequential)</option>
+        </select>
+        <button class="primary" onclick="updateStrategy()">Save</button>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">
+          <span>Connected Google Accounts</span>
+          <span id="account-count" style="font-size: 13px; font-weight: normal; color: var(--text-muted);"></span>
+        </div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Project ID</th>
+                <th>Health</th>
+                <th>Status</th>
+                <th>Last Used</th>
+                <th>Cooldown</th>
+              </tr>
+            </thead>
+            <tbody id="accounts-body">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Loading accounts...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Available Models & Quota Remaining</div>
+        <div style="overflow-x: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Context</th>
+                <th>Max Output</th>
+                <th>Features</th>
+                <th style="width: 220px;">Remaining Quota</th>
+              </tr>
+            </thead>
+            <tbody id="models-body">
+              <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Loading model catalog...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Client Auto-Configuration Commands</div>
+        <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">Run these commands in your terminal to instantly connect local coding agents:</p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+          <div>
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px;">Claude Code CLI</div>
+            <div class="code-box">agw setup claude</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px;">Pi Coding Agent</div>
+            <div class="code-box">agw setup pi</div>
+          </div>
+          <div>
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px;">OpenCode</div>
+            <div class="code-box">agw setup opencode</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function loadData() {
+      try {
+        const res = await fetch('/ui/api/status');
+        if (!res.ok) throw new Error('status fetch failed');
+        const data = await res.json();
+
+        // Update header
+        document.getElementById('version-label').textContent = data.version ? `v${data.version}` : 'v0.1.0';
+        if (data.strategy) {
+          document.getElementById('strategy-select').value = data.strategy;
+        }
+
+        // Render accounts
+        const accs = data.accounts || [];
+        document.getElementById('account-count').textContent = `${accs.length} account(s)`;
+        const accBody = document.getElementById('accounts-body');
+        if (accs.length === 0) {
+          accBody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-muted);">No accounts configured yet. Run: <code>agw login</code></td></tr>';
+        } else {
+          accBody.innerHTML = accs.map(a => {
+            const health = a.health > 0 ? a.health : 100;
+            const healthColor = health >= 70 ? 'var(--success)' : (health >= 30 ? 'var(--warning)' : 'var(--danger)');
+            const statusBadge = a.disabled ? '<span class="badge warn">Disabled</span>' : '<span class="badge">Active</span>';
+            const cooldowns = a.cooldowns ? Object.keys(a.cooldowns).map(k => `${k}`).join(', ') : '-';
+            const lastUsed = a.last_used ? new Date(a.last_used).toLocaleTimeString() : '-';
+            return `
+              <tr>
+                <td style="font-weight: 500; color: var(--text-bright);">${escapeHtml(a.email)}</td>
+                <td><code>${escapeHtml(a.project_id || '-')}</code></td>
+                <td>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="color: ${healthColor}; font-weight: 600;">${Math.round(health)}%</span>
+                    <div class="progress-bar-bg" style="width: 60px;">
+                      <div class="progress-bar-fill" style="width: ${health}%; background: ${healthColor};"></div>
+                    </div>
+                  </div>
+                </td>
+                <td>${statusBadge}</td>
+                <td>${escapeHtml(lastUsed)}</td>
+                <td>${escapeHtml(cooldowns || '-')}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+        // Render models
+        const models = data.models || [];
+        const mBody = document.getElementById('models-body');
+        if (models.length === 0) {
+          mBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color: var(--text-muted);">Model catalog empty. Run: <code>agw models</code></td></tr>';
+        } else {
+          mBody.innerHTML = models.map(m => {
+            const q = data.quotas && data.quotas[m.id];
+            const frac = (q && q.remainingFraction !== undefined) ? Math.round(q.remainingFraction * 100) : 100;
+            const fracClass = frac <= 10 ? 'critical' : (frac <= 30 ? 'low' : '');
+            const features = [];
+            if (m.thinking) features.push('Thinking');
+            if (m.images) features.push('Multimodal');
+            return `
+              <tr>
+                <td style="font-weight: 500; color: var(--text-bright);">${escapeHtml(m.display_name || m.id)}</td>
+                <td>${m.context_window ? m.context_window.toLocaleString() : '-'}</td>
+                <td>${m.max_output_tokens ? m.max_output_tokens.toLocaleString() : '-'}</td>
+                <td><span style="font-size: 11px; color: var(--text-muted);">${features.join(' • ') || 'Chat'}</span></td>
+                <td>
+                  <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px;">
+                    <span>${frac}% remaining</span>
+                    <span>${q && q.resetTime ? 'Reset: ' + new Date(q.resetTime).toLocaleTimeString() : 'Ready'}</span>
+                  </div>
+                  <div class="progress-bar-bg">
+                    <div class="progress-bar-fill ${fracClass}" style="width: ${frac}%;"></div>
+                  </div>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function updateStrategy() {
+      const select = document.getElementById('strategy-select');
+      const val = select.value;
+      try {
+        const res = await fetch('/ui/api/strategy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ strategy: val })
+        });
+        if (res.ok) {
+          alert('Strategy updated to ' + val);
+          loadData();
+        } else {
+          alert('Failed updating strategy');
+        }
+      } catch (e) {
+        alert('Network error: ' + e.message);
+      }
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    loadData();
+    setInterval(loadData, 5000);
+  </script>
+</body>
+</html>

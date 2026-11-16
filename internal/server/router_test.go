@@ -37,6 +37,10 @@ func setupTestHarness(t *testing.T, upstreamHandler http.HandlerFunc) *testHarne
 	t.Helper()
 	tempDir := t.TempDir()
 
+	// Isolate config/account path resolution so handlers that persist settings never
+	// touch the operator's real ~/.agw directory.
+	t.Setenv(config.EnvHome, tempDir)
+
 	mockUpstream := httptest.NewServer(upstreamHandler)
 	t.Cleanup(mockUpstream.Close)
 
@@ -683,5 +687,97 @@ func TestModelMappingAliasInRouter(t *testing.T) {
 
 	if requestedModel != "gemini-4-argon-high" {
 		t.Errorf("expected mapped model gemini-4-argon-high, got %s", requestedModel)
+	}
+}
+
+// TestUIEndpoints verifies serving embedded WebUI dashboard HTML and API status/strategy endpoints.
+func TestUIEndpoints(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := harness.server.buildHandler()
+
+	// 1. GET /ui returns 200 HTML
+	reqUI := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	recUI := httptest.NewRecorder()
+	handler.ServeHTTP(recUI, reqUI)
+
+	if recUI.Code != http.StatusOK {
+		t.Fatalf("expected /ui status 200, got %d", recUI.Code)
+	}
+	if !strings.Contains(recUI.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html Content-Type, got %s", recUI.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(recUI.Body.String(), "Antigravity Gateway Dashboard") {
+		t.Errorf("expected dashboard title in HTML, got %s", recUI.Body.String())
+	}
+
+	// 2. GET / with Accept: text/html redirects to /ui
+	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqRoot.Header.Set("Accept", "text/html,application/xhtml+xml")
+	recRoot := httptest.NewRecorder()
+	handler.ServeHTTP(recRoot, reqRoot)
+
+	if recRoot.Code != http.StatusFound {
+		t.Fatalf("expected / to redirect with 302, got %d", recRoot.Code)
+	}
+	if loc := recRoot.Header().Get("Location"); loc != "/ui" {
+		t.Errorf("expected redirect Location /ui, got %s", loc)
+	}
+
+	// 3. GET /ui/api/status returns JSON status payload
+	reqStatus := httptest.NewRequest(http.MethodGet, "/ui/api/status", nil)
+	recStatus := httptest.NewRecorder()
+	handler.ServeHTTP(recStatus, reqStatus)
+
+	if recStatus.Code != http.StatusOK {
+		t.Fatalf("expected /ui/api/status 200, got %d", recStatus.Code)
+	}
+	var statusResp UIStatusResponse
+	if err := json.Unmarshal(recStatus.Body.Bytes(), &statusResp); err != nil {
+		t.Fatalf("unmarshaling status failed: %v", err)
+	}
+	if statusResp.Version != config.Version {
+		t.Errorf("expected version %s, got %s", config.Version, statusResp.Version)
+	}
+
+	// 4. POST /ui/api/strategy updates active strategy
+	reqStrat := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "hybrid"}`))
+	reqStrat.Header.Set("Content-Type", "application/json")
+	recStrat := httptest.NewRecorder()
+	handler.ServeHTTP(recStrat, reqStrat)
+
+	if recStrat.Code != http.StatusOK {
+		t.Fatalf("expected /ui/api/strategy 200, got %d: %s", recStrat.Code, recStrat.Body.String())
+	}
+	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
+		t.Errorf("expected strategy updated to hybrid, got %s", harness.server.rotator.Strategy())
+	}
+
+	// 5. POST /ui/api/strategy rejects unsupported strategy names
+	reqBad := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "random"}`))
+	reqBad.Header.Set("Content-Type", "application/json")
+	recBad := httptest.NewRecorder()
+	handler.ServeHTTP(recBad, reqBad)
+
+	if recBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsupported strategy, got %d", recBad.Code)
+	}
+	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
+		t.Errorf("strategy must remain hybrid after rejected update, got %s", harness.server.rotator.Strategy())
+	}
+
+	// 6. POST /ui/api/strategy rejects cross-origin mutations
+	reqCSRF := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "sticky"}`))
+	reqCSRF.Header.Set("Content-Type", "text/plain")
+	reqCSRF.Header.Set("Origin", "http://evil.example.com")
+	recCSRF := httptest.NewRecorder()
+	handler.ServeHTTP(recCSRF, reqCSRF)
+
+	if recCSRF.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin mutation, got %d", recCSRF.Code)
+	}
+	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
+		t.Errorf("strategy must remain hybrid after blocked cross-origin request, got %s", harness.server.rotator.Strategy())
 	}
 }

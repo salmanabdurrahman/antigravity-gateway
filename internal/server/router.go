@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/server/webui"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/translate"
 )
 
@@ -100,6 +103,10 @@ func (s *Server) buildHandler() http.Handler {
 
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /{$}", s.handleHealth)
+	mux.HandleFunc("GET /ui", s.handleUI)
+	mux.HandleFunc("GET /ui/", s.handleUI)
+	mux.HandleFunc("GET /ui/api/status", s.handleUIStatus)
+	mux.HandleFunc("POST /ui/api/strategy", s.handleUIStrategy)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
@@ -117,6 +124,11 @@ func (s *Server) buildHandler() http.Handler {
 
 // handleHealth answers liveness probes and reports gateway version and usable account counts.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if (r.URL.Path == "/" || r.URL.Path == "") && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, "/ui", http.StatusFound)
+		return
+	}
+
 	states := s.rotator.Pool().States()
 	usableCount := 0
 	for _, st := range states {
@@ -181,6 +193,90 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, AccountsResponse{
 		Accounts: snapshots,
 	})
+}
+
+// UIStatusResponse represents the comprehensive status payload consumed by the local WebUI dashboard.
+type UIStatusResponse struct {
+	// Version is the compiled gateway version.
+	Version string `json:"version"`
+
+	// Strategy is the currently active rotation strategy.
+	Strategy string `json:"strategy"`
+
+	// Accounts lists all registered account states.
+	Accounts []rotator.AccountSnapshot `json:"accounts"`
+
+	// Models lists available chat models.
+	Models []catalog.CatalogModel `json:"models"`
+
+	// Quotas maps model identifiers to their live remaining quota metrics.
+	Quotas map[string]catalog.ModelQuota `json:"quotas,omitempty"`
+}
+
+// UIStrategyRequest represents the incoming JSON payload to dynamically update the rotation strategy.
+type UIStrategyRequest struct {
+	// Strategy is the requested rotation strategy ("sticky", "round-robin", or "hybrid").
+	Strategy string `json:"strategy"`
+}
+
+// handleUI serves the embedded static WebUI dashboard HTML page.
+func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(webui.IndexHTML))
+}
+
+// handleUIStatus aggregates accounts, strategy, models, and quota metrics for the WebUI dashboard.
+func (s *Server) handleUIStatus(w http.ResponseWriter, r *http.Request) {
+	_ = s.catalog.Ensure(r.Context())
+	snap, _ := s.catalog.Snapshot()
+	snapshots := s.rotator.Pool().Snapshots()
+
+	sendJSON(w, http.StatusOK, UIStatusResponse{
+		Version:  config.Version,
+		Strategy: string(s.rotator.Strategy()),
+		Accounts: snapshots,
+		Models:   snap.Models,
+		Quotas:   snap.Quotas,
+	})
+}
+
+// handleUIStrategy updates the active account rotation strategy dynamically via the WebUI dashboard.
+func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
+	// Protocol Quirk: the dashboard is unauthenticated on loopback, so reject cross-site
+	// mutations that a malicious page could issue as a "simple" request without preflight.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if host, err := url.Parse(origin); err != nil || !strings.EqualFold(host.Host, r.Host) {
+			sendJSONError(w, http.StatusForbidden, "Cross-origin strategy mutation is not permitted.", 0)
+			return
+		}
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	var req UIStrategyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONError(w, http.StatusBadRequest, "Invalid JSON payload", 0)
+		return
+	}
+
+	strat := rotator.Strategy(req.Strategy)
+	if strat != rotator.StrategySticky && strat != rotator.StrategyRoundRobin && strat != rotator.StrategyHybrid {
+		sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported strategy %q: must be 'sticky', 'round-robin', or 'hybrid'", req.Strategy), 0)
+		return
+	}
+
+	s.rotator.SetStrategy(strat)
+	s.cfg.Strategy = string(strat)
+
+	// Persist best-effort: the in-memory strategy is already active, so a write failure
+	// only affects the next daemon restart and must not fail the UI request.
+	if cfgPath, err := config.ConfigFilePath(); err == nil {
+		if saveErr := config.Save(cfgPath, s.cfg); saveErr != nil {
+			s.logger.Warn("failed persisting strategy to config file", "error", saveErr)
+		}
+	}
+
+	sendJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleChatCompletions processes OpenAI chat completions requests, coordinating schema translation,

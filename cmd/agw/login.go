@@ -21,6 +21,9 @@ var (
 	// noBrowser prevents automatic opening of the system browser during OAuth PKCE login.
 	noBrowser bool
 
+	// localImport triggers auto-import from local Antigravity desktop installation.
+	localImport bool
+
 	// loginCmd initiates the browser-based Google OAuth PKCE authentication flow.
 	loginCmd = &cobra.Command{
 		Use:   "login",
@@ -34,6 +37,7 @@ associated Cloud Code companion project, and saves the account in ~/.agw/account
 
 func init() {
 	loginCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not attempt to open default browser automatically")
+	loginCmd.Flags().BoolVar(&localImport, "local", false, "Auto-import credentials from local Antigravity desktop installation")
 	rootCmd.AddCommand(loginCmd)
 }
 
@@ -50,6 +54,22 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
+	}
+
+	if localImport {
+		accPath, err := config.AccountsFilePath()
+		if err != nil {
+			return fmt.Errorf("resolving accounts file path: %w", err)
+		}
+		accountStore := auth.NewStore(accPath)
+		acc, err := auth.ImportLocalSession(cmd.Context(), cfg, accountStore)
+		if err != nil {
+			return fmt.Errorf("importing local Antigravity session: %w", err)
+		}
+		cmd.Printf("✓ Successfully imported local Antigravity account: %s\n", acc.Email)
+		cmd.Printf("  Companion Project ID: %s\n", acc.ProjectID)
+		cmd.Println("\nRun 'agw accounts' to view stored accounts.")
+		return nil
 	}
 
 	pkce, err := auth.GeneratePKCE()
