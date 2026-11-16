@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,18 @@ func TestStopCommandWhenNotRunning(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv(config.EnvHome, tempDir)
 
+	// Stop falls back to port discovery, so the isolated config must point at a reserved free port
+	// instead of the default 51400 owned by any gateway running on the operator machine.
+	cfg := config.DefaultConfig()
+	cfg.Port = getFreePort(t)
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
 	outBuf := new(bytes.Buffer)
 	errBuf := new(bytes.Buffer)
 
@@ -58,9 +71,9 @@ func TestStopCommandWhenNotRunning(t *testing.T) {
 	rootCmd.SetErr(errBuf)
 	rootCmd.SetArgs([]string{"stop"})
 
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("unexpected error running stop: %v", err)
+	execErr := rootCmd.Execute()
+	if execErr != nil {
+		t.Fatalf("unexpected error running stop: %v", execErr)
 	}
 
 	if !strings.Contains(outBuf.String(), "No running antigravity-gateway daemon found") {
@@ -137,7 +150,14 @@ func TestEndToEndDaemonLifecycle(t *testing.T) {
 		t.Errorf("unexpected health response: %+v", health)
 	}
 
-	// 4. Stop daemon
+	// 4. Starting a second detached daemon reports the running instance and version
+	if _, _, dupErr := server.StartDetached(cfg, []string{"--port", fmt.Sprintf("%d", port)}); dupErr == nil {
+		t.Error("expected second StartDetached call to fail while daemon is running")
+	} else if msg := dupErr.Error(); !strings.Contains(msg, "already running (PID") || !strings.Contains(msg, "version") {
+		t.Errorf("expected already running message with version, got %q", msg)
+	}
+
+	// 5. Stop daemon
 	stoppedPID, err := server.StopDetached(cfg)
 	if err != nil {
 		t.Fatalf("StopDetached failed: %v", err)
@@ -146,7 +166,7 @@ func TestEndToEndDaemonLifecycle(t *testing.T) {
 		t.Errorf("expected stopped PID %d, got %d", pid, stoppedPID)
 	}
 
-	// 5. Verify process is no longer running and PID file is removed
+	// 6. Verify process is no longer running and PID file is removed
 	if server.IsProcessAlive(pid) {
 		t.Errorf("process %d is still alive after StopDetached", pid)
 	}
@@ -197,5 +217,133 @@ func TestStartForegroundAlreadyRunning(t *testing.T) {
 	}
 	if currPID != activePID {
 		t.Errorf("expected pid to remain %d, got %d", activePID, currPID)
+	}
+}
+
+// TestEndToEndStopWithoutPIDFile verifies that a running daemon can still be stopped when agw.pid
+// has been deleted, by rediscovering it through the /health identity probe on its configured port.
+func TestEndToEndStopWithoutPIDFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	binPath := filepath.Join(tempDir, "agw")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed building test binary: %v\nOutput: %s", err, string(out))
+	}
+	t.Setenv("AGW_BIN", binPath)
+
+	port := getFreePort(t)
+	cfg := config.DefaultConfig()
+	cfg.Port = port
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	pid, logFile, err := server.StartDetached(cfg, []string{"--port", fmt.Sprintf("%d", port)})
+	if err != nil {
+		t.Fatalf("StartDetached failed: %v (see log: %s)", err, logFile)
+	}
+	t.Cleanup(func() {
+		if server.IsProcessAlive(pid) {
+			if _, stopErr := server.StopDetached(cfg); stopErr != nil {
+				t.Logf("cleanup stop failed: %v", stopErr)
+			}
+		}
+	})
+
+	pidFile := filepath.Join(tempDir, "agw.pid")
+	if _, err := server.ReadPID(pidFile); err != nil {
+		t.Fatalf("expected pid file before removal: %v", err)
+	}
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatalf("removing pid file: %v", err)
+	}
+
+	stoppedPID, err := server.StopDetached(cfg)
+	if err != nil {
+		t.Fatalf("StopDetached without pid file failed: %v", err)
+	}
+	if stoppedPID != pid {
+		t.Errorf("expected rediscovered PID %d, got %d", pid, stoppedPID)
+	}
+
+	deadline := time.Now().Add(server.StopTimeout)
+	for server.IsProcessAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if server.IsProcessAlive(pid) {
+		t.Errorf("process %d is still alive after stop without pid file", pid)
+	}
+	if _, err := server.ReadPID(pidFile); err == nil {
+		t.Errorf("pid file %s should not be recreated after stop", pidFile)
+	}
+}
+
+// TestEndToEndStartDetectsOrphanDaemon verifies that starting a second daemon recovers the PID file
+// of an already running daemon whose pid file was deleted, instead of spawning a process that
+// cannot bind and reporting a wrong PID.
+func TestEndToEndStartDetectsOrphanDaemon(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	binPath := filepath.Join(tempDir, "agw")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed building test binary: %v\nOutput: %s", err, string(out))
+	}
+	t.Setenv("AGW_BIN", binPath)
+
+	port := getFreePort(t)
+	cfg := config.DefaultConfig()
+	cfg.Port = port
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	pid, logFile, err := server.StartDetached(cfg, []string{"--port", fmt.Sprintf("%d", port)})
+	if err != nil {
+		t.Fatalf("StartDetached failed: %v (see log: %s)", err, logFile)
+	}
+	// Stop in-process so the daemon child is reaped by this process; spawning `agw stop` here would
+	// leave a zombie child and make the stop wait for the full StopTimeout.
+	t.Cleanup(func() {
+		if server.IsProcessAlive(pid) {
+			if _, stopErr := server.StopDetached(cfg); stopErr != nil {
+				t.Logf("cleanup stop failed: %v", stopErr)
+			}
+		}
+	})
+
+	pidFile := filepath.Join(tempDir, "agw.pid")
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatalf("removing pid file: %v", err)
+	}
+
+	secondPID, _, secondErr := server.StartDetached(cfg, []string{"--port", fmt.Sprintf("%d", port)})
+	if secondErr == nil {
+		t.Fatal("expected StartDetached to report the orphaned daemon instead of starting a second one")
+	}
+	if secondPID != pid {
+		t.Errorf("expected recovered PID %d, got %d", pid, secondPID)
+	}
+	if msg := secondErr.Error(); !strings.Contains(msg, "already running (PID") {
+		t.Errorf("expected already running message, got %q", msg)
+	}
+
+	restoredPID, err := server.ReadPID(pidFile)
+	if err != nil {
+		t.Fatalf("expected pid file recovery, got error: %v", err)
+	}
+	if restoredPID != pid {
+		t.Errorf("expected restored pid file to contain %d, got %d", pid, restoredPID)
 	}
 }

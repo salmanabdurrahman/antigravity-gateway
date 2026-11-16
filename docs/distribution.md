@@ -178,7 +178,7 @@ All runtime states, cached models, logs, and credentials reside in the user's ho
 | `~/.agw/config.json`       | Proxy daemon settings, port, local API key, strategy, quotas | `0600` (`-rw-------`) | Created on first run with generated API key; atomic write; runtime updates patch only the changed field. |
 | `~/.agw/accounts.json`     | Stored OAuth tokens and projects                             | `0600` (`-rw-------`) | Written upon `agw login` / `agw logout`; atomic write.                                                   |
 | `~/.agw/models-cache.json` | Cached upstream model catalog and quotas                     | `0600` (`-rw-------`) | Auto-updated on startup or manual refresh.                                                               |
-| `~/.agw/agw.pid`           | Process ID of background daemon                              | `0600` (`-rw-------`) | Written by `agw start --detach`; removed by `agw stop`.                                                  |
+| `~/.agw/agw.pid`           | Process ID of the running daemon                             | `0600` (`-rw-------`) | Written once the daemon is listening; removed on shutdown.                                               |
 | `~/.agw/agw.log`           | Background daemon standard output & error                    | `0600` (`-rw-------`) | Appended during detached daemon execution.                                                               |
 
 ## 5. Lifecycle & Upgrade Contract
@@ -211,6 +211,8 @@ All configuration and credential files maintain backward compatibility with defa
 If a process is killed uncleanly (e.g. system reboot or SIGKILL), the gateway detects whether the PID stored in `agw.pid` is active:
 
 - If inactive or owned by another process, `agw start` automatically clears the stale PID and restarts cleanly.
+- If the PID file was removed while the daemon kept running, `agw stop` rediscovers the daemon through its `/health` identity probe on the configured port, resolves the owning process from the operating system socket table, and terminates it. A listener that does not identify itself as `antigravity-gateway` is never signalled.
+- `agw start` runs the same identity probe before spawning: if an orphaned daemon answers on the configured port, the command reports it and rewrites the missing PID file instead of launching a second process.
 
 ## 6. Uninstallation Contract
 

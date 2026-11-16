@@ -108,18 +108,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	if existingPID, readErr := server.ReadPID(pidFile); readErr == nil && server.IsProcessAlive(existingPID) {
 		if existingPID != os.Getpid() {
-			return fmt.Errorf("antigravity-gateway daemon is already running (PID: %d)", existingPID)
+			return fmt.Errorf("antigravity-gateway daemon is already running (PID: %d); run 'agw stop' to restart it", existingPID)
 		}
 	}
-
-	if err := server.WritePID(pidFile, os.Getpid()); err != nil {
-		return fmt.Errorf("recording daemon pid: %w", err)
-	}
-	defer func() {
-		if currentPID, err := server.ReadPID(pidFile); err == nil && currentPID == os.Getpid() {
-			_ = server.ClearPID(pidFile)
-		}
-	}()
 
 	accPath, err := config.AccountsFilePath()
 	if err != nil {
@@ -144,6 +135,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		Rotator: rot,
 		Catalog: cat,
 		Logger:  logger,
+		PIDFile: pidFile,
 	})
 	if err != nil {
 		return fmt.Errorf("initializing server: %w", err)

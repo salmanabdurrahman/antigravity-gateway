@@ -4,11 +4,15 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -141,7 +145,10 @@ func TestStopDetachedNonExistentPID(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv(config.EnvHome, tempDir)
 
+	// The configured port must be a reserved free port: stop falls back to port discovery, so using
+	// the default 51400 would target a real daemon running on the operator machine.
 	cfg := config.DefaultConfig()
+	cfg.Port = getFreePort(t)
 
 	// Stopping with no pid file returns 0, nil
 	stoppedPID, err := StopDetached(cfg)
@@ -150,5 +157,175 @@ func TestStopDetachedNonExistentPID(t *testing.T) {
 	}
 	if stoppedPID != 0 {
 		t.Fatalf("expected stopped PID 0, got %d", stoppedPID)
+	}
+}
+
+// TestProcessListeningOnPortResolvesOwnProcess verifies that the socket table lookup attributes a
+// live loopback listener to the process that owns it, which is the recovery path used when agw.pid
+// has been deleted while the daemon keeps running.
+func TestProcessListeningOnPortResolvesOwnProcess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+
+	pid, err := processListeningOnPort(port)
+	if err != nil {
+		t.Fatalf("processListeningOnPort(%d) returned error: %v", port, err)
+	}
+	if pid != os.Getpid() {
+		t.Errorf("expected owning pid %d, got %d", os.Getpid(), pid)
+	}
+}
+
+// TestProcessListeningOnPortUnknownPort verifies that an unused port is reported as
+// ErrProcessNotFound instead of returning a bogus process ID.
+func TestProcessListeningOnPortUnknownPort(t *testing.T) {
+	freePort := getFreePort(t)
+
+	pid, err := processListeningOnPort(freePort)
+	if err == nil {
+		t.Fatalf("expected error for unused port %d, got pid %d", freePort, pid)
+	}
+	if !errors.Is(err, ErrProcessNotFound) {
+		t.Errorf("expected error wrapping ErrProcessNotFound, got %v", err)
+	}
+}
+
+// TestResolveRunningDaemonIdentity verifies that port based daemon discovery accepts a genuine
+// gateway /health identity and rejects a foreign server sharing the same loopback port, so the
+// recovery path can never signal an unrelated process.
+func TestResolveRunningDaemonIdentity(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"name":"` + ServerName + `","version":"test","accounts":2}`))
+	}))
+	defer gateway.Close()
+
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"name":"some-other-service"}`))
+	}))
+	defer foreign.Close()
+
+	cases := []struct {
+		name     string
+		url      string
+		wantPID  bool
+		wantErr  bool
+		wantName string
+	}{
+		{name: "gateway daemon", url: gateway.URL, wantPID: true, wantName: ServerName},
+		{name: "foreign listener", url: foreign.URL, wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.url)
+			if err != nil {
+				t.Fatalf("parsing test url: %v", err)
+			}
+			port, err := strconv.Atoi(u.Port())
+			if err != nil {
+				t.Fatalf("parsing test port: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+
+			pid, health, err := ResolveRunningDaemon(ctx, "127.0.0.1", port)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected discovery error, got pid %d", pid)
+				}
+				if !errors.Is(err, ErrDaemonNotRunning) {
+					t.Errorf("expected error wrapping ErrDaemonNotRunning, got %v", err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ResolveRunningDaemon returned error: %v", err)
+			}
+			if tc.wantPID && pid != os.Getpid() {
+				t.Errorf("expected pid %d, got %d", os.Getpid(), pid)
+			}
+			if health == nil || health.Name != tc.wantName {
+				t.Errorf("unexpected health identity: %+v", health)
+			}
+			if health.Accounts != 2 {
+				t.Errorf("expected 2 accounts, got %d", health.Accounts)
+			}
+		})
+	}
+}
+
+// getFreePort reserves and releases a loopback port to obtain a number nothing is listening on.
+func getFreePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestParseLsofPID verifies extraction of the first positive process ID from lsof output,
+// tolerating blank lines and non-numeric noise emitted by wrapper scripts.
+func TestParseLsofPID(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{name: "single pid", output: "4242\n", want: 4242},
+		{name: "blank lines", output: "\n\n4242\n", want: 4242},
+		{name: "multiple pids", output: "4242\n5252\n", want: 4242},
+		{name: "noise", output: "lsof: warning\n4242\n", want: 4242},
+		{name: "empty", output: "", want: 0},
+		{name: "only noise", output: "lsof: no process\n", want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseLsofPID(tc.output); got != tc.want {
+				t.Errorf("parseLsofPID(%q) = %d, expected %d", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseNetstatPID verifies parsing of the Windows netstat socket table so the Windows-only
+// discovery path stays covered on every platform.
+func TestParseNetstatPID(t *testing.T) {
+	output := `
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:51400        0.0.0.0:0              LISTENING       4242
+  TCP    127.0.0.1:51401        0.0.0.0:0              LISTENING       5252
+  TCP    127.0.0.1:51400        127.0.0.1:52345        ESTABLISHED     4242
+  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       6262
+`
+	cases := []struct {
+		name string
+		port int
+		want int
+	}{
+		{name: "listening daemon port", port: 51400, want: 4242},
+		{name: "second listening port", port: 51401, want: 5252},
+		{name: "established only", port: 52345, want: 0},
+		{name: "unused port", port: 51499, want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseNetstatPID(output, tc.port); got != tc.want {
+				t.Errorf("parseNetstatPID(port %d) = %d, expected %d", tc.port, got, tc.want)
+			}
+		})
 	}
 }

@@ -31,6 +31,14 @@ const (
 	StopTimeout = 8 * time.Second
 )
 
+var (
+	// ErrDaemonNotRunning indicates that no antigravity-gateway daemon answered the /health identity probe.
+	ErrDaemonNotRunning = errors.New("no running antigravity-gateway daemon found")
+
+	// ErrProcessNotFound indicates that the listening socket on a port could not be attributed to a process.
+	ErrProcessNotFound = errors.New("no process found listening on port")
+)
+
 // ReadPID reads and parses the process ID stored in the specified PID file.
 func ReadPID(pidFile string) (int, error) {
 	data, err := os.ReadFile(pidFile)
@@ -136,7 +144,9 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 	}
 	defer logWriter.Close()
 
-	// Check if already running
+	// Check if already running via the pid file first, then fall back to the /health identity probe:
+	// an orphaned daemon can still own the port after its pid file was removed manually, and spawning
+	// a second process would either fail to bind or report the wrong PID back to the operator.
 	if existingPID, readErr := ReadPID(pidFile); readErr == nil && IsProcessAlive(existingPID) {
 		host := cmp.Or(cfg.Host, config.DefaultHost)
 		port := cmp.Or(cfg.Port, config.DefaultPort)
@@ -144,11 +154,22 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
 		defer cancel()
-		if _, err := CheckHealth(ctx, healthURL); err == nil {
-			return existingPID, logFile, fmt.Errorf("antigravity-gateway daemon is already running (PID: %d)", existingPID)
+		if health, err := CheckHealth(ctx, healthURL); err == nil {
+			return existingPID, logFile, fmt.Errorf("antigravity-gateway daemon is already running (PID: %d, version %s); run 'agw stop' to restart it", existingPID, health.Version)
 		}
 		// Stale or dead process; clean up pid file
 		_ = ClearPID(pidFile) // Best-effort removal of stale pid file.
+	}
+
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
+	orphanPID, orphanHealth, orphanErr := ResolveRunningDaemon(probeCtx, cfg.Host, cmp.Or(cfg.Port, config.DefaultPort))
+	probeCancel()
+	if orphanErr == nil {
+		_ = ClearPID(pidFile) // Recovery: the authoritative PID is rediscovered from the listener.
+		if writeErr := WritePID(pidFile, orphanPID); writeErr != nil {
+			return orphanPID, logFile, fmt.Errorf("antigravity-gateway daemon is already running (PID: %d, version %s) but its pid file could not be restored: %w", orphanPID, orphanHealth.Version, writeErr)
+		}
+		return orphanPID, logFile, fmt.Errorf("antigravity-gateway daemon is already running (PID: %d, version %s); run 'agw stop' to restart it", orphanPID, orphanHealth.Version)
 	}
 
 	execPath := os.Getenv("AGW_BIN")
@@ -205,9 +226,34 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 	return 0, logFile, fmt.Errorf("daemon did not respond healthy within %s. See log: %s", DetachedStartupTimeout, logFile)
 }
 
+// ResolveRunningDaemon locates a gateway daemon that is serving the configured loopback port but
+// has no usable PID file, which happens when the file was removed manually or the daemon was
+// started by a supervisor. The /health identity probe is the authority: a foreign listener on the
+// same port is never reported as a gateway daemon, so its process is never signalled.
+func ResolveRunningDaemon(ctx context.Context, host string, port int) (int, *HealthResponse, error) {
+	if port <= 0 {
+		return 0, nil, fmt.Errorf("%w: invalid port %d", ErrDaemonNotRunning, port)
+	}
+
+	healthURL := fmt.Sprintf("http://%s:%d/health", cmp.Or(host, config.DefaultHost), port)
+	health, err := CheckHealth(ctx, healthURL)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w: %w", ErrDaemonNotRunning, err)
+	}
+
+	pid, err := processListeningOnPort(port)
+	if err != nil {
+		return 0, health, fmt.Errorf("resolving process for gateway daemon on port %d: %w", port, err)
+	}
+
+	return pid, health, nil
+}
+
 // StopDetached stops the background daemon process identified by the PID file.
 // It initiates process termination (SIGTERM on Unix, forceful termination on Windows),
 // waits for graceful exit, and falls back to SIGKILL on Unix if necessary.
+// When the PID file is missing or stale, the daemon is rediscovered through its /health identity
+// probe on the configured port so an orphaned daemon can still be stopped.
 func StopDetached(cfg *config.Config) (int, error) {
 	pidFile, err := config.PIDFilePath()
 	if err != nil {
@@ -215,11 +261,22 @@ func StopDetached(cfg *config.Config) (int, error) {
 	}
 
 	pid, err := ReadPID(pidFile)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err != nil || !IsProcessAlive(pid) {
+		pidErr := err
+		_ = ClearPID(pidFile) // Best-effort cleanup of a missing or stale pid file.
+
+		resolvedPID, resolveErr := resolveDaemonFromPort(cfg)
+		if resolveErr != nil {
+			if pidErr != nil && !errors.Is(pidErr, os.ErrNotExist) {
+				return 0, pidErr
+			}
 			return 0, nil
 		}
-		return 0, err
+		pid = resolvedPID
+	}
+
+	if pid == os.Getpid() {
+		return 0, fmt.Errorf("refusing to terminate the current process (pid %d)", pid)
 	}
 
 	if !IsProcessAlive(pid) {
@@ -256,5 +313,23 @@ func StopDetached(cfg *config.Config) (int, error) {
 	// Force kill if process failed to terminate gracefully
 	_ = proc.Kill()       // Force kill if process failed to terminate within deadline.
 	_ = ClearPID(pidFile) // Clean up pid file after forceful termination.
+	return pid, nil
+}
+
+// resolveDaemonFromPort rediscovers a gateway daemon through its health identity on the configured
+// loopback port, bounded by the standard health probe timeout.
+func resolveDaemonFromPort(cfg *config.Config) (int, error) {
+	if cfg == nil {
+		return 0, ErrDaemonNotRunning
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
+	defer cancel()
+
+	pid, _, err := ResolveRunningDaemon(ctx, cfg.Host, cmp.Or(cfg.Port, config.DefaultPort))
+	if err != nil {
+		return 0, err
+	}
+
 	return pid, nil
 }

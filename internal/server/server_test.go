@@ -5,12 +5,16 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -225,5 +229,156 @@ func TestServerStartWarnsOnMalformedAPIKey(t *testing.T) {
 	}
 	if strings.Contains(logs, "test-gateway-key-999") {
 		t.Errorf("startup logs must never render the raw API key, got: %s", logs)
+	}
+}
+
+// TestServerWritesAndClearsPIDFile verifies that the daemon records its own PID once the listener is
+// bound and removes the file on graceful shutdown, so `agw stop` also works for foreground daemons.
+func TestServerWritesAndClearsPIDFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	pidFile := filepath.Join(tempDir, "agw.pid")
+	srv, ln := newTestServerWithPIDFile(t, pidFile)
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- srv.Start()
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	waitForHealthy(t, ctx, ln.Addr().String())
+
+	pid, err := ReadPID(pidFile)
+	if err != nil {
+		t.Fatalf("reading pid file written by daemon: %v", err)
+	}
+	if pid != os.Getpid() {
+		t.Errorf("expected pid file to contain %d, got %d", os.Getpid(), pid)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("srv.Shutdown failed: %v", err)
+	}
+
+	select {
+	case err := <-serverErrCh:
+		if err != nil && err != http.ErrServerClosed {
+			t.Fatalf("unexpected server exit error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for server to exit after shutdown")
+	}
+
+	if _, err := ReadPID(pidFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected pid file to be removed on shutdown, stat error: %v", err)
+	}
+}
+
+// TestServerBindErrorReportsOwningProcess verifies that a bind failure caused by an occupied port
+// names the owning process and the releasing command, while still wrapping the original error.
+func TestServerBindErrorReportsOwningProcess(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving listener: %v", err)
+	}
+	defer occupied.Close()
+
+	cfg := &config.Config{Host: "127.0.0.1", Port: occupied.Addr().(*net.TCPAddr).Port, Strategy: "sticky"}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := newTestServerWithConfig(t, cfg, logger)
+
+	startErr := srv.Start()
+	if startErr == nil {
+		t.Fatalf("expected bind failure on occupied port %d", cfg.Port)
+	}
+	if !errors.Is(startErr, syscall.EADDRINUSE) {
+		t.Errorf("expected error wrapping syscall.EADDRINUSE, got %v", startErr)
+	}
+
+	message := startErr.Error()
+	if !strings.Contains(message, "already in use") {
+		t.Errorf("expected human readable bind failure, got %q", message)
+	}
+	if !strings.Contains(message, "'agw stop'") {
+		t.Errorf("expected 'agw stop' recovery hint, got %q", message)
+	}
+	if !strings.Contains(message, fmt.Sprintf("pid %d", os.Getpid())) {
+		t.Errorf("expected owning pid %d in message, got %q", os.Getpid(), message)
+	}
+}
+
+// newTestServerWithConfig builds a Server around an in-memory account store and the given config.
+func newTestServerWithConfig(t *testing.T, cfg *config.Config, logger *slog.Logger) *Server {
+	t.Helper()
+
+	store := auth.NewStore(filepath.Join(t.TempDir(), "accounts.json"))
+	pool, err := rotator.NewPool(store, cfg, time.Now)
+	if err != nil {
+		t.Fatalf("failed creating pool: %v", err)
+	}
+	rot := rotator.NewRotator(pool, cfg, logger, time.Now)
+	cat := catalog.NewModelCatalog(cfg, rot, filepath.Join(t.TempDir(), "models-cache.json"), logger)
+
+	srv, err := NewServer(Options{Config: cfg, Rotator: rot, Catalog: cat, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	return srv
+}
+
+// newTestServerWithPIDFile builds a listening Server that manages the given PID file path.
+func newTestServerWithPIDFile(t *testing.T, pidFile string) (*Server, net.Listener) {
+	t.Helper()
+
+	cfg := &config.Config{Host: "127.0.0.1", Strategy: "sticky"}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed creating listener: %v", err)
+	}
+
+	store := auth.NewStore(filepath.Join(t.TempDir(), "accounts.json"))
+	pool, err := rotator.NewPool(store, cfg, time.Now)
+	if err != nil {
+		t.Fatalf("failed creating pool: %v", err)
+	}
+	rot := rotator.NewRotator(pool, cfg, logger, time.Now)
+	cat := catalog.NewModelCatalog(cfg, rot, filepath.Join(t.TempDir(), "models-cache.json"), logger)
+
+	srv, err := NewServer(Options{
+		Config:   cfg,
+		Rotator:  rot,
+		Catalog:  cat,
+		Logger:   logger,
+		Listener: ln,
+		PIDFile:  pidFile,
+	})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	return srv, ln
+}
+
+// waitForHealthy polls /health until the daemon answers or the context deadline expires.
+func waitForHealthy(t *testing.T, ctx context.Context, addr string) {
+	t.Helper()
+
+	healthURL := "http://" + addr + "/health"
+	for {
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for server to answer /health: %v", ctx.Err())
+		}
+		if _, err := CheckHealth(ctx, healthURL); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

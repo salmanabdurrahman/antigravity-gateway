@@ -238,11 +238,13 @@ agw start --detach
 
 #### Stop Gateway Daemon
 
-Terminate the running background daemon gracefully via SIGTERM:
+Terminate the running daemon gracefully via SIGTERM:
 
 ```bash
 agw stop
 ```
+
+The PID file is written by the daemon itself as soon as it reaches the listening state (foreground and detached alike) and removed on graceful shutdown. If `~/.agw/agw.pid` is missing or stale, `agw stop` rediscovers the daemon through its `/health` identity probe on the port recorded in `config.json` and resolves the owning process from the operating system socket table; a listener that does not identify itself as `antigravity-gateway` is never signalled. `agw start` performs the same probe before spawning a process, so an orphaned daemon is reported (and its PID file restored) instead of launching a second process that cannot bind. Because discovery uses the configured port, keep `port` in `config.json` in sync when running the daemon on a custom `--port`.
 
 ### Web Management Dashboard
 
@@ -367,7 +369,7 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 | `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy, quota threshold, model mapping | `0600`           |
 | `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings                                  | `0600`           |
 | `~/.agw/models-cache.json` | Cached model catalog and token limits                                                        | `0600`           |
-| `~/.agw/agw.pid`           | Background daemon process ID                                                                 | `0600`           |
+| `~/.agw/agw.pid`           | Running daemon process ID (written once listening)                                           | `0600`           |
 
 `config.json` is the single source of truth for gateway settings. Runtime mutations rewrite only the field being changed after re-reading the file first, so a running daemon never persists stale or partial state over your API key, endpoints, or model mapping. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
 

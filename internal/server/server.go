@@ -9,8 +9,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
@@ -60,6 +63,9 @@ type Server struct {
 
 	// listener is the bound network listener.
 	listener net.Listener
+
+	// pidFile is the optional path where the daemon records its own process ID once listening.
+	pidFile string
 }
 
 // Options encapsulates configuration parameters for initializing a Server instance.
@@ -78,6 +84,10 @@ type Options struct {
 
 	// Listener is an optional pre-bound network listener (useful for tests).
 	Listener net.Listener
+
+	// PIDFile is an optional path where the daemon records its own process ID once it reaches the
+	// listening state. When empty, no PID file is managed (useful for tests and embedded usage).
+	PIDFile string
 }
 
 // NewServer initializes a new Server with configured routes, middleware, and loopback enforcement.
@@ -103,6 +113,7 @@ func NewServer(opts Options) (*Server, error) {
 		catalog:  opts.Catalog,
 		logger:   logger,
 		listener: opts.Listener,
+		pidFile:  opts.PIDFile,
 	}
 
 	handler := s.buildHandler()
@@ -163,32 +174,89 @@ func (s *Server) Start() error {
 	ln := s.listener
 	s.mu.RUnlock()
 
-	if ln != nil {
-		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serving http requests: %w", err)
+	if ln == nil {
+		createdLn, err := net.Listen("tcp", s.httpServer.Addr)
+		if err != nil {
+			return s.bindError(err)
 		}
-		return nil
+
+		s.mu.Lock()
+		s.listener = createdLn
+		s.mu.Unlock()
+		ln = createdLn
 	}
 
-	createdLn, err := net.Listen("tcp", s.httpServer.Addr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
+	// The PID file is written only after the listener is bound, so a failed bind can never leave a
+	// stale PID file behind for a daemon that never reached the listening state.
+	if err := s.recordPID(); err != nil {
+		s.logger.Warn("failed recording daemon pid file", "path", s.pidFile, "error", err)
 	}
 
-	s.mu.Lock()
-	s.listener = createdLn
-	s.mu.Unlock()
-
-	if err := s.httpServer.Serve(createdLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serving http requests: %w", err)
 	}
 
 	return nil
 }
 
+// bindError decorates a listener failure with the process currently holding the port and the exact
+// command that releases it, so an operator does not have to hunt the owning PID. Port ownership
+// lookups are best-effort: the original bind error is always preserved for errors.Is/As callers.
+func (s *Server) bindError(err error) error {
+	addr := s.httpServer.Addr
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return fmt.Errorf("listening on %s: %w", addr, err)
+	}
+
+	_, portText, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return fmt.Errorf("listening on %s: port is already in use; run 'agw stop' or start with a different --port: %w", addr, err)
+	}
+
+	port, convErr := strconv.Atoi(portText)
+	if convErr != nil {
+		return fmt.Errorf("listening on %s: port is already in use; run 'agw stop' or start with a different --port: %w", addr, err)
+	}
+
+	if pid, pidErr := processListeningOnPort(port); pidErr == nil {
+		return fmt.Errorf("listening on %s: port is already in use by pid %d; run 'agw stop' to terminate a running gateway daemon or start with a different --port: %w", addr, pid, err)
+	}
+
+	return fmt.Errorf("listening on %s: port is already in use; run 'agw stop' to terminate a running gateway daemon or start with a different --port: %w", addr, err)
+}
+
+// recordPID writes the current process ID to the configured PID file so an external `agw stop` can
+// find a daemon that was started without --detach, and so the file always describes a daemon that
+// actually reached the listening state.
+func (s *Server) recordPID() error {
+	if s.pidFile == "" {
+		return nil
+	}
+	return WritePID(s.pidFile, os.Getpid())
+}
+
+// clearPID removes the PID file on shutdown, but only while it still points at this process, so a
+// newer daemon that already reused the path is never disowned.
+func (s *Server) clearPID() {
+	if s.pidFile == "" {
+		return
+	}
+
+	pid, err := ReadPID(s.pidFile)
+	if err != nil || pid != os.Getpid() {
+		return
+	}
+
+	if err := ClearPID(s.pidFile); err != nil {
+		s.logger.Warn("failed removing daemon pid file", "path", s.pidFile, "error", err)
+	}
+}
+
 // Shutdown gracefully terminates the HTTP server, allowing active connections and streams to complete.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.logger.Info("shutting down gateway server")
+	defer s.clearPID()
+
 	if s.httpServer == nil {
 		return nil
 	}

@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gateway API key format validated at daemon startup and by `agw doctor`, warning when the stored key no longer matches the `agw_` prefix plus 64 hexadecimal characters that clients were configured with.
 - `agw doctor` flags configured clients (Pi, OpenCode, Claude Code) whose stored API key differs from `config.json`, surfacing the root cause of unexpected HTTP 401 responses.
 - Daemon startup logs the active configuration file path so operators can confirm which `config.json` the reverse proxy actually loaded.
+- `agw stop` rediscovers the daemon through its `/health` identity probe and the operating system socket table when `agw.pid` is missing or stale, so an orphaned daemon can still be terminated.
+- The PID file is written by the daemon itself once the listener is bound (foreground and detached) and removed on graceful shutdown.
+- Bind failures now name the process holding the port and point at `agw stop`, and starting a second daemon reports the running instance and its version.
+- `agw start` probes the configured port before spawning, so an orphaned daemon is reported and its `agw.pid` restored instead of launching a process that cannot bind.
+- Socket table lookups used for daemon discovery are bounded by a timeout and their `lsof`/`netstat` output parsing is unit tested on every platform.
 
 [Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0
