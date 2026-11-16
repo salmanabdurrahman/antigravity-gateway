@@ -464,7 +464,7 @@ While drawing inspiration from these predecessors, `agw` introduces significant 
 
 ## Contributing
 
-Contributions, bug reports, and feature requests are welcome! Please review our [Contributing Guidelines](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting pull requests.
+Contributions, bug reports, and feature requests are welcome! Please review our [Contributing Guidelines](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting pull requests. For release history and detailed notes on each version, consult the [Changelog](CHANGELOG.md).
 
 If you discover a security vulnerability, please follow our responsible disclosure instructions in [SECURITY.md](SECURITY.md).
 
