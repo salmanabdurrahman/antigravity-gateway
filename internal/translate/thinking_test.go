@@ -1,0 +1,135 @@
+// Package translate provides bidirectional translation between OpenAI/Anthropic
+// payloads and Google Cloud Code Assist (Antigravity) envelope structures.
+package translate
+
+import (
+	"testing"
+)
+
+// TestClampThinkingBudget verifies budget token clamping per model family and max tokens adjustments.
+func TestClampThinkingBudget(t *testing.T) {
+	// Gemini 2.5 Flash with excessive budget
+	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 50000, 4096, false)
+	if budget != Gemini25MaxThinkingBudget {
+		t.Errorf("expected budget clamped to %d, got %d", Gemini25MaxThinkingBudget, budget)
+	}
+	if maxOut <= budget {
+		t.Errorf("expected maxOut (%d) > budget (%d)", maxOut, budget)
+	}
+
+	// Claude model with default budget
+	claudeBudget, claudeMaxOut := ClampThinkingBudget("claude-sonnet-4-6", 0, 2048, true)
+	if claudeBudget != DefaultClaudeThinkingBudget {
+		t.Errorf("expected default Claude budget %d, got %d", DefaultClaudeThinkingBudget, claudeBudget)
+	}
+	if claudeMaxOut <= claudeBudget {
+		t.Errorf("expected claudeMaxOut (%d) > claudeBudget (%d)", claudeMaxOut, claudeBudget)
+	}
+}
+
+// TestInjectInterruptedToolResponses verifies synthetic tool responses are injected
+// when a user interrupts a pending model tool call.
+func TestInjectInterruptedToolResponses(t *testing.T) {
+	contents := []Content{
+		{
+			Role:  "user",
+			Parts: []Part{{Text: "Find file"}},
+		},
+		{
+			Role: "model",
+			Parts: []Part{
+				{
+					FunctionCall: &FunctionCallPart{
+						ID:   "call_1",
+						Name: "find_file",
+						Args: map[string]any{"path": "foo.go"},
+					},
+				},
+			},
+		},
+		{
+			Role: "user",
+			Parts: []Part{
+				{Text: "Nevermind, stop." + ""}, // User interrupted without sending tool result
+			},
+		},
+	}
+
+	repaired := InjectInterruptedToolResponses(contents)
+	if len(repaired) != 3 {
+		t.Fatalf("expected 3 contents, got %d", len(repaired))
+	}
+
+	lastTurn := repaired[2]
+	if len(lastTurn.Parts) < 2 {
+		t.Fatalf("expected at least 2 parts in user turn after injection, got %d", len(lastTurn.Parts))
+	}
+
+	firstPart := lastTurn.Parts[0]
+	if firstPart.FunctionResponse == nil {
+		t.Fatalf("expected first part to be synthetic FunctionResponse, got %+v", firstPart)
+	}
+	if firstPart.FunctionResponse.ID != "call_1" || firstPart.FunctionResponse.Name != "find_file" {
+		t.Errorf("unexpected FunctionResponse target: %+v", firstPart.FunctionResponse)
+	}
+}
+
+// TestInjectInterruptedToolResponses_MultipleCallsSameName verifies that multiple calls
+// sharing the same function name are individually verified by ID and not skipped falsely.
+func TestInjectInterruptedToolResponses_MultipleCallsSameName(t *testing.T) {
+	contents := []Content{
+		{
+			Role:  "user",
+			Parts: []Part{{Text: "Read two files"}},
+		},
+		{
+			Role: "model",
+			Parts: []Part{
+				{
+					FunctionCall: &FunctionCallPart{
+						ID:   "call_1",
+						Name: "read_file",
+						Args: map[string]any{"path": "a.txt"},
+					},
+				},
+				{
+					FunctionCall: &FunctionCallPart{
+						ID:   "call_2",
+						Name: "read_file",
+						Args: map[string]any{"path": "b.txt"},
+					},
+				},
+			},
+		},
+		{
+			Role: "user",
+			Parts: []Part{
+				// User only provided result for call_1, call_2 was interrupted
+				{
+					FunctionResponse: &FunctionResponse{
+						ID:       "call_1",
+						Name:     "read_file",
+						Response: map[string]any{"output": "content a"},
+					},
+				},
+			},
+		},
+	}
+
+	repaired := InjectInterruptedToolResponses(contents)
+	userParts := repaired[2].Parts
+	if len(userParts) != 2 {
+		t.Fatalf("expected 2 parts (1 real + 1 synthetic), got %d", len(userParts))
+	}
+
+	hasSyntheticCall2 := false
+	for _, p := range userParts {
+		if p.FunctionResponse != nil && p.FunctionResponse.ID == "call_2" {
+			hasSyntheticCall2 = true
+			break
+		}
+	}
+	if !hasSyntheticCall2 {
+		t.Error("expected synthetic cancellation response for call_2")
+	}
+}

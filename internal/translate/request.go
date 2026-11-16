@@ -379,6 +379,8 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 		contents = append([]Content{{Role: "user", Parts: []Part{{Text: "Hello."}}}}, contents...)
 	}
 
+	contents = InjectInterruptedToolResponses(contents)
+
 	genConfig := make(map[string]any)
 	if req.Temperature != nil {
 		genConfig["temperature"] = *req.Temperature
@@ -784,6 +786,10 @@ func forcesTool(choice any) bool {
 
 // adjustFixedBudget bounds requested reasoning budgets within model minimums and maximum output limits.
 func adjustFixedBudget(info catalog.CatalogModel, budget int, maxOut *int) (*int, *int) {
+	if strings.Contains(strings.ToLower(info.ID), "2.5") && budget > Gemini25MaxThinkingBudget {
+		budget = Gemini25MaxThinkingBudget
+	}
+
 	limit := max(1, info.MaxOutputTokens)
 	minBudget := 0
 	if info.MinThinkingBudget != nil {

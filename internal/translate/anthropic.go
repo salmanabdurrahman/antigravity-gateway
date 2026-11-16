@@ -245,6 +245,8 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 		contents = append([]Content{{Role: "user", Parts: []Part{{Text: "Hello."}}}}, contents...)
 	}
 
+	contents = InjectInterruptedToolResponses(contents)
+
 	genConfig := make(map[string]any)
 	if req.Temperature != nil {
 		genConfig["temperature"] = *req.Temperature
@@ -277,32 +279,18 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 			budget = *info.ThinkingBudget
 		}
 
+		clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, claude)
+		maxOut = adjMaxOut
+
 		if claude {
-			if budget <= 0 {
-				budget = 32000
-			}
-			// Google requires maxOutputTokens > thinking_budget
-			if maxOut <= budget {
-				maxOut = budget + 8192
-			}
 			genConfig["thinkingConfig"] = map[string]any{
 				"include_thoughts": true,
-				"thinking_budget":  budget,
+				"thinking_budget":  clampedBudget,
 			}
 		} else {
-			// Gemini models
-			if budget <= 0 {
-				budget = 16000
-			}
-			if budget > 24576 && strings.Contains(strings.ToLower(model), "2.5") {
-				budget = 24576
-			}
-			if maxOut <= budget {
-				maxOut = min(budget+8192, 65536)
-			}
 			genConfig["thinkingConfig"] = map[string]any{
 				"includeThoughts": true,
-				"thinkingBudget":  budget,
+				"thinkingBudget":  clampedBudget,
 			}
 		}
 	}

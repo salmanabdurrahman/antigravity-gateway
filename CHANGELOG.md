@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-phase tool schema sanitization pipeline converting `$ref` paths to description hints, merging `allOf`, flattening `anyOf`/`oneOf` with heuristic scoring, preserving constraints as description text, and ensuring valid `items` on array nodes.
+- Centralized thinking budget clamping per model family (Gemini 2.5 Flash/Pro 24,576 token cap) with automatic `maxOutputTokens` headroom expansion.
+- Interrupted tool-loop synthetic recovery resolving pending tool invocations when turns are aborted mid-call without tool results.
 - Native Anthropic Messages API endpoint (`POST /v1/messages`) supporting both real-time SSE streaming and non-streaming modes for Claude Code CLI and OpenClaw.
 - Transactional Claude Code CLI configuration injector (`agw setup claude`) updating `~/.claude/settings.json` with timestamped atomic backup and live completion probe.
 - Integration diagnostics for Claude Code CLI in `agw doctor`.

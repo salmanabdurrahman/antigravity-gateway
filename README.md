@@ -11,7 +11,7 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 - **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
 - **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally, maintaining sticky prompt cache affinity or round-robin balancing, with automatic quota rate-limit cooldown handling.
-- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, tool schema defenses, proactive `cache_control` stripping, and billing header sanitization.
+- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header sanitization.
 - **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
 - **Zero Runtime Dependencies**: Compiled into a single self-contained binary built on Go 1.24+ standard library and Cobra CLI.

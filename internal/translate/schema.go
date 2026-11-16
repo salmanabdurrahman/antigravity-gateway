@@ -97,7 +97,8 @@ func isGeminiLegacyDrop(key string) bool {
 // Note that "$ref" and newer complex schema constructs are sanitized if upstream returns HTTP 400
 // parametersJsonSchema rejection and falls back to ForGeminiLegacyParameters.
 func ForGeminiJSONSchema(schema any) any {
-	return forGeminiJSONSchemaInternal(schema, false)
+	clean := SanitizeComplexSchema(schema, false)
+	return forGeminiJSONSchemaInternal(clean, false)
 }
 
 // forGeminiJSONSchemaInternal recursively converts JSON Schema constructs into Gemini-compatible definitions,
@@ -142,9 +143,10 @@ func forGeminiJSONSchemaInternal(schema any, inNameMap bool) any {
 // Claude receives tool definitions through the older "parameters" field and rejects newer JSON Schema
 // keywords ($ref, $defs, allOf/anyOf unions, const, etc.).
 func ForClaudeParameters(schema any) any {
-	s, ok := schema.(map[string]any)
+	clean := SanitizeComplexSchema(schema, true)
+	s, ok := clean.(map[string]any)
 	if !ok {
-		return schema
+		return clean
 	}
 
 	out := make(map[string]any)
@@ -234,9 +236,10 @@ func ForClaudeParameters(schema any) any {
 // ForGeminiLegacyParameters converts schemas for Gemini when upstream rejects parametersJsonSchema.
 // It removes newer draft keywords and converts unions to standard OpenAPI 3.0 types.
 func ForGeminiLegacyParameters(schema any) any {
-	s, ok := schema.(map[string]any)
+	clean := SanitizeComplexSchema(schema, true)
+	s, ok := clean.(map[string]any)
 	if !ok {
-		return schema
+		return clean
 	}
 
 	out := make(map[string]any)
