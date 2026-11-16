@@ -139,6 +139,9 @@ func TestClone(t *testing.T) {
 	}
 
 	original := DefaultConfig()
+	original.ModelMapping = map[string]string{
+		"gemini-4-argon": "gemini-4-argon-high",
+	}
 	cloned := original.Clone()
 
 	if cloned.Host != original.Host {
@@ -148,6 +151,18 @@ func TestClone(t *testing.T) {
 	cloned.Endpoints[0] = "https://mutated.com"
 	if original.Endpoints[0] == "https://mutated.com" {
 		t.Errorf("mutation leaked into original endpoints slice")
+	}
+
+	cloned.ModelMapping["gemini-4-argon"] = "mutated"
+	if original.ModelMapping["gemini-4-argon"] == "mutated" {
+		t.Errorf("mutation leaked into original model mapping map")
+	}
+
+	if original.ResolveModel("gemini-4-argon") != "gemini-4-argon-high" {
+		t.Errorf("expected gemini-4-argon-high, got %s", original.ResolveModel("gemini-4-argon"))
+	}
+	if original.ResolveModel("other-model") != "other-model" {
+		t.Errorf("expected other-model, got %s", original.ResolveModel("other-model"))
 	}
 }
 

@@ -204,9 +204,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	originalModel := chatReq.Model
+	resolvedModel := catalog.ResolveModelAlias(chatReq.Model, s.cfg.ModelMapping)
 	_ = s.catalog.Ensure(r.Context())
-	info := s.catalog.Info(chatReq.Model)
-	upstream := catalog.UpstreamModel(chatReq.Model)
+	info := s.catalog.Info(resolvedModel)
+	upstream := catalog.UpstreamModel(resolvedModel)
+	chatReq.Model = resolvedModel
 
 	sessionID := cmp.Or(
 		r.Header.Get("X-Session-Affinity"),
@@ -246,8 +249,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		chatReq.Model = originalModel
 		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, id, created, upstream, attempt)
 		if retry {
+			chatReq.Model = resolvedModel
 			continue
 		}
 		if done {
@@ -454,9 +459,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	originalModel := anthReq.Model
+	resolvedModel := catalog.ResolveModelAlias(anthReq.Model, s.cfg.ModelMapping)
 	_ = s.catalog.Ensure(r.Context())
-	info := s.catalog.Info(anthReq.Model)
-	upstream := catalog.UpstreamModel(anthReq.Model)
+	info := s.catalog.Info(resolvedModel)
+	upstream := catalog.UpstreamModel(resolvedModel)
+	anthReq.Model = resolvedModel
 
 	sessionID := cmp.Or(
 		r.Header.Get("X-Session-Affinity"),
@@ -491,8 +499,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
+		anthReq.Model = originalModel
 		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, upstream, attempt)
 		if retry {
+			anthReq.Model = resolvedModel
 			continue
 		}
 		if done {

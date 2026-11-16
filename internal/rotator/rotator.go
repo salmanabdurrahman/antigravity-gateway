@@ -94,9 +94,17 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 		strat = Strategy(cfg.Strategy)
 	}
 
+	picker := NewPicker(strat)
+	if cfg != nil && cfg.QuotaThreshold > 0 {
+		picker.SetQuotaThreshold(cfg.QuotaThreshold)
+	}
+	if pool != nil {
+		pool.SetHealthTracker(picker.HealthTracker())
+	}
+
 	return &Rotator{
 		pool:    pool,
-		picker:  NewPicker(strat),
+		picker:  picker,
 		cfg:     cfg,
 		client:  &http.Client{Timeout: 0}, // Stream requests can be long-running
 		logger:  logger,
@@ -315,6 +323,8 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 		if err != nil {
 			r.logger.Warn("Upstream network call failed", "account", s.Email(), "error", err)
 			serverErrors++
+			r.picker.HealthTracker().RecordFailure(s.Email())
+			s.TokenBucket().Refund()
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusBadGateway,
 				ErrorMessage: fmt.Sprintf("Upstream network error: %s", err.Error()),
@@ -328,6 +338,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 
 		// Success!
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			r.picker.HealthTracker().RecordSuccess(s.Email())
 			return &AttemptResult{Response: resp, State: s}, nil
 		}
 
@@ -341,6 +352,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 
 		switch kind {
 		case FailureRateLimit:
+			r.picker.HealthTracker().RecordRateLimit(s.Email())
 			s.rateLimits.Add(1)
 			delay, ok := ParseRetryDelay(errBody, resp.Header, r.nowFn())
 			if !ok {
@@ -370,6 +382,8 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			skip[s] = struct{}{}
 
 		case FailureForbidden:
+			r.picker.HealthTracker().RecordFailure(s.Email())
+			s.TokenBucket().Refund()
 			s.SetCooldown("*", r.nowFn().Add(ForbiddenCooldownDuration), fmt.Sprintf("HTTP 403: %s", errMsg))
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusForbidden,
@@ -378,6 +392,8 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			skip[s] = struct{}{}
 
 		case FailureServer:
+			r.picker.HealthTracker().RecordFailure(s.Email())
+			s.TokenBucket().Refund()
 			serverErrors++
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusBadGateway,

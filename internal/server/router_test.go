@@ -628,3 +628,60 @@ func TestAnthropicMessagesToolCallAndSchemaFallback(t *testing.T) {
 		t.Errorf("expected tool name lookup, got %s", resp.Content[0].Name)
 	}
 }
+
+// TestModelMappingAliasInRouter verifies that custom model aliases in config.ModelMapping
+// are resolved to their target model before dispatching upstream.
+func TestModelMappingAliasInRouter(t *testing.T) {
+	var requestedModel string
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			var bodyMap map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&bodyMap)
+			if m, ok := bodyMap["model"].(string); ok {
+				requestedModel = m
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			event := `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Model alias resolved"}]},"finishReason":"STOP"}]}}` + "\n\n"
+			_, _ = w.Write([]byte(event))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Configure custom model alias
+	harness.server.cfg.ModelMapping = map[string]string{
+		"gemini-4-argon": "gemini-4-argon-high",
+	}
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "gemini-4-argon",
+		"messages": [{"role": "user", "content": "Hi"}],
+		"stream": false
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if requestedModel != "gemini-4-argon-high" {
+		t.Errorf("expected mapped model gemini-4-argon-high, got %s", requestedModel)
+	}
+}

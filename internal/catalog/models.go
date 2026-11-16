@@ -79,6 +79,19 @@ func UpstreamModel(id string) string {
 	return id
 }
 
+// ResolveModelAlias resolves a model identifier using custom configuration mappings and standard aliases.
+func ResolveModelAlias(id string, customMapping map[string]string) string {
+	if customMapping != nil {
+		if target, ok := customMapping[id]; ok && target != "" {
+			return target
+		}
+		if target, ok := customMapping[strings.ToLower(id)]; ok && target != "" {
+			return target
+		}
+	}
+	return UpstreamModel(id)
+}
+
 // IsListedChatModel determines if an upstream identifier represents a valid conversational chat model,
 // filtering out internal IDE tools, image generation models, embeddings, and tab completion variants.
 func IsListedChatModel(id string) bool {

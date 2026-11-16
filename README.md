@@ -10,7 +10,7 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 ## Key Features
 
 - **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
-- **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally, maintaining sticky prompt cache affinity or round-robin balancing, with automatic quota rate-limit cooldown handling.
+- **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally with configurable strategies (`sticky`, `round-robin`, or `hybrid` with health scores, token bucket burst throttling, and proactive quota protection).
 - **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header sanitization.
 - **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
@@ -222,10 +222,10 @@ Run the gateway reverse proxy in the foreground on `127.0.0.1:51400`:
 agw start
 ```
 
-With rotation strategy override (`sticky` or `round-robin`):
+With rotation strategy override (`sticky`, `round-robin`, or `hybrid`):
 
 ```bash
-agw start --strategy round-robin
+agw start --strategy hybrid
 ```
 
 #### Start Gateway in Background (Detached)
@@ -354,7 +354,7 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 
 | File                       | Purpose                                                      | File Permissions |
 | :------------------------- | :----------------------------------------------------------- | :--------------- |
-| `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy | `0600`           |
+| `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy, quota threshold, model mapping | `0600`           |
 | `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings  | `0600`           |
 | `~/.agw/models-cache.json` | Cached model catalog and token limits                        | `0600`           |
 | `~/.agw/agw.pid`           | Background daemon process ID                                 | `0600`           |
@@ -371,10 +371,24 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 
 ### Account Rotation & Failover Strategy
 
-The rotator engine supports two selection strategies configured via `config.json` (`strategy` field):
+The rotator engine supports three selection strategies configured via `config.json` (`strategy` field) or `--strategy`:
 
 - `sticky` (default): Uses the current active account until rate limits (HTTP 429) occur, preserving upstream prompt caching.
 - `round-robin`: Cycles sequentially through all non-cooling accounts on every request.
+- `hybrid`: Smart multi-signal load balancing combining rolling operational health scores, token bucket burst rate limiting, proactive quota protection (parking accounts when remaining quota drops below `quota_threshold`, default 5%), and LRU freshness.
+
+### Model Aliasing & Mapping
+
+You can define custom model aliases in `~/.agw/config.json` via the `model_mapping` dictionary. This enables transparent translation of friendly names or preview codenames into full backend model IDs:
+
+```json
+{
+  "model_mapping": {
+    "gemini-4-argon": "gemini-4-argon-high",
+    "claude-custom": "claude-sonnet-4-6"
+  }
+}
+```
 
 When rate limits occur:
 

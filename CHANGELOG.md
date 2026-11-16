@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Multi-strategy account load balancing introducing `hybrid` selection alongside `sticky` and `round-robin`, combining operational health scoring, token bucket burst rate limiting, quota threshold awareness, and LRU freshness.
+- Quota-aware protection with proactive account parking when remaining fractional quota drops below threshold (`quota_threshold`, default 5%).
+- Dynamic model aliasing and custom mapping (`model_mapping` in `config.json`) resolving friendly or codename IDs to upstream model identifiers.
 - Multi-phase tool schema sanitization pipeline converting `$ref` paths to description hints, merging `allOf`, flattening `anyOf`/`oneOf` with heuristic scoring, preserving constraints as description text, and ensuring valid `items` on array nodes.
 - Centralized thinking budget clamping per model family (Gemini 2.5 Flash/Pro 24,576 token cap) with automatic `maxOutputTokens` headroom expansion.
 - Interrupted tool-loop synthetic recovery resolving pending tool invocations when turns are aborted mid-call without tool results.

@@ -61,13 +61,24 @@ type AccountState struct {
 
 	// rateLimits tracks the cumulative count of HTTP 429 rate limit responses received by this account.
 	rateLimits atomic.Int64
+
+	// bucket coordinates token bucket burst rate limiting.
+	bucket *TokenBucket
+
+	// lastUsed records the timestamp of the last request dispatched to this account.
+	lastUsed time.Time
+
+	// quotaFractions maps model IDs (or "*") to remaining quota fractions (0.0 to 1.0).
+	quotaFractions map[string]float64
 }
 
 // NewAccountState wraps an auth.Account into an in-memory runtime tracker.
 func NewAccountState(acc *auth.Account) *AccountState {
 	return &AccountState{
-		account:   acc,
-		cooldowns: NewCooldownTracker(),
+		account:        acc,
+		cooldowns:      NewCooldownTracker(),
+		bucket:         NewTokenBucket(DefaultTokenBucketCapacity, DefaultTokenBucketRefillRate, time.Now()),
+		quotaFractions: make(map[string]float64),
 	}
 }
 
@@ -127,6 +138,56 @@ func (s *AccountState) SetCooldown(model string, until time.Time, reason string)
 	s.mu.Lock()
 	s.lastError = reason
 	s.mu.Unlock()
+}
+
+// TokenBucket returns the account's token bucket instance safely.
+func (s *AccountState) TokenBucket() *TokenBucket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bucket == nil {
+		s.bucket = NewTokenBucket(DefaultTokenBucketCapacity, DefaultTokenBucketRefillRate, time.Now())
+	}
+	return s.bucket
+}
+
+// LastUsed returns when the account was last selected.
+func (s *AccountState) LastUsed() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastUsed
+}
+
+// SetLastUsed updates the last selected timestamp.
+func (s *AccountState) SetLastUsed(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = t
+}
+
+// QuotaFraction returns the cached remaining quota fraction for a model (defaults to 1.0 if untracked).
+func (s *AccountState) QuotaFraction(model string) float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.quotaFractions == nil {
+		return 1.0
+	}
+	if frac, exists := s.quotaFractions[model]; exists {
+		return frac
+	}
+	if frac, exists := s.quotaFractions["*"]; exists {
+		return frac
+	}
+	return 1.0
+}
+
+// SetQuotaFraction updates the remaining quota fraction for a model.
+func (s *AccountState) SetQuotaFraction(model string, fraction float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.quotaFractions == nil {
+		s.quotaFractions = make(map[string]float64)
+	}
+	s.quotaFractions[model] = max(0.0, min(1.0, fraction))
 }
 
 // ClearAccessToken invalidates the cached access token, forcing refresh on the next request.
@@ -203,6 +264,10 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 		disabled = s.account.Disabled
 	}
 	lastErr := s.lastError
+	lastUsedStr := ""
+	if !s.lastUsed.IsZero() {
+		lastUsedStr = s.lastUsed.UTC().Format(time.RFC3339)
+	}
 	s.mu.RUnlock()
 
 	activeCooldowns := make(map[string]string)
@@ -217,6 +282,7 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 		Cooldowns:  activeCooldowns,
 		Requests:   s.requests.Load(),
 		RateLimits: s.rateLimits.Load(),
+		LastUsed:   lastUsedStr,
 		LastError:  lastErr,
 	}
 }
@@ -241,6 +307,12 @@ type AccountSnapshot struct {
 	// RateLimits is the total count of 429 responses received by this account.
 	RateLimits int64 `json:"rate_limits"`
 
+	// Health represents the runtime operational health score (0.0 to 100.0).
+	Health float64 `json:"health,omitzero"`
+
+	// LastUsed holds the RFC 3339 timestamp of the last request dispatched.
+	LastUsed string `json:"last_used,omitempty"`
+
 	// LastError holds the last recorded operational error for diagnostics.
 	LastError string `json:"last_error,omitempty"`
 }
@@ -264,6 +336,9 @@ type Pool struct {
 
 	// lastStatAt throttles disk stat checks to avoid excessive filesystem calls.
 	lastStatAt time.Time
+
+	// healthTracker provides live operational health scoring for account snapshots.
+	healthTracker *HealthTracker
 
 	// nowFn provides time for deterministic testing.
 	nowFn func() time.Time
@@ -407,6 +482,13 @@ func (p *Pool) DisableAccount(email, reason string) error {
 	return nil
 }
 
+// SetHealthTracker attaches a health tracker to populate operational scores in account snapshots.
+func (p *Pool) SetHealthTracker(h *HealthTracker) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.healthTracker = h
+}
+
 // Snapshots returns runtime snapshots for all managed accounts.
 func (p *Pool) Snapshots() []AccountSnapshot {
 	p.mu.RLock()
@@ -414,7 +496,11 @@ func (p *Pool) Snapshots() []AccountSnapshot {
 	now := p.nowFn()
 	snaps := make([]AccountSnapshot, len(p.states))
 	for i, s := range p.states {
-		snaps[i] = s.Snapshot(now)
+		snap := s.Snapshot(now)
+		if p.healthTracker != nil {
+			snap.Health = p.healthTracker.Score(s.Email())
+		}
+		snaps[i] = snap
 	}
 	return snaps
 }

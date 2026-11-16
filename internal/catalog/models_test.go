@@ -29,6 +29,25 @@ func TestUpstreamModel(t *testing.T) {
 	}
 }
 
+// TestResolveModelAlias verifies user custom mappings and standard upstream alias resolution.
+func TestResolveModelAlias(t *testing.T) {
+	customMap := map[string]string{
+		"gemini-4-argon": "gemini-4-argon-high",
+		"claude-custom":  "claude-sonnet-4-6",
+	}
+
+	if resolved := ResolveModelAlias("gemini-4-argon", customMap); resolved != "gemini-4-argon-high" {
+		t.Errorf("expected gemini-4-argon-high, got %s", resolved)
+	}
+	if resolved := ResolveModelAlias("GEMINI-4-ARGON", customMap); resolved != "gemini-4-argon-high" {
+		t.Errorf("expected case-insensitive mapping gemini-4-argon-high, got %s", resolved)
+	}
+	// Fallback to standard aliases when not in custom map
+	if resolved := ResolveModelAlias("gemini-3.1-pro-high", customMap); resolved != "gemini-pro-agent" {
+		t.Errorf("expected gemini-pro-agent from standard alias, got %s", resolved)
+	}
+}
+
 // TestIsListedChatModel verifies that non-chat, internal IDE, and embedding models are filtered out.
 func TestIsListedChatModel(t *testing.T) {
 	valid := []string{

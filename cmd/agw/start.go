@@ -45,7 +45,7 @@ To run the daemon in the background, supply the --detach flag.`,
 )
 
 func init() {
-	startCmd.Flags().StringVar(&startStrategy, "strategy", "", "Account rotation strategy ('sticky' or 'round-robin')")
+	startCmd.Flags().StringVar(&startStrategy, "strategy", "", "Account rotation strategy ('sticky', 'round-robin', or 'hybrid')")
 	startCmd.Flags().BoolVarP(&startDetach, "detach", "d", false, "Run gateway daemon in the background")
 	startCmd.Flags().IntVarP(&startPort, "port", "p", 0, "HTTP port to bind (default 51400 or from config)")
 	rootCmd.AddCommand(startCmd)
@@ -59,8 +59,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	if startStrategy != "" {
-		if startStrategy != string(rotator.StrategySticky) && startStrategy != string(rotator.StrategyRoundRobin) {
-			return fmt.Errorf("invalid strategy %q: must be 'sticky' or 'round-robin'", startStrategy)
+		if startStrategy != string(rotator.StrategySticky) &&
+			startStrategy != string(rotator.StrategyRoundRobin) &&
+			startStrategy != string(rotator.StrategyHybrid) {
+			return fmt.Errorf("invalid strategy %q: must be 'sticky', 'round-robin', or 'hybrid'", startStrategy)
 		}
 		cfg.Strategy = startStrategy
 	}

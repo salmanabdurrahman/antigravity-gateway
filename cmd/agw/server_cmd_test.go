@@ -41,7 +41,7 @@ func TestStartCommandValidation(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error with unsupported rotation strategy, got nil")
 	}
-	if !strings.Contains(err.Error(), "must be 'sticky' or 'round-robin'") {
+	if !strings.Contains(err.Error(), "must be 'sticky', 'round-robin', or 'hybrid'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

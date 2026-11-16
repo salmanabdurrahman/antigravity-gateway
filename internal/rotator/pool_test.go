@@ -104,6 +104,50 @@ func TestPickerAllCoolingWait(t *testing.T) {
 	}
 }
 
+// TestPickerHybrid_HealthAndQuotaAwareness verifies smart account selection combining
+// health scores, remaining quota fractions, and multi-tier fallbacks.
+func TestPickerHybrid_HealthAndQuotaAwareness(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	a1 := rotator.NewAccountState(newTestAccount("a1@gmail.com"))
+	a2 := rotator.NewAccountState(newTestAccount("a2@gmail.com"))
+	states := []*rotator.AccountState{a1, a2}
+
+	picker := rotator.NewPicker(rotator.StrategyHybrid)
+	picker.SetQuotaThreshold(0.05) // 5% quota threshold
+
+	// Both accounts have full health, but a2 has critical quota (2% < 5%)
+	a1.SetQuotaFraction("gemini", 0.80)
+	a2.SetQuotaFraction("gemini", 0.02)
+
+	// Tier 1: a1 is selected because a2 is below quota threshold
+	res1 := picker.Pick("gemini", states, nil, now)
+	if res1.State == nil || res1.State.Account().Email != "a1@gmail.com" {
+		t.Fatalf("expected a1@gmail.com with healthy quota, got %v", res1.State)
+	}
+
+	// When a1 is cooling down, picker falls back to a2 (Tier 2: quota fallback)
+	a1.SetCooldown("gemini", now.Add(30*time.Second), "rate limit")
+	res2 := picker.Pick("gemini", states, nil, now)
+	if res2.State == nil || res2.State.Account().Email != "a2@gmail.com" {
+		t.Fatalf("expected failover to a2@gmail.com under quota fallback tier, got %v", res2.State)
+	}
+
+	// Lift a1 cooldown, drop a1 health below usability threshold (< 20)
+	a1.SetCooldown("gemini", now.Add(-1*time.Second), "")
+	for range 9 {
+		picker.HealthTracker().RecordRateLimit("a1@gmail.com")
+	}
+	if picker.HealthTracker().IsUsable("a1@gmail.com") {
+		t.Fatal("expected a1 to be marked unhealthy")
+	}
+
+	// a2 is usable (health 100), so even with low quota, a2 beats unhealthy a1
+	res3 := picker.Pick("gemini", states, nil, now)
+	if res3.State == nil || res3.State.Account().Email != "a2@gmail.com" {
+		t.Fatalf("expected healthy a2@gmail.com to beat unhealthy a1, got %v", res3.State)
+	}
+}
+
 // TestPoolHotReload verifies that changes to accounts.json on disk trigger automatic in-memory pool updates.
 func TestPoolHotReload(t *testing.T) {
 	tempDir := t.TempDir()

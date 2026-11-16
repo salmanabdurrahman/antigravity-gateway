@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -100,21 +101,29 @@ type Config struct {
 
 	// ClientMetadata optionally overrides the JSON Client-Metadata header dispatched upstream.
 	ClientMetadata string `json:"client_metadata,omitempty"`
+
+	// QuotaThreshold specifies the minimum fractional quota (0.0 to 1.0) before an account is deprioritized (default 0.05 = 5%).
+	QuotaThreshold float64 `json:"quota_threshold,omitzero"`
+
+	// ModelMapping maps custom model alias names to backend model IDs (e.g. {"gemini-4-argon": "gemini-4-argon-high"}).
+	ModelMapping map[string]string `json:"model_mapping,omitempty"`
 }
 
 // DefaultConfig instantiates a Config initialized with standard production defaults and fallback endpoints.
 func DefaultConfig() *Config {
 	return &Config{
-		Host:         DefaultHost,
-		Port:         DefaultPort,
-		Strategy:     DefaultStrategy,
-		ClientID:     DefaultClientID,
-		ClientSecret: DefaultClientSecret,
-		AuthURL:      DefaultAuthURL,
-		TokenURL:     DefaultTokenURL,
-		UserInfoURL:  DefaultUserInfoURL,
-		RedirectURI:  DefaultRedirectURI,
-		Endpoints:    DefaultEndpoints(),
+		Host:           DefaultHost,
+		Port:           DefaultPort,
+		Strategy:       DefaultStrategy,
+		ClientID:       DefaultClientID,
+		ClientSecret:   DefaultClientSecret,
+		AuthURL:        DefaultAuthURL,
+		TokenURL:       DefaultTokenURL,
+		UserInfoURL:    DefaultUserInfoURL,
+		RedirectURI:    DefaultRedirectURI,
+		Endpoints:      DefaultEndpoints(),
+		QuotaThreshold: 0.05,
+		ModelMapping:   make(map[string]string),
 	}
 }
 
@@ -252,5 +261,19 @@ func (c *Config) Clone() *Config {
 	}
 	cp := *c
 	cp.Endpoints = slices.Clone(c.Endpoints)
+	if c.ModelMapping != nil {
+		cp.ModelMapping = maps.Clone(c.ModelMapping)
+	}
 	return &cp
+}
+
+// ResolveModel returns the mapped model name if configured in ModelMapping, or the original model name.
+func (c *Config) ResolveModel(model string) string {
+	if c == nil || len(c.ModelMapping) == 0 {
+		return model
+	}
+	if target, ok := c.ModelMapping[model]; ok && target != "" {
+		return target
+	}
+	return model
 }
