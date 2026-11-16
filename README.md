@@ -110,13 +110,13 @@ For Windows PowerShell verification, unattended installs, and system installatio
 git clone https://github.com/salmanabdurrahman/antigravity-gateway.git
 cd antigravity-gateway
 go build -o bin/agw ./cmd/agw
-```
 
-Verify binary:
-
-```bash
+# Verify local binary
 ./bin/agw version
-./bin/agw --help
+
+# Optional: move binary to local PATH for global usage
+mkdir -p ~/.local/bin
+mv bin/agw ~/.local/bin/
 ```
 
 ## CLI Usage
@@ -155,13 +155,13 @@ For OAuth architecture details, authorized scopes, PKCE compliance, and custom c
 Launch the interactive Google OAuth PKCE login flow. Automatically opens your browser and starts an ephemeral loopback callback listener on `http://127.0.0.1:51121/oauth-callback`:
 
 ```bash
-./bin/agw login
+agw login
 ```
 
 For headless environments or remote SSH sessions:
 
 ```bash
-./bin/agw login --no-browser
+agw login --no-browser
 ```
 
 _(If port binding fails or browser redirect does not hit the loopback server, paste the final redirect URL into the terminal prompt to complete authentication)_
@@ -171,7 +171,7 @@ _(If port binding fails or browser redirect does not hit the loopback server, pa
 Inspect configured accounts and their linked Cloud Code companion projects:
 
 ```bash
-./bin/agw accounts
+agw accounts
 ```
 
 #### Check Account Quotas
@@ -179,7 +179,7 @@ Inspect configured accounts and their linked Cloud Code companion projects:
 Query live upstream quota remaining (Gemini, Claude, and reset time) per account:
 
 ```bash
-./bin/agw accounts --check
+agw accounts --check
 ```
 
 #### Remove an Account
@@ -187,7 +187,7 @@ Query live upstream quota remaining (Gemini, Claude, and reset time) per account
 Remove credentials for an account from the local store:
 
 ```bash
-./bin/agw logout user@example.com
+agw logout user@example.com
 ```
 
 ### Model Catalog & Token Limits
@@ -197,7 +197,7 @@ Remove credentials for an account from the local store:
 Inspect all available chat completion models along with their context window, maximum output tokens, and reasoning/multimodal capabilities:
 
 ```bash
-./bin/agw models list
+agw models list
 ```
 
 _(Loads from `~/.agw/models-cache.json` for instant offline responses. Pass `--refresh` to force a live upstream catalog refresh)._
@@ -218,13 +218,13 @@ The gateway maps user-friendly public model aliases to Google's internal Cloud C
 Run the gateway reverse proxy in the foreground on `127.0.0.1:51400`:
 
 ```bash
-./bin/agw start
+agw start
 ```
 
 With rotation strategy override (`sticky` or `round-robin`):
 
 ```bash
-./bin/agw start --strategy round-robin
+agw start --strategy round-robin
 ```
 
 #### Start Gateway in Background (Detached)
@@ -232,7 +232,7 @@ With rotation strategy override (`sticky` or `round-robin`):
 Fork and launch the daemon in the background. The process ID is recorded in `~/.agw/agw.pid` and logs are written to `~/.agw/agw.log`:
 
 ```bash
-./bin/agw start --detach
+agw start --detach
 ```
 
 #### Stop Gateway Daemon
@@ -240,7 +240,7 @@ Fork and launch the daemon in the background. The process ID is recorded in `~/.
 Terminate the running background daemon gracefully via SIGTERM:
 
 ```bash
-./bin/agw stop
+agw stop
 ```
 
 ### Client Configuration & Agent Setup
@@ -252,7 +252,7 @@ Antigravity Gateway automatically configures AI coding agents to use the local r
 Registers the `"antigravity"` provider in `~/.pi/agent/models.json`:
 
 ```bash
-./bin/agw setup pi
+agw setup pi
 ```
 
 Optional flags:
@@ -267,7 +267,7 @@ Optional flags:
 Registers the `"antigravity"` provider using `@opencode/ai/providers/openai-compatible` in `~/.config/opencode/opencode.json`:
 
 ```bash
-./bin/agw setup opencode
+agw setup opencode
 ```
 
 Optional flags:
@@ -282,7 +282,7 @@ Optional flags:
 Run an end-to-end sanity check on your gateway environment:
 
 ```bash
-./bin/agw doctor
+agw doctor
 ```
 
 Audits and reports:

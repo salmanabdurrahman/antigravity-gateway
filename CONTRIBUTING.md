@@ -26,8 +26,10 @@ This project adheres to the Contributor Covenant. By participating, you are expe
 
 1. **Fork and Clone**:
 
+   Clone the repository directly (or fork on GitHub and clone your fork):
+
    ```bash
-   git clone https://github.com/<your-username>/antigravity-gateway.git
+   git clone https://github.com/salmanabdurrahman/antigravity-gateway.git
    cd antigravity-gateway
    ```
 

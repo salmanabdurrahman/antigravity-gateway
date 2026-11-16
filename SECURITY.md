@@ -19,7 +19,7 @@ The Antigravity Gateway (`agw`) project takes security and credentials handling 
    - Navigate to the repository's **Security** tab on GitHub.
    - Click **Report a vulnerability** to open a private draft advisory.
 2. **Direct Contact**:
-   - If GitHub Private Reporting is unavailable, contact the project maintainer directly at `salmanabdurrahman12345@gmail.com` with the subject line `[SECURITY] Antigravity Gateway Vulnerability Report`.
+   - If GitHub Private Reporting is unavailable, contact the project maintainer directly at `salmanabdurrahmann12@gmail.com` with the subject line `[SECURITY] Antigravity Gateway Vulnerability Report`.
 
 ### What to Include
 

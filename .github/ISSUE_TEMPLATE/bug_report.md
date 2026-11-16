@@ -15,7 +15,7 @@ A clear and concise description of the bug.
 - **Operating System**: (e.g. macOS Sonoma 14.5 arm64, Ubuntu 24.04 x86_64, Windows 11)
 - **agw Version**: (output of `agw version`)
 - **Client AI Agent**: (e.g. Pi Coding Agent, OpenCode, Cursor, custom client)
-- **Model Used**: (e.g. `gemini-2.5-pro`, `gemini-2.5-flash`, `claude-3-7-sonnet`)
+- **Model Used**: (e.g. `gemini-3.8-flash-high`, `gemini-3.1-pro-high`, `claude-sonnet-4-6`, `gemini-2.5-flash`)
 
 ## Steps to Reproduce
 
