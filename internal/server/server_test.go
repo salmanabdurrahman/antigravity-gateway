@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -380,5 +381,65 @@ func waitForHealthy(t *testing.T, ctx context.Context, addr string) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestServerConfigSnapshotCopyOnWrite verifies that runtime configuration updates replace an
+// immutable snapshot: concurrent readers always observe a fully populated struct and the caller's
+// configuration passed to NewServer is never mutated.
+func TestServerConfigSnapshotCopyOnWrite(t *testing.T) {
+	tempDir := t.TempDir()
+
+	callerCfg := &config.Config{
+		Host:         "127.0.0.1",
+		Port:         51400,
+		Strategy:     "sticky",
+		ModelMapping: map[string]string{"alias": "backend"},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	store := auth.NewStore(filepath.Join(tempDir, "accounts.json"))
+	pool, err := rotator.NewPool(store, callerCfg, time.Now)
+	if err != nil {
+		t.Fatalf("failed creating pool: %v", err)
+	}
+	rot := rotator.NewRotator(pool, callerCfg, logger, time.Now)
+	cat := catalog.NewModelCatalog(callerCfg, rot, filepath.Join(tempDir, "models-cache.json"), logger)
+
+	srv, err := NewServer(Options{Config: callerCfg, Rotator: rot, Catalog: cat, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(2)
+		go func(strategy string) {
+			defer wg.Done()
+			srv.setConfig(func(c *config.Config) { c.Strategy = strategy })
+		}([]string{"sticky", "round-robin", "hybrid"}[i%3])
+		go func() {
+			defer wg.Done()
+			for range 50 {
+				snapshot := srv.config()
+				if snapshot == nil {
+					t.Error("config snapshot must never be nil")
+					return
+				}
+				if snapshot.Host == "" || snapshot.Port == 0 {
+					t.Errorf("observed partially populated config snapshot: %+v", snapshot)
+					return
+				}
+				_ = snapshot.ModelMapping["alias"]
+			}
+		}()
+	}
+	wg.Wait()
+
+	if callerCfg.Strategy != "sticky" {
+		t.Errorf("caller configuration must not be mutated, got strategy %q", callerCfg.Strategy)
+	}
+	if got := srv.config().ModelMapping["alias"]; got != "backend" {
+		t.Errorf("expected model mapping to survive updates, got %q", got)
 	}
 }

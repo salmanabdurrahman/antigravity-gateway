@@ -53,6 +53,31 @@
       color: var(--warning);
       border-color: rgba(210, 153, 34, 0.4);
     }
+    .badge.offline {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--danger);
+      border-color: rgba(248, 81, 73, 0.4);
+    }
+    #toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      max-width: 360px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      background: var(--card-bg);
+      color: var(--text-bright);
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+    #toast.visible { opacity: 1; transform: translateY(0); }
+    #toast.success { border-color: rgba(63, 185, 80, 0.5); color: var(--success); }
+    #toast.error { border-color: rgba(248, 81, 73, 0.5); color: var(--danger); }
     .controls { display: flex; align-items: center; gap: 12px; }
     select, button {
       background: var(--card-bg);
@@ -209,6 +234,7 @@
         const data = await res.json();
 
         // Update header
+        setConnectionState(true);
         document.getElementById('version-label').textContent = data.version ? `v${data.version}` : 'v0.1.0';
         if (data.strategy) {
           document.getElementById('strategy-select').value = data.strategy;
@@ -262,9 +288,9 @@
             if (m.images) features.push('Multimodal');
             return `
               <tr>
-                <td style="font-weight: 500; color: var(--text-bright);">${escapeHtml(m.display_name || m.id)}</td>
-                <td>${m.context_window ? m.context_window.toLocaleString() : '-'}</td>
-                <td>${m.max_output_tokens ? m.max_output_tokens.toLocaleString() : '-'}</td>
+                <td style="font-weight: 500; color: var(--text-bright);">${escapeHtml(m.displayName || m.id)}</td>
+                <td>${m.contextWindow ? m.contextWindow.toLocaleString() : '-'}</td>
+                <td>${m.maxOutputTokens ? m.maxOutputTokens.toLocaleString() : '-'}</td>
                 <td><span style="font-size: 11px; color: var(--text-muted);">${features.join(' • ') || 'Chat'}</span></td>
                 <td>
                   <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px;">
@@ -282,7 +308,26 @@
 
       } catch (err) {
         console.error(err);
+        setConnectionState(false);
       }
+    }
+
+    function setConnectionState(connected) {
+      const badge = document.getElementById('status-badge');
+      if (!badge) return;
+      badge.textContent = connected ? '\u25cf Active' : '\u25cf Disconnected';
+      badge.className = connected ? 'badge' : 'badge offline';
+    }
+
+    // Toast replaces modal dialogs so feedback never blocks the dashboard polling loop.
+    let toastTimer = null;
+    function showToast(message, kind) {
+      const toast = document.getElementById('toast');
+      if (!toast) return;
+      toast.textContent = message;
+      toast.className = 'visible ' + (kind || '');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.className = ''; }, 4000);
     }
 
     async function updateStrategy() {
@@ -295,13 +340,14 @@
           body: JSON.stringify({ strategy: val })
         });
         if (res.ok) {
-          alert('Strategy updated to ' + val);
+          showToast('Rotation strategy set to ' + val, 'success');
           loadData();
         } else {
-          alert('Failed updating strategy');
+          showToast('Strategy update was rejected by the daemon.', 'error');
         }
       } catch (e) {
-        alert('Network error: ' + e.message);
+        showToast('Network error: ' + e.message, 'error');
+        setConnectionState(false);
       }
     }
 
@@ -310,8 +356,22 @@
       return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    // Poll only while the dashboard is visible; refresh immediately when the tab regains focus so a
+    // paused dashboard never shows stale account or quota data.
+    const refreshIntervalMs = 5000;
+    let pollTimer = setInterval(loadData, refreshIntervalMs);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        return;
+      }
+      if (!pollTimer) pollTimer = setInterval(loadData, refreshIntervalMs);
+      loadData();
+    });
+
     loadData();
-    setInterval(loadData, 5000);
   </script>
+  <div id="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

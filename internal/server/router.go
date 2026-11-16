@@ -114,7 +114,7 @@ func (s *Server) buildHandler() http.Handler {
 
 	// Chain middlewares: Recovery -> Auth -> Logging -> ServeMux
 	handler := RecoveryMiddleware(s.logger)(
-		AuthMiddleware(s.cfg.APIKey, s.logger)(
+		AuthMiddleware(s.config().APIKey, s.logger)(
 			LoggingMiddleware(s.logger)(mux),
 		),
 	)
@@ -266,6 +266,7 @@ func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.rotator.SetStrategy(strat)
+	s.setConfig(func(c *config.Config) { c.Strategy = string(strat) })
 
 	// Persist best-effort: the in-memory strategy is already active, so a write failure only
 	// affects the next daemon restart and must not fail the UI request. Only the strategy field
@@ -301,7 +302,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	originalModel := chatReq.Model
-	resolvedModel := catalog.ResolveModelAlias(chatReq.Model, s.cfg.ModelMapping)
+	resolvedModel := catalog.ResolveModelAlias(chatReq.Model, s.config().ModelMapping)
 	_ = s.catalog.Ensure(r.Context())
 	info := s.catalog.Info(resolvedModel)
 	upstream := catalog.UpstreamModel(resolvedModel)
@@ -556,7 +557,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	}
 
 	originalModel := anthReq.Model
-	resolvedModel := catalog.ResolveModelAlias(anthReq.Model, s.cfg.ModelMapping)
+	resolvedModel := catalog.ResolveModelAlias(anthReq.Model, s.config().ModelMapping)
 	_ = s.catalog.Ensure(r.Context())
 	info := s.catalog.Info(resolvedModel)
 	upstream := catalog.UpstreamModel(resolvedModel)

@@ -266,6 +266,8 @@ agw ui
 
 Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of `config.json`, leaving every other stored setting untouched.
 
+The dashboard and its JSON endpoints are documented in the [Web Dashboard Contract](docs/webui.md): read endpoints stay unauthenticated on loopback, strategy mutation is same-origin restricted, and no token material is ever serialized.
+
 ### Client Configuration & Agent Setup
 
 Antigravity Gateway automatically configures AI coding agents to use the local reverse proxy as an OpenAI-compatible provider. Before modifying existing configurations, `agw` creates a timestamped atomic backup (`*.bak-<timestamp>`) and performs a 1-token test chat completion probe to verify end-to-end connectivity.

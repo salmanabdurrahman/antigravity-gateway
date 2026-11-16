@@ -43,8 +43,9 @@ type Server struct {
 	// mu guards mutable daemon lifecycle states.
 	mu sync.RWMutex
 
-	// cfg holds application-level settings and listener parameters.
-	cfg *config.Config
+	// cfg holds an immutable snapshot of application-level settings. Runtime changes replace the
+	// pointer atomically (copy-on-write), so handlers always observe a fully consistent struct.
+	cfg atomic.Pointer[config.Config]
 
 	// rotator coordinates multi-account execution and failover.
 	rotator *rotator.Rotator
@@ -108,23 +109,25 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:      opts.Config,
 		rotator:  opts.Rotator,
 		catalog:  opts.Catalog,
 		logger:   logger,
 		listener: opts.Listener,
 		pidFile:  opts.PIDFile,
 	}
+	// Clone so later mutation of the caller's configuration cannot change what handlers observe.
+	s.cfg.Store(opts.Config.Clone())
 
 	handler := s.buildHandler()
 
 	// Enforce strict local loopback binding address
-	host := s.cfg.Host
+	cfg := s.config()
+	host := cfg.Host
 	ip := net.ParseIP(host)
 	if host != "127.0.0.1" && host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		host = config.DefaultHost
 	}
-	port := s.cfg.Port
+	port := cfg.Port
 	if port <= 0 {
 		port = config.DefaultPort
 	}
@@ -139,6 +142,25 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// config returns the current immutable configuration snapshot.
+func (s *Server) config() *config.Config {
+	return s.cfg.Load()
+}
+
+// setConfig applies mutate to a deep copy of the current configuration and publishes the result
+// atomically, so no handler can ever observe a partially mutated struct. The copy also keeps the
+// caller-owned configuration passed to NewServer untouched.
+func (s *Server) setConfig(mutate func(*config.Config)) {
+	current := s.cfg.Load()
+	if current == nil || mutate == nil {
+		return
+	}
+
+	updated := current.Clone()
+	mutate(updated)
+	s.cfg.Store(updated)
 }
 
 // Addr returns the configured or actively listening network address of the server.
@@ -165,7 +187,7 @@ func (s *Server) Start() error {
 	if cfgPath, err := config.ConfigFilePath(); err == nil {
 		s.logger.Info("active configuration file", "path", cfgPath, "strategy", s.rotator.Strategy())
 	}
-	if err := config.ValidateAPIKey(s.cfg.APIKey); err != nil {
+	if err := config.ValidateAPIKey(s.config().APIKey); err != nil {
 		s.logger.Warn("gateway api key is not in the generated format; clients holding a different key will receive HTTP 401",
 			"reason", err, "hint", "run 'agw setup <client>' with the key stored in config.json")
 	}

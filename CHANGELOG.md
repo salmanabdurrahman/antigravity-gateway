@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind failures now name the process holding the port and point at `agw stop`, and starting a second daemon reports the running instance and its version.
 - `agw start` probes the configured port before spawning, so an orphaned daemon is reported and its `agw.pid` restored instead of launching a process that cannot bind.
 - Socket table lookups used for daemon discovery are bounded by a timeout and their `lsof`/`netstat` output parsing is unit tested on every platform.
+- Server configuration is published as an immutable copy-on-write snapshot, so handlers never observe a partially mutated struct and the caller's configuration is left untouched.
+- Package-level test isolation pins `AGW_HOME` to a temporary directory for the whole test binary, so no test can read or write the operator's real `~/.agw` directory.
+- Dashboard feedback uses a non-blocking inline toast with a connection state badge, and polling pauses while the tab is hidden.
+- Added the authoritative [Web Dashboard Contract](docs/webui.md) covering endpoints, loopback trust model, and the same-origin mutation rule.
 - Imported desktop sessions store their bearer token in a dedicated `access_token` field with `credential_source: local_desktop`, so it is never sent to the OAuth token endpoint as a refresh token.
 - Accounts without a refresh token resolve their token through `auth.AccessTokenFor`, and an expired desktop session reports an actionable re-import message instead of a misleading OAuth failure.
 - `agw accounts` and `agw doctor` surface imported desktop sessions and remind operators to re-run `agw login --local` once the token expires.

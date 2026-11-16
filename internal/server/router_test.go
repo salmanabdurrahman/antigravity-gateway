@@ -662,9 +662,9 @@ func TestModelMappingAliasInRouter(t *testing.T) {
 	})
 
 	// Configure custom model alias
-	harness.server.cfg.ModelMapping = map[string]string{
-		"gemini-4-argon": "gemini-4-argon-high",
-	}
+	harness.server.setConfig(func(c *config.Config) {
+		c.ModelMapping = map[string]string{"gemini-4-argon": "gemini-4-argon-high"}
+	})
 
 	handler := harness.server.buildHandler()
 
@@ -783,6 +783,9 @@ func TestUIEndpoints(t *testing.T) {
 	}
 	if persisted.UserAgent != "disk-agent/1.0" {
 		t.Errorf("persisted user_agent = %q, expected 'disk-agent/1.0'", persisted.UserAgent)
+	}
+	if got := harness.server.config().Strategy; got != string(rotator.StrategyHybrid) {
+		t.Errorf("in-memory config snapshot strategy = %q, expected %q", got, rotator.StrategyHybrid)
 	}
 
 	// 5. POST /ui/api/strategy rejects unsupported strategy names
