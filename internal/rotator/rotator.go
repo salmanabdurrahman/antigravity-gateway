@@ -106,7 +106,7 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 		pool:    pool,
 		picker:  picker,
 		cfg:     cfg,
-		client:  &http.Client{Timeout: 0}, // Stream requests can be long-running
+		client:  config.DefaultHTTPClient(0), // Stream requests can be long-running
 		logger:  logger,
 		nowFn:   nowFn,
 		sleepFn: defaultSleep,

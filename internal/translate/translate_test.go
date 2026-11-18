@@ -594,3 +594,34 @@ func TestReadSSEEventsLargePayload(t *testing.T) {
 		t.Errorf("expected 100KB text, got %d bytes", len(receivedText))
 	}
 }
+
+// TestWrapEnvelope verifies packaging a pre-translated GeminiRequest with companion project
+// metadata and unique UUID-based RequestID without re-translating content.
+func TestWrapEnvelope(t *testing.T) {
+	geminiReq := &GeminiRequest{
+		Contents: []Content{
+			{Role: "user", Parts: []Part{{Text: "Hello world"}}},
+		},
+	}
+
+	env := WrapEnvelope(geminiReq, "gemini-pro-agent", "project-12345")
+	if env == nil {
+		t.Fatal("expected non-nil AgentEnvelope")
+	}
+
+	if env.Project != "project-12345" {
+		t.Errorf("expected Project 'project-12345', got %s", env.Project)
+	}
+	if env.Model != "gemini-pro-agent" {
+		t.Errorf("expected Model 'gemini-pro-agent', got %s", env.Model)
+	}
+	if env.Request != geminiReq {
+		t.Error("expected Request pointer to match input geminiReq")
+	}
+	if !strings.HasPrefix(env.RequestID, "agent-") {
+		t.Errorf("expected RequestID prefix 'agent-', got %s", env.RequestID)
+	}
+	if env.UserAgent != "antigravity" || env.RequestType != "agent" {
+		t.Errorf("unexpected UserAgent or RequestType: %s / %s", env.UserAgent, env.RequestType)
+	}
+}

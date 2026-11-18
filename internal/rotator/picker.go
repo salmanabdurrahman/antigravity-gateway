@@ -217,30 +217,54 @@ func (p *Picker) pickHybrid(model string, states []*AccountState, skip map[*Acco
 	health := p.HealthTracker()
 	threshold := p.QuotaThreshold()
 
+	type accountMetric struct {
+		state     *AccountState
+		email     string
+		usable    bool
+		hScore    float64
+		tokens    float64
+		quotaFrac float64
+		lastUsed  time.Time
+	}
+
+	metrics := make([]accountMetric, len(allUsable))
+	for i, s := range allUsable {
+		email := s.Email()
+		metrics[i] = accountMetric{
+			state:     s,
+			email:     email,
+			usable:    health.IsUsable(email),
+			hScore:    health.Score(email),
+			tokens:    s.TokenBucket().Tokens(now),
+			quotaFrac: s.QuotaFraction(model),
+			lastUsed:  s.LastUsed(),
+		}
+	}
+
 	// Tier 1: Normal candidates (healthy, has tokens, quota >= threshold)
-	var tier1 []*AccountState
-	for _, s := range allUsable {
-		if health.IsUsable(s.Email()) && s.TokenBucket().Tokens(now) >= 1.0 && s.QuotaFraction(model) >= threshold {
-			tier1 = append(tier1, s)
+	var tier1 []accountMetric
+	for _, m := range metrics {
+		if m.usable && m.tokens >= 1.0 && m.quotaFrac >= threshold {
+			tier1 = append(tier1, m)
 		}
 	}
 
 	// Tier 2: Quota fallback (healthy, has tokens, but quota < threshold)
-	var tier2 []*AccountState
+	var tier2 []accountMetric
 	if len(tier1) == 0 {
-		for _, s := range allUsable {
-			if health.IsUsable(s.Email()) && s.TokenBucket().Tokens(now) >= 1.0 {
-				tier2 = append(tier2, s)
+		for _, m := range metrics {
+			if m.usable && m.tokens >= 1.0 {
+				tier2 = append(tier2, m)
 			}
 		}
 	}
 
 	// Tier 3: Emergency (all unhealthy, but have tokens)
-	var tier3 []*AccountState
+	var tier3 []accountMetric
 	if len(tier1) == 0 && len(tier2) == 0 {
-		for _, s := range allUsable {
-			if s.TokenBucket().Tokens(now) >= 1.0 {
-				tier3 = append(tier3, s)
+		for _, m := range metrics {
+			if m.tokens >= 1.0 {
+				tier3 = append(tier3, m)
 			}
 		}
 	}
@@ -254,24 +278,23 @@ func (p *Picker) pickHybrid(model string, states []*AccountState, skip map[*Acco
 		selectedTier = tier3
 	}
 	if len(selectedTier) == 0 {
-		selectedTier = allUsable
+		selectedTier = metrics
 	}
 
-	// Calculate scores for selected candidates
+	// Calculate scores for selected candidates from cached metrics snapshot
 	candidates := make([]candidate, len(selectedTier))
-	for i, s := range selectedTier {
+	for i, m := range selectedTier {
 		// Health component: 0..100 * 2.0 = 0..200
-		hScore := health.Score(s.Email()) * 2.0
+		hScore := m.hScore * 2.0
 
 		// Token component: 0..50
-		tokens := s.TokenBucket().Tokens(now)
-		tScore := (tokens / DefaultTokenBucketCapacity * 100.0) * 0.5
+		tScore := (m.tokens / DefaultTokenBucketCapacity * 100.0) * 0.5
 
 		// Quota component: 0..30
-		qScore := (s.QuotaFraction(model) * 100.0) * 0.3
+		qScore := (m.quotaFrac * 100.0) * 0.3
 
 		// LRU freshness: 0..18 (capped at 1 hour)
-		timeSince := now.Sub(s.LastUsed()).Seconds()
+		timeSince := now.Sub(m.lastUsed).Seconds()
 		if timeSince > 3600 {
 			timeSince = 3600
 		}
@@ -281,7 +304,7 @@ func (p *Picker) pickHybrid(model string, states []*AccountState, skip map[*Acco
 		lruScore := timeSince * 0.005
 
 		candidates[i] = candidate{
-			state: s,
+			state: m.state,
 			score: hScore + tScore + qScore + lruScore,
 		}
 	}

@@ -297,15 +297,8 @@ func IsSchemaRejection(statusCode int, body string) bool {
 	return schemaRejectRegex.MatchString(body)
 }
 
-// BuildEnvelope builds the full Cloud Code Assist agent envelope containing companion project metadata.
-func BuildEnvelope(req *ChatRequest, opts BuildOptions) (*AgentEnvelope, error) {
-	geminiReq, err := BuildRequest(req, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	upstreamModelID := catalog.UpstreamModel(req.Model)
-
+// WrapEnvelope packages an already translated GeminiRequest with companion project metadata and a fresh RequestID.
+func WrapEnvelope(geminiReq *GeminiRequest, upstreamModelID, projectID string) *AgentEnvelope {
 	uuidBytes := make([]byte, 16)
 	_, _ = rand.Read(uuidBytes)
 	uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x40 // RFC 4122 version 4
@@ -314,13 +307,22 @@ func BuildEnvelope(req *ChatRequest, opts BuildOptions) (*AgentEnvelope, error) 
 		uuidBytes[0:4], uuidBytes[4:6], uuidBytes[6:8], uuidBytes[8:10], uuidBytes[10:16])
 
 	return &AgentEnvelope{
-		Project:     opts.ProjectID,
+		Project:     projectID,
 		Model:       upstreamModelID,
 		Request:     geminiReq,
 		RequestType: "agent",
 		UserAgent:   "antigravity",
 		RequestID:   requestID,
-	}, nil
+	}
+}
+
+// BuildEnvelope builds the full Cloud Code Assist agent envelope containing companion project metadata.
+func BuildEnvelope(req *ChatRequest, opts BuildOptions) (*AgentEnvelope, error) {
+	geminiReq, err := BuildRequest(req, opts)
+	if err != nil {
+		return nil, err
+	}
+	return WrapEnvelope(geminiReq, catalog.UpstreamModel(req.Model), opts.ProjectID), nil
 }
 
 // BuildRequest translates an OpenAI ChatRequest into a GeminiRequest.

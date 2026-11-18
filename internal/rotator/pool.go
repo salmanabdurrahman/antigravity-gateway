@@ -141,13 +141,8 @@ func (s *AccountState) SetCooldown(model string, until time.Time, reason string)
 	s.mu.Unlock()
 }
 
-// TokenBucket returns the account's token bucket instance safely.
+// TokenBucket returns the account's token bucket instance safely without lock contention.
 func (s *AccountState) TokenBucket() *TokenBucket {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.bucket == nil {
-		s.bucket = NewTokenBucket(DefaultTokenBucketCapacity, DefaultTokenBucketRefillRate, time.Now())
-	}
 	return s.bucket
 }
 
@@ -353,8 +348,8 @@ type Pool struct {
 	// fileMod tracks the disk modification time of accounts.json for hot-reloading.
 	fileMod time.Time
 
-	// lastStatAt throttles disk stat checks to avoid excessive filesystem calls.
-	lastStatAt time.Time
+	// lastStatNano throttles disk stat checks locklessly using atomic Unix nanoseconds.
+	lastStatNano atomic.Int64
 
 	// healthTracker provides live operational health scoring for account snapshots.
 	healthTracker *HealthTracker
@@ -382,7 +377,7 @@ func NewPool(store *auth.Store, cfg *config.Config, nowFn func() time.Time) (*Po
 		p.SetAccounts(accounts)
 		modTime, _ := store.ModTime()
 		p.fileMod = modTime
-		p.lastStatAt = nowFn()
+		p.lastStatNano.Store(nowFn().UnixNano())
 	}
 
 	return p, nil
@@ -438,19 +433,21 @@ func (p *Pool) States() []*AccountState {
 }
 
 // RefreshIfChanged checks if accounts.json has been modified by CLI login/logout and reloads state.
+// It implements a lockless fast-path via atomic timestamps to avoid mutex contention on the request path.
 func (p *Pool) RefreshIfChanged() error {
 	if p.store == nil {
 		return nil
 	}
 
 	now := p.nowFn()
-	p.mu.Lock()
-	if now.Sub(p.lastStatAt) < FileCheckInterval {
-		p.mu.Unlock()
+	nowNano := now.UnixNano()
+	lastStat := p.lastStatNano.Load()
+	if time.Duration(nowNano-lastStat) < FileCheckInterval {
 		return nil
 	}
-	p.lastStatAt = now
-	p.mu.Unlock()
+	if !p.lastStatNano.CompareAndSwap(lastStat, nowNano) {
+		return nil
+	}
 
 	modTime, err := p.store.ModTime()
 	if err != nil {

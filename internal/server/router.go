@@ -370,9 +370,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			SessionID:     sessionID,
 		}
 
+		geminiReq, reqErr := translate.BuildRequest(&chatReq, opts)
+		if reqErr != nil {
+			sendJSONError(w, http.StatusBadRequest, reqErr.Error(), 0)
+			return
+		}
+
 		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
-			opts.ProjectID = st.ProjectID()
-			return translate.BuildEnvelope(&chatReq, opts)
+			return translate.WrapEnvelope(geminiReq, upstream, st.ProjectID()), nil
 		})
 		if err != nil {
 			var rotErr *rotator.RotatorError
@@ -620,9 +625,14 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			SessionID:     sessionID,
 		}
 
+		geminiReq, reqErr := translate.BuildAnthropicRequest(&anthReq, opts)
+		if reqErr != nil {
+			sendAnthropicJSONError(w, http.StatusBadRequest, reqErr.Error(), 0)
+			return
+		}
+
 		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
-			opts.ProjectID = st.ProjectID()
-			return translate.BuildAnthropicEnvelope(&anthReq, opts)
+			return translate.WrapEnvelope(geminiReq, upstream, st.ProjectID()), nil
 		})
 		if err != nil {
 			var rotErr *rotator.RotatorError

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 )
 
 // TestProxyFromEnvironmentHonored verifies that standard HTTP clients created throughout the gateway
@@ -53,5 +54,42 @@ func TestProxyFromEnvironmentHonored(t *testing.T) {
 	expectedHTTPS, _ := url.Parse(fakeHTTPSProxy)
 	if httpsProxyURL.String() != expectedHTTPS.String() {
 		t.Errorf("expected https proxy %s, got %s", expectedHTTPS, httpsProxyURL)
+	}
+}
+
+// TestNewTransportConfiguration verifies that NewTransport initializes high connection limits,
+// HTTP/2 support, and bounded response header timeouts.
+func TestNewTransportConfiguration(t *testing.T) {
+	tr := NewTransport()
+	if tr == nil {
+		t.Fatal("expected non-nil transport")
+	}
+
+	if tr.MaxIdleConns != 100 {
+		t.Errorf("expected MaxIdleConns 100, got %d", tr.MaxIdleConns)
+	}
+	if tr.MaxIdleConnsPerHost != 32 {
+		t.Errorf("expected MaxIdleConnsPerHost 32, got %d", tr.MaxIdleConnsPerHost)
+	}
+	if tr.ResponseHeaderTimeout != 60*time.Second {
+		t.Errorf("expected ResponseHeaderTimeout 60s, got %v", tr.ResponseHeaderTimeout)
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("expected ForceAttemptHTTP2 true")
+	}
+}
+
+// TestDefaultHTTPClientTimeout verifies that DefaultHTTPClient configures the custom transport
+// and respects the provided timeout duration.
+func TestDefaultHTTPClientTimeout(t *testing.T) {
+	client := DefaultHTTPClient(15 * time.Second)
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+	if client.Timeout != 15*time.Second {
+		t.Errorf("expected timeout 15s, got %v", client.Timeout)
+	}
+	if client.Transport == nil {
+		t.Fatal("expected non-nil client transport")
 	}
 }

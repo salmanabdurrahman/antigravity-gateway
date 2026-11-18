@@ -192,7 +192,7 @@ func executeTokenRequest(ctx context.Context, cfg *config.Config, form url.Value
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := config.DefaultHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("dispatching token request to %s: %w", tokenURL, err)

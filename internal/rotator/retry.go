@@ -185,12 +185,18 @@ func NewCooldownTracker() *CooldownTracker {
 	}
 }
 
-// SetCooldown sets the cooldown expiration for a specific model or wildcard ("*").
+// SetCooldown sets the cooldown expiration for a specific model or wildcard ("*") and prunes expired entries.
 func (c *CooldownTracker) SetCooldown(model string, until time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cooldowns == nil {
 		c.cooldowns = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for k, v := range c.cooldowns {
+		if !v.IsZero() && v.Before(now) {
+			delete(c.cooldowns, k)
+		}
 	}
 	c.cooldowns[model] = until
 }

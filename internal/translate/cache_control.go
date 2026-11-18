@@ -8,13 +8,40 @@ import (
 )
 
 // CleanCacheControl recursively traverses data structures (maps, slices) and strips
-// all "cache_control" keys.
+// all "cache_control" keys. It includes a zero-allocation fast-path when no "cache_control" keys exist.
 //
 // Protocol Quirk: Claude Code CLI and modern coding agents inject ephemeral cache control
 // markers (e.g. {"cache_control": {"type": "ephemeral"}}). Google Cloud Code Assist rejects
 // any unexpected keys in message blocks with HTTP 400 "Extra inputs are not permitted".
 // Cleaning cache_control proactively eliminates these failures.
 func CleanCacheControl(data any) any {
+	if !hasCacheControl(data) {
+		return data
+	}
+	return cleanCacheControlRecursive(data)
+}
+
+// hasCacheControl inspects maps and slices without allocating to detect cache_control keys.
+func hasCacheControl(data any) bool {
+	switch v := data.(type) {
+	case map[string]any:
+		for k, val := range v {
+			if k == "cache_control" || hasCacheControl(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range v {
+			if hasCacheControl(val) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cleanCacheControlRecursive strips cache_control keys recursively from maps and slices.
+func cleanCacheControlRecursive(data any) any {
 	switch v := data.(type) {
 	case map[string]any:
 		cleaned := make(map[string]any, len(v))
@@ -22,13 +49,13 @@ func CleanCacheControl(data any) any {
 			if k == "cache_control" {
 				continue
 			}
-			cleaned[k] = CleanCacheControl(val)
+			cleaned[k] = cleanCacheControlRecursive(val)
 		}
 		return cleaned
 	case []any:
 		cleaned := make([]any, len(v))
 		for i, val := range v {
-			cleaned[i] = CleanCacheControl(val)
+			cleaned[i] = cleanCacheControlRecursive(val)
 		}
 		return cleaned
 	default:

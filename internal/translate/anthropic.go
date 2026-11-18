@@ -172,30 +172,13 @@ func ValidateAnthropicRequest(req *AnthropicRequest) error {
 }
 
 // BuildAnthropicEnvelope converts an AnthropicRequest into an AgentEnvelope ready for Google Cloud Code.
+// BuildAnthropicEnvelope builds the full Cloud Code Assist agent envelope containing companion project metadata.
 func BuildAnthropicEnvelope(req *AnthropicRequest, opts BuildOptions) (*AgentEnvelope, error) {
 	geminiReq, err := BuildAnthropicRequest(req, opts)
 	if err != nil {
 		return nil, err
 	}
-
-	upstreamModelID := catalog.UpstreamModel(req.Model)
-
-	uuidBytes := make([]byte, 16)
-	// crypto/rand.Read in Go 1.24+ never returns an error; error is safely ignorable.
-	_, _ = rand.Read(uuidBytes)
-	uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x40 // RFC 4122 version 4
-	uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80 // RFC 4122 variant
-	requestID := fmt.Sprintf("agent-%08x-%04x-%04x-%04x-%012x",
-		uuidBytes[0:4], uuidBytes[4:6], uuidBytes[6:8], uuidBytes[8:10], uuidBytes[10:16])
-
-	return &AgentEnvelope{
-		Project:     opts.ProjectID,
-		Model:       upstreamModelID,
-		Request:     geminiReq,
-		RequestType: "agent",
-		UserAgent:   "antigravity",
-		RequestID:   requestID,
-	}, nil
+	return WrapEnvelope(geminiReq, catalog.UpstreamModel(req.Model), opts.ProjectID), nil
 }
 
 // BuildAnthropicRequest converts an AnthropicRequest into a GeminiRequest.

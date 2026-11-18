@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 const (
@@ -60,13 +61,23 @@ func DefaultPlatform() string {
 	}
 }
 
+var (
+	staticDefaultUserAgentOnce = sync.OnceValue(func() string {
+		return fmt.Sprintf("antigravity/ide/%s (aidev_client; os_type=%s; arch=%s)", DefaultAntigravityVersion, runtime.GOOS, runtime.GOARCH)
+	})
+	staticDefaultClientMetadataOnce = sync.OnceValue(func() string {
+		return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, DefaultPlatform())
+	})
+)
+
 // DefaultUserAgent formats the standard Antigravity IDE User-Agent string matching the host architecture.
 func DefaultUserAgent() string {
-	version := cmp.Or(
-		os.Getenv(EnvAntigravityVersion),
-		os.Getenv(EnvAltAntigravityVersion),
-		DefaultAntigravityVersion,
-	)
+	v1 := os.Getenv(EnvAntigravityVersion)
+	v2 := os.Getenv(EnvAltAntigravityVersion)
+	if v1 == "" && v2 == "" {
+		return staticDefaultUserAgentOnce()
+	}
+	version := cmp.Or(v1, v2, DefaultAntigravityVersion)
 	return fmt.Sprintf("antigravity/ide/%s (aidev_client; os_type=%s; arch=%s)", version, runtime.GOOS, runtime.GOARCH)
 }
 
@@ -77,7 +88,7 @@ func DefaultAPIClient() string {
 
 // DefaultClientMetadata formats the default JSON metadata string identifying the client as Antigravity IDE.
 func DefaultClientMetadata() string {
-	return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, DefaultPlatform())
+	return staticDefaultClientMetadataOnce()
 }
 
 // ResolveUserAgent determines the effective User-Agent header, checking environment variables first,
@@ -156,12 +167,21 @@ func BuildUpstreamHeaders(cfg *Config, accessToken string, model string) map[str
 	return headers
 }
 
-// BuildHTTPHeaders converts upstream headers into standard net/http Header structures.
+// BuildHTTPHeaders directly populates standard net/http Header structures without intermediate map allocations.
 func BuildHTTPHeaders(cfg *Config, accessToken string, model string) http.Header {
-	raw := BuildUpstreamHeaders(cfg, accessToken, model)
-	header := make(http.Header, len(raw))
-	for k, v := range raw {
-		header.Set(k, v)
+	header := make(http.Header, 5)
+	header.Set("Content-Type", "application/json")
+	header.Set("User-Agent", ResolveUserAgent(cfg))
+	header.Set("X-Goog-Api-Client", ResolveAPIClient(cfg))
+	header.Set("Client-Metadata", ResolveClientMetadata(cfg))
+
+	if accessToken != "" {
+		header.Set("Authorization", "Bearer "+accessToken)
 	}
+
+	if model != "" && IsClaude(model) {
+		header.Set("anthropic-beta", AnthropicBetaInterleavedThinking)
+	}
+
 	return header
 }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 )
 
 var blockedReasons = []string{
@@ -494,14 +495,22 @@ func generateCallID() string {
 	return "call_" + base64.RawURLEncoding.EncodeToString(b)
 }
 
+var sseBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
 // ReadSSEEvents parses an SSE stream into individual JSON objects matching `data: {...}` lines.
 // It skips SSE comments, ignores [DONE] markers, and handles multi-line data chunks.
 // It configures an expanded buffer (up to 10 MB) to accommodate large thinking blocks and code diffs.
 func ReadSSEEvents(r io.Reader, handle func(event map[string]any) error) error {
 	scanner := bufio.NewScanner(r)
 	const maxScanCapacity = 10 * 1024 * 1024 // 10 MB
-	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, maxScanCapacity)
+	bufPtr := sseBufferPool.Get().(*[]byte)
+	defer sseBufferPool.Put(bufPtr)
+	scanner.Buffer(*bufPtr, maxScanCapacity)
 	var dataLines []string
 	var totalDataBytes int
 
@@ -510,7 +519,12 @@ func ReadSSEEvents(r io.Reader, handle func(event map[string]any) error) error {
 			totalDataBytes = 0
 			return nil
 		}
-		payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		var payload string
+		if len(dataLines) == 1 {
+			payload = strings.TrimSpace(dataLines[0])
+		} else {
+			payload = strings.TrimSpace(strings.Join(dataLines, "\n"))
+		}
 		dataLines = nil
 		totalDataBytes = 0
 		if payload == "" || payload == "[DONE]" {

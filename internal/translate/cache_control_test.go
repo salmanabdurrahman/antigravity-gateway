@@ -112,3 +112,25 @@ func TestCleanCacheControlMessagesAndShallowCopy(t *testing.T) {
 		t.Error("expected nil for nil input in ShallowCopyWithoutCacheControl")
 	}
 }
+
+// TestCleanCacheControlFastPathNoAlloc verifies that CleanCacheControl returns the original map
+// reference without allocating new maps when no cache_control keys exist anywhere in the payload.
+func TestCleanCacheControlFastPathNoAlloc(t *testing.T) {
+	input := map[string]any{
+		"role":    "user",
+		"content": "Hello standard message with no cache control",
+		"nested": map[string]any{
+			"key": "value",
+		},
+	}
+
+	cleaned := CleanCacheControl(input)
+	if !reflect.DeepEqual(cleaned, input) {
+		t.Fatalf("CleanCacheControl modified clean payload: got %+v", cleaned)
+	}
+
+	cleanedMap := cleaned.(map[string]any)
+	if reflect.ValueOf(cleanedMap).Pointer() != reflect.ValueOf(input).Pointer() {
+		t.Error("expected CleanCacheControl to return original map reference on fast-path")
+	}
+}

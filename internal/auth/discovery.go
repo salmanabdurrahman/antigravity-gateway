@@ -33,7 +33,7 @@ func GetUserEmail(ctx context.Context, cfg *config.Config, accessToken string) (
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := config.DefaultHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("calling userinfo endpoint %s: %w", userInfoURL, err)
@@ -214,7 +214,7 @@ func postJSON(ctx context.Context, url string, headers map[string]string, body a
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := config.DefaultHTTPClient(15 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("posting to %s: %w", url, err)

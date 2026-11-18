@@ -56,6 +56,12 @@ type ModelCatalog struct {
 	// fetchedAt records when the snapshot was last refreshed from Google Cloud Code Assist.
 	fetchedAt time.Time
 
+	// lastRefreshAttempt records the last time a background or foreground refresh was attempted.
+	lastRefreshAttempt time.Time
+
+	// byID indexes models by lowercase ID for O(1) lookups without linear scanning.
+	byID map[string]CatalogModel
+
 	// cfg holds application settings and upstream endpoint URLs.
 	cfg *config.Config
 
@@ -84,13 +90,14 @@ func NewModelCatalog(cfg *config.Config, rot AccountRunner, cacheFile string, lo
 		cfg:        cfg,
 		rotator:    rot,
 		cacheFile:  cacheFile,
-		httpClient: &http.Client{Timeout: DefaultFetchTimeout},
+		httpClient: config.DefaultHTTPClient(DefaultFetchTimeout),
 		logger:     logger,
 		nowFn:      time.Now,
 		snapshot: CatalogSnapshot{
 			Models: make([]CatalogModel, 0),
 			Quotas: make(map[string]ModelQuota),
 		},
+		byID: make(map[string]CatalogModel),
 	}
 }
 
@@ -137,6 +144,7 @@ func (c *ModelCatalog) LoadCache() error {
 		if payload.FetchedAt > 0 {
 			c.fetchedAt = time.UnixMilli(payload.FetchedAt)
 		}
+		c.rebuildIndexLocked()
 	}
 
 	return nil
@@ -170,6 +178,15 @@ func (c *ModelCatalog) SaveCache() error {
 func (c *ModelCatalog) Refresh(ctx context.Context) error {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
+	return c.refreshLocked(ctx)
+}
+
+// refreshLocked executes the catalog fetch and cache persistence. Callers must hold refreshMu.
+func (c *ModelCatalog) refreshLocked(ctx context.Context) error {
+	now := c.nowFn()
+	c.mu.Lock()
+	c.lastRefreshAttempt = now
+	c.mu.Unlock()
 
 	if c.rotator == nil {
 		return errors.New("cannot refresh catalog: no account rotator configured")
@@ -204,8 +221,8 @@ func (c *ModelCatalog) Refresh(ctx context.Context) error {
 	if fetchedSnap != nil && len(fetchedSnap.Models) > 0 {
 		c.mu.Lock()
 		c.snapshot = *fetchedSnap
-		now := c.nowFn()
 		c.fetchedAt = now
+		c.rebuildIndexLocked()
 		c.mu.Unlock()
 
 		if saveErr := c.SaveCache(); saveErr != nil {
@@ -216,8 +233,18 @@ func (c *ModelCatalog) Refresh(ctx context.Context) error {
 	return nil
 }
 
-// Ensure guarantees that a catalog is available. If empty, it loads from cache or triggers a refresh.
-// If cached data is older than CacheMaxAge, it initiates a refresh.
+// rebuildIndexLocked populates the lowercase byID map. Caller must hold c.mu.
+func (c *ModelCatalog) rebuildIndexLocked() {
+	c.byID = make(map[string]CatalogModel, len(c.snapshot.Models))
+	for _, m := range c.snapshot.Models {
+		c.byID[strings.ToLower(m.ID)] = m
+	}
+}
+
+// Ensure guarantees that a catalog is available.
+// If no models are present, it performs a blocking load or refresh.
+// If models are already cached but stale, it immediately returns to keep request hot-paths
+// unblocked while refreshing asynchronously in the background (stale-while-revalidate).
 func (c *ModelCatalog) Ensure(ctx context.Context) error {
 	c.mu.RLock()
 	hasModels := len(c.snapshot.Models) > 0
@@ -231,32 +258,44 @@ func (c *ModelCatalog) Ensure(ctx context.Context) error {
 
 	c.mu.RLock()
 	hasModels = len(c.snapshot.Models) > 0
-	isStale := c.fetchedAt.IsZero() || c.nowFn().Sub(c.fetchedAt) > CacheMaxAge
+	now := c.nowFn()
+	isStale := c.fetchedAt.IsZero() || now.Sub(c.fetchedAt) > CacheMaxAge
+	recentAttempt := !c.lastRefreshAttempt.IsZero() && now.Sub(c.lastRefreshAttempt) < 1*time.Minute
 	c.mu.RUnlock()
 
 	if c.rotator == nil {
 		return nil
 	}
 
-	if !hasModels || isStale {
+	// Cold start: block if no models are available at all
+	if !hasModels {
 		return c.Refresh(ctx)
+	}
+
+	// Stale-while-revalidate: dispatch background refresh if stale and not throttled
+	if isStale && !recentAttempt {
+		if c.refreshMu.TryLock() {
+			go func() {
+				defer c.refreshMu.Unlock()
+				refreshCtx, cancel := context.WithTimeout(context.Background(), DefaultFetchTimeout)
+				defer cancel()
+				if err := c.refreshLocked(refreshCtx); err != nil {
+					c.logger.Warn("background catalog refresh failed", "error", err)
+				}
+			}()
+		}
 	}
 
 	return nil
 }
 
-// Get returns the CatalogModel matching the given identifier (case-insensitive).
+// Get returns the CatalogModel matching the given identifier (case-insensitive) in O(1) time.
 func (c *ModelCatalog) Get(id string) (CatalogModel, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	target := strings.ToLower(id)
-	for _, m := range c.snapshot.Models {
-		if strings.ToLower(m.ID) == target {
-			return m, true
-		}
-	}
-	return CatalogModel{}, false
+	m, ok := c.byID[strings.ToLower(id)]
+	return m, ok
 }
 
 // Info returns the catalog entry if available, or synthesizes a CatalogModel with family defaults.

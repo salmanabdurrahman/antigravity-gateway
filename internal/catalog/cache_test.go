@@ -207,3 +207,82 @@ func TestModelCatalogConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestModelCatalogStaleWhileRevalidateNonBlocking verifies that Ensure returns immediately when
+// cached models are stale, serving the stale snapshot while triggering background refresh.
+func TestModelCatalogStaleWhileRevalidateNonBlocking(t *testing.T) {
+	tempDir := t.TempDir()
+	cacheFile := filepath.Join(tempDir, "models-cache.json")
+
+	refreshStarted := make(chan struct{})
+	refreshDone := make(chan struct{})
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(refreshStarted)
+		<-refreshDone
+		w.Header().Set("Content-Type", "application/json")
+		resp := rawCatalogResponse{
+			Models: map[string]rawModelInfo{
+				"gemini-refreshed": {DisplayName: "Refreshed"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Endpoints: []string{ts.URL},
+	}
+
+	mockRunner := &mockAccountRunner{
+		fn: func(ctx context.Context, handler func(ctx context.Context, token string, state *rotator.AccountState) error) error {
+			st := rotator.NewAccountState(&auth.Account{
+				Email:     "user@example.com",
+				ProjectID: "proj-123",
+			})
+			return handler(ctx, "mock-token", st)
+		},
+	}
+
+	cat := NewModelCatalog(cfg, mockRunner, cacheFile, nil)
+	cat.SetHTTPClient(ts.Client())
+
+	// Seed with stale data (> 15m old)
+	staleTime := time.Now().Add(-20 * time.Minute)
+	cat.mu.Lock()
+	cat.snapshot.Models = []CatalogModel{{ID: "gemini-stale"}}
+	cat.fetchedAt = staleTime
+	cat.rebuildIndexLocked()
+	cat.mu.Unlock()
+
+	start := time.Now()
+	// Ensure must return immediately (< 50ms) without waiting for the slow background refresh
+	if err := cat.Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure failed: %v", err)
+	}
+	duration := time.Since(start)
+	if duration > 100*time.Millisecond {
+		t.Errorf("Ensure blocked for %v, expected instant return on stale data", duration)
+	}
+
+	// Verify stale model is immediately returned while refresh is pending
+	if _, ok := cat.Get("gemini-stale"); !ok {
+		t.Error("expected stale model to be immediately servable")
+	}
+
+	// Wait for background refresh to initiate and unblock server response
+	select {
+	case <-refreshStarted:
+		close(refreshDone)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for background refresh to start")
+	}
+
+	// Allow background goroutine to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify refreshed model is now present
+	if _, ok := cat.Get("gemini-refreshed"); !ok {
+		t.Error("expected refreshed model to be present after background refresh")
+	}
+}

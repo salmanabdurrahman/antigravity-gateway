@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added verified health checking before signalling background daemon processes in `StopDetached`, preventing termination of recycled OS PIDs.
 - Enforced bounded memory reads via `io.LimitReader` on upstream catalog fetching, health probes, test completions, database fallback scans, and SSE stream buffers.
 
+### Performance
+
+- Implemented stale-while-revalidate for `ModelCatalog.Ensure` with non-blocking background refreshes and lowercase $O(1)$ model indexing.
+- Configured dedicated HTTP transports across upstream API and auth clients (`MaxIdleConns: 100`, `MaxIdleConnsPerHost: 32`, `ResponseHeaderTimeout: 60s`, HTTP/2 multiplexing) to eliminate connection churn.
+- Cached static upstream headers and eliminated redundant format allocations on the request hot path.
+- Replaced pool filesystem stat locks with lockless atomic nanosecond throttling and eliminated mutex overhead in token bucket retrieval.
+- Snapshotted candidate account metrics once per hybrid selection cycle to remove nested lock acquisitions.
+- Hoisted request translation outside rotator account failover retry loops and added a zero-allocation fast-path to cache control cleaning.
+- Added buffer pooling (`sync.Pool`) and single-line payload fast-paths for SSE stream parsing.
+
 ### Fixed
 
 - Connected upstream quota fractions to active account states during catalog refresh and persisted quota snapshots to `models-cache.json` for live `hybrid` rotation.
