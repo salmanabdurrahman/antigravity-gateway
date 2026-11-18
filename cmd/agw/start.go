@@ -54,7 +54,7 @@ func init() {
 
 // runStart validates flags, ensures single-instance execution, and launches the HTTP server.
 func runStart(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}

@@ -87,7 +87,11 @@ func SetupClaude(ctx context.Context, opts ClaudeSetupOptions) (*ClaudeSetupResu
 
 	settingsMap := make(map[string]any)
 	if existingBytes, err := os.ReadFile(settingsPath); err == nil && len(existingBytes) > 0 {
-		_ = json.Unmarshal(existingBytes, &settingsMap)
+		if unmarshalErr := json.Unmarshal(existingBytes, &settingsMap); unmarshalErr != nil {
+			return nil, fmt.Errorf("parsing existing claude settings %s: %w", settingsPath, unmarshalErr)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reading existing claude settings %s: %w", settingsPath, err)
 	}
 
 	envMap, ok := settingsMap["env"].(map[string]any)

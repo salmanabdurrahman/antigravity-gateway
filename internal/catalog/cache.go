@@ -34,6 +34,12 @@ type CachePayload struct {
 
 	// Models lists the cached catalog model definitions.
 	Models []CatalogModel `json:"models"`
+
+	// Quotas caches upstream quota availability per model identifier.
+	Quotas map[string]ModelQuota `json:"quotas,omitempty"`
+
+	// DefaultModel records the upstream default model identifier.
+	DefaultModel string `json:"defaultModel,omitempty"`
 }
 
 // ModelCatalog coordinates in-memory model snapshots, atomic disk caching, and background refreshes.
@@ -126,6 +132,8 @@ func (c *ModelCatalog) LoadCache() error {
 
 	if len(payload.Models) > 0 {
 		c.snapshot.Models = payload.Models
+		c.snapshot.Quotas = payload.Quotas
+		c.snapshot.DefaultModel = payload.DefaultModel
 		if payload.FetchedAt > 0 {
 			c.fetchedAt = time.UnixMilli(payload.FetchedAt)
 		}
@@ -144,8 +152,10 @@ func (c *ModelCatalog) SaveCache() error {
 	}
 
 	payload := CachePayload{
-		FetchedAt: c.fetchedAt.UnixMilli(),
-		Models:    c.snapshot.Models,
+		FetchedAt:    c.fetchedAt.UnixMilli(),
+		Models:       c.snapshot.Models,
+		Quotas:       c.snapshot.Quotas,
+		DefaultModel: c.snapshot.DefaultModel,
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -177,6 +187,13 @@ func (c *ModelCatalog) Refresh(ctx context.Context) error {
 			return err
 		}
 		fetchedSnap = snap
+		if state != nil && len(snap.Quotas) > 0 {
+			for modelID, q := range snap.Quotas {
+				if q.RemainingFraction != nil {
+					state.SetQuotaFraction(modelID, *q.RemainingFraction)
+				}
+			}
+		}
 		return nil
 	})
 

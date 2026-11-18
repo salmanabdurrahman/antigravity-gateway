@@ -3,10 +3,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
@@ -16,6 +18,12 @@ import (
 func TestDoctorCommand(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv(config.EnvHome, tempHome)
+
+	origDialer := connectivityDialer
+	connectivityDialer = func(ctx context.Context, host string) (time.Duration, error) {
+		return 5 * time.Millisecond, nil
+	}
+	defer func() { connectivityDialer = origDialer }()
 
 	// Populate accounts.json so account diagnostic is happy
 	accPath := filepath.Join(tempHome, "accounts.json")
@@ -105,7 +113,7 @@ func TestDoctorDetectsClientKeyMismatch(t *testing.T) {
 
 	staleKey := "agw_" + strings.Repeat("b", config.APIKeyHexLen)
 	mustWriteFile(t, filepath.Join(piDir, "models.json"), `{"providers":{"antigravity":{"apiKey":"`+staleKey+`"}}}`)
-	mustWriteFile(t, opencodePath, `{"providers":{"antigravity":{"options":{"apiKey":"`+staleKey+`"}}}}`)
+	mustWriteFile(t, opencodePath, `{"providers":{"antigravity":{"settings":{"apiKey":"`+staleKey+`"}}}}`)
 	mustWriteFile(t, filepath.Join(claudeDir, "settings.json"), `{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:51400","ANTHROPIC_AUTH_TOKEN":"`+staleKey+`"}}`)
 
 	buf := new(bytes.Buffer)

@@ -3,6 +3,7 @@
 package translate
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -68,14 +69,19 @@ func ClampThinkingBudget(model string, requestedBudget int, maxOutputTokens int,
 // repairs the conversational state safely.
 func InjectInterruptedToolResponses(contents []Content) []Content {
 	if len(contents) <= 1 {
-		return contents
+		return slices.Clone(contents)
 	}
 
-	var result []Content
+	result := make([]Content, len(contents))
+	for idx, c := range contents {
+		result[idx] = Content{
+			Role:  c.Role,
+			Parts: slices.Clone(c.Parts),
+		}
+	}
 
-	for i := 0; i < len(contents); i++ {
-		turn := contents[i]
-		result = append(result, turn)
+	for i := 0; i < len(result); i++ {
+		turn := result[i]
 
 		if turn.Role != "model" {
 			continue
@@ -101,8 +107,8 @@ func InjectInterruptedToolResponses(contents []Content) []Content {
 		}
 
 		// Inspect the subsequent turn
-		if i+1 < len(contents) {
-			nextTurn := contents[i+1]
+		if i+1 < len(result) {
+			nextTurn := result[i+1]
 			if nextTurn.Role == "user" {
 				// Find which calls are already answered by functionResponse in the next turn
 				answeredIDs := make(map[string]bool)
@@ -142,8 +148,8 @@ func InjectInterruptedToolResponses(contents []Content) []Content {
 				}
 
 				if len(syntheticParts) > 0 {
-					// Prepend synthetic tool responses before the user's new message parts
-					contents[i+1].Parts = append(syntheticParts, contents[i+1].Parts...)
+					// Prepend synthetic tool responses before the user's new message parts without mutating caller
+					result[i+1].Parts = append(syntheticParts, result[i+1].Parts...)
 				}
 			}
 		}

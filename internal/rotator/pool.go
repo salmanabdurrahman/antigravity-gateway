@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -242,7 +243,10 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 		return localAccessToken, nil
 	}
 
-	res, err := auth.RefreshAccessToken(ctx, cfg, refreshToken)
+	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
+	res, err := auth.RefreshAccessToken(refreshCtx, cfg, refreshToken)
 	if err != nil {
 		return "", err
 	}
@@ -250,16 +254,18 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 	s.mu.Lock()
 	s.accessToken = res.AccessToken
 	s.expiresAt = res.Expiry
-	var updatedAccount *auth.Account
+	var updatedAccount auth.Account
+	needsPersist := false
 	if res.RefreshToken != "" && s.account != nil && res.RefreshToken != s.account.RefreshToken {
 		s.account.RefreshToken = res.RefreshToken
-		updatedAccount = s.account
+		updatedAccount = *s.account
+		needsPersist = true
 	}
 	store := s.store
 	s.mu.Unlock()
 
-	if updatedAccount != nil && store != nil {
-		_, _ = store.Upsert(updatedAccount)
+	if needsPersist && store != nil {
+		_, _ = store.Upsert(&updatedAccount)
 	}
 
 	return res.AccessToken, nil
@@ -391,7 +397,7 @@ func (p *Pool) SetAccounts(accounts []*auth.Account) {
 	for _, s := range p.states {
 		email := s.Email()
 		if email != "" {
-			oldMap[email] = s
+			oldMap[strings.ToLower(email)] = s
 		}
 	}
 
@@ -400,7 +406,7 @@ func (p *Pool) SetAccounts(accounts []*auth.Account) {
 		if acc == nil {
 			continue
 		}
-		if prev, ok := oldMap[acc.Email]; ok {
+		if prev, ok := oldMap[strings.ToLower(acc.Email)]; ok {
 			prev.mu.Lock()
 			// Compare both credential kinds: an account imported from a desktop session stores its
 			// bearer token in AccessToken, so comparing refresh tokens alone would keep serving a
@@ -477,7 +483,7 @@ func (p *Pool) DisableAccount(email, reason string) error {
 	p.mu.RLock()
 	var target *AccountState
 	for _, s := range p.states {
-		if s.Email() == email {
+		if strings.EqualFold(s.Email(), email) {
 			target = s
 			break
 		}

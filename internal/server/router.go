@@ -113,10 +113,10 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("GET /v1/accounts", s.handleAccounts)
 
-	// Chain middlewares: Recovery -> Auth -> Logging -> ServeMux
-	handler := RecoveryMiddleware(s.logger)(
-		AuthMiddleware(s.config().APIKey, s.logger)(
-			LoggingMiddleware(s.logger)(mux),
+	// Chain middlewares: Logging -> Recovery -> Auth -> ServeMux
+	handler := LoggingMiddleware(s.logger)(
+		RecoveryMiddleware(s.logger)(
+			AuthMiddleware(s.config().APIKey, s.logger)(mux),
 		),
 	)
 

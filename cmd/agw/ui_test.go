@@ -39,6 +39,13 @@ func TestUICommand(t *testing.T) {
 	uiCmd.SetOut(buf)
 	uiCmd.SetErr(buf)
 
+	var openedURL string
+	origBrowser := openBrowserFn
+	openBrowserFn = func(url string) {
+		openedURL = url
+	}
+	defer func() { openBrowserFn = origBrowser }()
+
 	if err := uiCmd.RunE(uiCmd, []string{}); err != nil {
 		t.Fatalf("uiCmd.RunE failed: %v", err)
 	}
@@ -46,5 +53,8 @@ func TestUICommand(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "Opening dashboard at http://127.0.0.1:") {
 		t.Errorf("unexpected output: %s", out)
+	}
+	if !strings.HasPrefix(openedURL, "http://127.0.0.1:") {
+		t.Errorf("expected opened browser URL http://127.0.0.1:..., got %s", openedURL)
 	}
 }

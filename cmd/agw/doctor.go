@@ -71,7 +71,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -454,6 +454,21 @@ func localSessionHint(localSessions int) string {
 	return "Imported desktop tokens cannot be refreshed: re-run 'agw login --local' after they expire"
 }
 
+// connectivityDialer abstracts TCP dialing to external endpoints for testability and isolation.
+var connectivityDialer = func(ctx context.Context, host string) (time.Duration, error) {
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: 3 * time.Second},
+		Config:    &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp", host)
+	duration := time.Since(start)
+	if err == nil {
+		_ = conn.Close()
+	}
+	return duration, err
+}
+
 // checkConnectivity tests outbound network reachability to Google OAuth and Cloud Code Assist endpoints.
 func checkConnectivity(ctx context.Context) []CheckItem {
 	var items []CheckItem
@@ -467,13 +482,7 @@ func checkConnectivity(ctx context.Context) []CheckItem {
 	}
 
 	for _, ep := range endpoints {
-		dialer := &tls.Dialer{
-			NetDialer: &net.Dialer{Timeout: 3 * time.Second},
-			Config:    &tls.Config{MinVersion: tls.VersionTLS12},
-		}
-		start := time.Now()
-		conn, err := dialer.DialContext(ctx, "tcp", ep.host)
-		duration := time.Since(start)
+		duration, err := connectivityDialer(ctx, ep.host)
 
 		if err != nil {
 			items = append(items, CheckItem{
@@ -484,7 +493,6 @@ func checkConnectivity(ctx context.Context) []CheckItem {
 				Hint:     "Check your internet connection or DNS resolver",
 			})
 		} else {
-			_ = conn.Close()
 			items = append(items, CheckItem{
 				Category: "Upstream Connectivity",
 				Name:     ep.name,
@@ -595,8 +603,13 @@ func checkClientIntegrations(cfg *config.Config) []CheckItem {
 				if provider, ok := parsed.Providers[client.DefaultProviderID]; ok {
 					key := ""
 					if fields, isMap := provider.(map[string]any); isMap {
-						if options, isOptions := fields["options"].(map[string]any); isOptions {
-							key, _ = options["apiKey"].(string)
+						if settings, isSettings := fields["settings"].(map[string]any); isSettings {
+							key, _ = settings["apiKey"].(string)
+						}
+						if key == "" {
+							if options, isOptions := fields["options"].(map[string]any); isOptions {
+								key, _ = options["apiKey"].(string)
+							}
 						}
 					}
 

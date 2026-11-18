@@ -44,15 +44,7 @@ func init() {
 
 // runLogin executes the browser consent flow, callback listener, token exchange, and account storage.
 func runLogin(cmd *cobra.Command, args []string) error {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if cfgFile != "" {
-		cfg, err = config.Load(cfgFile)
-	} else {
-		cfg, err = config.LoadOrCreate()
-	}
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -98,7 +90,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	cmd.Println()
 
 	if !noBrowser {
-		openBrowser(authURL)
+		openBrowserFn(authURL)
 	}
 
 	// Listen on loopback callback with 5-minute timeout
@@ -207,6 +199,9 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
+
+// openBrowserFn launches the user's default web browser, swappable for isolated unit tests.
+var openBrowserFn = openBrowser
 
 // openBrowser launches the user's default web browser targeted at the authorization URL.
 func openBrowser(url string) {

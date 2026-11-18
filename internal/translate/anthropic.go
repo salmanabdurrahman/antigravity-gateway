@@ -270,7 +270,18 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	}
 
 	// Thinking configuration
-	thinkingRequested := (req.Thinking != nil && req.Thinking.Type == "enabled") || info.Thinking
+	thinkingRequested := false
+	if req.Thinking != nil {
+		if req.Thinking.Type == "enabled" {
+			thinkingRequested = true
+		}
+	} else if info.Thinking {
+		thinkingRequested = true
+	}
+
+	if claude && (forcesAnthropicTool(req.ToolChoice) || claudeLoopLacksSignedThinking(contents)) {
+		thinkingRequested = false
+	}
 	if thinkingRequested {
 		budget := 0
 		if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
@@ -329,14 +340,7 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 			fdecls = append(fdecls, decl)
 		}
 		tools = []any{map[string]any{"functionDeclarations": fdecls}}
-
-		if claude {
-			toolConfig = map[string]any{
-				"functionCallingConfig": map[string]any{
-					"mode": "VALIDATED",
-				},
-			}
-		}
+		toolConfig = buildAnthropicToolConfig(req.ToolChoice, claude)
 	}
 
 	var sysInstruction *SystemInstruction
@@ -432,7 +436,7 @@ func buildAnthropicAssistantParts(content any, callNames map[string]string, mode
 					part.ThoughtSignature = sig
 				} else if sig, ok := m["signature"].(string); ok && sig != "" {
 					part.ThoughtSignature = sig
-				} else if strings.HasPrefix(strings.ToLower(model), "gemini-3") {
+				} else if major := GeminiMajor(model); major != nil && *major >= 3 {
 					part.ThoughtSignature = SkipSignature
 				}
 				parts = append(parts, part)
@@ -957,6 +961,30 @@ func (t *AnthropicStreamTranslator) closeCurrentBlock() {
 
 // Finish emits terminal message_delta and message_stop events.
 func (t *AnthropicStreamTranslator) Finish() {
+	if !t.hasEmittedStart {
+		t.hasEmittedStart = true
+		if t.emit != nil {
+			t.emit("message_start", map[string]any{
+				"type": "message_start",
+				"message": map[string]any{
+					"id":            t.messageID,
+					"type":          "message",
+					"role":          "assistant",
+					"content":       []any{},
+					"model":         t.model,
+					"stop_reason":   nil,
+					"stop_sequence": nil,
+					"usage": map[string]any{
+						"input_tokens":                max(0, t.promptTokens-t.cachedTokens),
+						"output_tokens":               0,
+						"cache_read_input_tokens":     t.cachedTokens,
+						"cache_creation_input_tokens": 0,
+					},
+				},
+			})
+		}
+	}
+
 	t.closeCurrentBlock()
 
 	stopReason := t.stopReason
@@ -989,4 +1017,80 @@ func FormatAnthropicSSEEvent(eventType string, data any) ([]byte, error) {
 		return nil, fmt.Errorf("marshaling anthropic sse event: %w", err)
 	}
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, b)), nil
+}
+
+// forcesAnthropicTool checks if the Anthropic tool_choice parameter requires an explicit tool execution.
+func forcesAnthropicTool(choice any) bool {
+	if choice == nil {
+		return false
+	}
+	if s, ok := choice.(string); ok {
+		lower := strings.ToLower(s)
+		return lower == "any" || lower == "tool" || lower == "required"
+	}
+	if m, ok := choice.(map[string]any); ok {
+		typ, _ := m["type"].(string)
+		lower := strings.ToLower(typ)
+		if lower == "any" || lower == "tool" {
+			return true
+		}
+		if _, ok := m["function"].(map[string]any); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// buildAnthropicToolConfig translates Anthropic tool_choice settings into Google functionCallingConfig objects.
+func buildAnthropicToolConfig(choice any, claude bool) map[string]any {
+	if choice == nil {
+		if claude {
+			return map[string]any{
+				"functionCallingConfig": map[string]any{
+					"mode": "VALIDATED",
+				},
+			}
+		}
+		return nil
+	}
+
+	mode := "AUTO"
+	var allowedNames []string
+
+	switch v := choice.(type) {
+	case string:
+		switch strings.ToLower(v) {
+		case "none":
+			mode = "NONE"
+		case "any", "required":
+			mode = "ANY"
+		default:
+			mode = "AUTO"
+		}
+	case map[string]any:
+		typ, _ := v["type"].(string)
+		switch strings.ToLower(typ) {
+		case "none":
+			mode = "NONE"
+		case "any":
+			mode = "ANY"
+		case "tool":
+			mode = "ANY"
+			if name, ok := v["name"].(string); ok && name != "" {
+				allowedNames = []string{CleanToolCallID(name)}
+			}
+		default:
+			mode = "AUTO"
+		}
+	}
+
+	if claude && mode == "AUTO" {
+		mode = "VALIDATED"
+	}
+
+	cfg := map[string]any{"mode": mode}
+	if len(allowedNames) > 0 {
+		cfg["allowedFunctionNames"] = allowedNames
+	}
+	return map[string]any{"functionCallingConfig": cfg}
 }

@@ -46,11 +46,16 @@ func TestModelCatalogCacheLoadAndSave(t *testing.T) {
 		t.Fatalf("expected 0 models, got %d", len(snap.Models))
 	}
 
-	// Save dummy models
+	// Save dummy models and quotas
+	fraction := 0.75
 	cat.mu.Lock()
 	cat.snapshot.Models = []CatalogModel{
 		{ID: "gemini-3.8-flash-high", ContextWindow: 1048576, MaxOutputTokens: 65536, Thinking: true},
 	}
+	cat.snapshot.Quotas = map[string]ModelQuota{
+		"gemini-3.8-flash-high": {RemainingFraction: &fraction},
+	}
+	cat.snapshot.DefaultModel = "gemini-3.8-flash-high"
 	cat.fetchedAt = now
 	cat.mu.Unlock()
 
@@ -75,6 +80,12 @@ func TestModelCatalogCacheLoadAndSave(t *testing.T) {
 	snap2, fetched2 := cat2.Snapshot()
 	if len(snap2.Models) != 1 || snap2.Models[0].ID != "gemini-3.8-flash-high" {
 		t.Fatalf("unexpected restored models: %+v", snap2.Models)
+	}
+	if snap2.DefaultModel != "gemini-3.8-flash-high" {
+		t.Errorf("expected DefaultModel gemini-3.8-flash-high, got %s", snap2.DefaultModel)
+	}
+	if q, ok := snap2.Quotas["gemini-3.8-flash-high"]; !ok || q.RemainingFraction == nil || *q.RemainingFraction != 0.75 {
+		t.Errorf("unexpected restored quotas: %+v", snap2.Quotas)
 	}
 	if !fetched2.Equal(now) {
 		t.Fatalf("expected fetchedAt %v, got %v", now, fetched2)

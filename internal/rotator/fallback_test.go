@@ -2,6 +2,7 @@
 package rotator_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -133,5 +134,73 @@ func TestRotatorAccountFallbackOnPersistent5xx(t *testing.T) {
 
 	if res.State.Email() != "healthy@example.com" {
 		t.Errorf("expected response from healthy account, got %s", res.State.Email())
+	}
+}
+
+// TestRotatorAccountFallbackOnTransportError verifies rotating to alternative accounts
+// when an account encounters a network transport failure, verifying that skip[s] is marked.
+func TestRotatorAccountFallbackOnTransportError(t *testing.T) {
+	ctx := t.Context()
+	var attempts atomic.Int64
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "token", "expires_in": 3600})
+			return
+		}
+
+		var body struct {
+			Project string `json:"project"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+
+		if body.Project == "proj-network-fail@example.com" {
+			attempts.Add(1)
+			// Close connection abruptly to cause client transport error
+			hj, ok := w.(http.Hijacker)
+			if ok {
+				conn, _, _ := hj.Hijack()
+				_ = conn.Close()
+				return
+			}
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer mockServer.Close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategySticky),
+		TokenURL:  mockServer.URL + "/token",
+		Endpoints: []string{mockServer.URL},
+	}
+
+	a1 := newTestAccount("network-fail@example.com")
+	a2 := newTestAccount("healthy-fallback@example.com")
+
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{a1, a2})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.Client())
+	r.SetSleepFn(func(ctx context.Context, d time.Duration) error { return nil })
+
+	builder := func(s *rotator.AccountState) (any, error) {
+		return map[string]string{"project": s.ProjectID()}, nil
+	}
+
+	res, err := r.Generate(ctx, "gemini-pro", builder)
+	if err != nil {
+		t.Fatalf("expected fallback to healthy account after transport failure, got: %v", err)
+	}
+	defer res.Response.Body.Close()
+
+	if res.State.Email() != "healthy-fallback@example.com" {
+		t.Errorf("expected response from healthy-fallback account, got %s", res.State.Email())
 	}
 }

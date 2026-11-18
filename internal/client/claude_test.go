@@ -158,3 +158,36 @@ func TestSetupClaude_PreservesExistingSettings(t *testing.T) {
 		t.Errorf("expected ANTHROPIC_BASE_URL injected, got %v", envMap["ANTHROPIC_BASE_URL"])
 	}
 }
+
+// TestSetupClaude_CorruptedJSONFailsSafely verifies that SetupClaude refuses to overwrite corrupted
+// settings.json files with partial configurations, preserving operator recovery options.
+func TestSetupClaude_CorruptedJSONFailsSafely(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+
+	corrupted := []byte(`{"env": { invalid json`)
+	if err := os.WriteFile(settingsPath, corrupted, 0o600); err != nil {
+		t.Fatalf("writing corrupted fixture: %v", err)
+	}
+
+	opts := ClaudeSetupOptions{
+		SettingsPath: settingsPath,
+		GatewayURL:   "http://127.0.0.1:51400",
+		APIKey:       "test-key",
+		NoVerify:     true,
+	}
+
+	_, err := SetupClaude(t.Context(), opts)
+	if err == nil {
+		t.Fatal("expected SetupClaude to fail on corrupted JSON, but it succeeded")
+	}
+
+	// Verify original file was NOT overwritten
+	content, readErr := os.ReadFile(settingsPath)
+	if readErr != nil {
+		t.Fatalf("reading settings file: %v", readErr)
+	}
+	if string(content) != string(corrupted) {
+		t.Error("corrupted settings file was modified despite error")
+	}
+}

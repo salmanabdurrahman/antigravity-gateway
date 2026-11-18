@@ -140,6 +140,17 @@ func (r *Rotator) SetHTTPClient(client *http.Client) {
 	r.client = client
 }
 
+// sleep pauses execution for duration d using the configured sleep function under read lock.
+func (r *Rotator) sleep(ctx context.Context, d time.Duration) error {
+	r.mu.RLock()
+	fn := r.sleepFn
+	r.mu.RUnlock()
+	if fn != nil {
+		return fn(ctx, d)
+	}
+	return defaultSleep(ctx, d)
+}
+
 // SetSleepFn configures a custom sleep handler for deterministic testing.
 func (r *Rotator) SetSleepFn(fn func(ctx context.Context, d time.Duration) error) {
 	r.mu.Lock()
@@ -283,7 +294,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			}
 
 			r.logger.Info("All accounts cooling; absorbing wait duration", "model", model, "wait", pick.Wait)
-			if err := r.sleepFn(ctx, pick.Wait); err != nil {
+			if err := r.sleep(ctx, pick.Wait); err != nil {
 				return nil, err
 			}
 			waited += pick.Wait
@@ -325,6 +336,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			serverErrors++
 			r.picker.HealthTracker().RecordFailure(s.Email())
 			s.TokenBucket().Refund()
+			skip[s] = struct{}{}
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusBadGateway,
 				ErrorMessage: fmt.Sprintf("Upstream network error: %s", err.Error()),
@@ -332,7 +344,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			if serverErrors >= 3 {
 				break
 			}
-			_ = r.sleepFn(ctx, time.Duration(500*serverErrors)*time.Millisecond)
+			_ = r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond)
 			continue
 		}
 
@@ -404,7 +416,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			if serverErrors >= 3 {
 				break
 			}
-			_ = r.sleepFn(ctx, time.Duration(500*serverErrors)*time.Millisecond)
+			_ = r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond)
 
 		case FailureBadRequest:
 			// Malformed payloads fail identically on all accounts. Terminal error; do not rotate.

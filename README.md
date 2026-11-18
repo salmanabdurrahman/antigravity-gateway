@@ -300,7 +300,7 @@ Optional flags:
 - `--models`: Filter models by pattern
 - `--no-verify`: Skip 1-token connectivity test probe
 - `--dry-run`: Preview generated JSON without writing to disk
-- `--config`: Custom OpenCode configuration file path
+- `--config-file`: Custom OpenCode configuration file path (defaults to `~/.config/opencode/opencode.json` or `$OPENCODE_CONFIG`)
 
 #### Configure Claude Code CLI
 

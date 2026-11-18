@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added verified health checking before signalling background daemon processes in `StopDetached`, preventing termination of recycled OS PIDs.
 - Enforced bounded memory reads via `io.LimitReader` on upstream catalog fetching, health probes, test completions, database fallback scans, and SSE stream buffers.
 
+### Fixed
+
+- Connected upstream quota fractions to active account states during catalog refresh and persisted quota snapshots to `models-cache.json` for live `hybrid` rotation.
+- Honored `thinking: {"type": "disabled"}` in Anthropic message translation, suppressed thinking when tools are forced or unverified in Claude tool loops, and translated `tool_choice` into upstream tool configurations.
+- Guaranteed terminal `message_start` precedes `message_delta` and `message_stop` on empty Anthropic streams.
+- Deep-cloned message content turns in interrupted tool recovery to eliminate caller slice mutation.
+- Protected token refresh persistence with value-copied account states and context timeout isolation.
+- Disambiguated global `--config` flag across subcommands and renamed local OpenCode setup flag to `--config-file`.
+- Corrected OpenCode API key inspection in `agw doctor` to check provider settings rather than options.
+- Isolated unit tests from host browser launches and live internet TCP dialing.
+
 ## [0.1.0] - 2026-11-16
 
 ### Added

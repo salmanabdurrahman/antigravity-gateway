@@ -690,6 +690,36 @@ func TestModelMappingAliasInRouter(t *testing.T) {
 	}
 }
 
+// TestAnthropicMessagesUnauthorizedReturnsAnthropicFormat verifies that unauthenticated requests to
+// /v1/messages receive standard Anthropic error envelopes instead of OpenAI error envelopes.
+func TestAnthropicMessagesUnauthorizedReturnsAnthropicFormat(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := harness.server.buildHandler()
+
+	payload := `{"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately omit Authorization header
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized, got %d", rec.Code)
+	}
+
+	var parsed AnthropicErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("expected AnthropicErrorResponse JSON, got unmarshal error: %v (body: %s)", err, rec.Body.String())
+	}
+
+	if parsed.Type != "error" || parsed.Error.Type != "authentication_error" {
+		t.Errorf("unexpected error format: type=%q, error.type=%q", parsed.Type, parsed.Error.Type)
+	}
+}
+
 // TestUIEndpoints verifies serving embedded WebUI dashboard HTML and API status/strategy endpoints.
 func TestUIEndpoints(t *testing.T) {
 	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {

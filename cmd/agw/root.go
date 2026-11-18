@@ -2,6 +2,7 @@
 package main
 
 import (
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -26,4 +27,13 @@ func init() {
 // Execute runs the root CLI command and handles error returns.
 func Execute() error {
 	return rootCmd.Execute()
+}
+
+// loadConfig loads the configuration from the file specified by the global --config flag if set,
+// or falls back to standard config loading / creation at ~/.agw/config.json.
+func loadConfig() (*config.Config, error) {
+	if cfgFile != "" {
+		return config.Load(cfgFile)
+	}
+	return config.LoadOrCreate()
 }

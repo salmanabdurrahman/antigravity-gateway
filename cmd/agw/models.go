@@ -45,7 +45,7 @@ func init() {
 
 // runModelsList queries the model cache or upstream endpoints and renders a formatted table.
 func runModelsList(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}

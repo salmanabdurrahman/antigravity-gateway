@@ -26,7 +26,7 @@ func init() {
 
 // runUI checks daemon status and opens the dashboard URL in the user's browser.
 func runUI(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -42,16 +42,22 @@ func runUI(cmd *cobra.Command, args []string) error {
 	// Check if daemon is running
 	client := &http.Client{Timeout: 1 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", host, port))
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		cmd.Println("Warning: Antigravity Gateway daemon does not appear to be running.")
 		cmd.Println("Start the daemon in the background first:")
 		cmd.Println("  agw start -d")
 		cmd.Println()
 	} else {
 		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			cmd.Println("Warning: Antigravity Gateway daemon does not appear to be running.")
+			cmd.Println("Start the daemon in the background first:")
+			cmd.Println("  agw start -d")
+			cmd.Println()
+		}
 	}
 
 	cmd.Printf("Opening dashboard at %s ...\n", dashboardURL)
-	openBrowser(dashboardURL)
+	openBrowserFn(dashboardURL)
 	return nil
 }

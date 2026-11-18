@@ -59,13 +59,14 @@ func (w *statusWriter) Unwrap() http.ResponseWriter {
 }
 
 // RecoveryMiddleware catches unhandled panics in HTTP request handlers, logs stack traces,
-// and returns a standard HTTP 500 JSON error response.
+// and returns a standard HTTP 500 JSON error response if headers have not yet been written.
 func RecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sw := &statusWriter{ResponseWriter: w, status: 0}
 			defer func() {
 				if rec := recover(); rec != nil {
 					stack := string(debug.Stack())
@@ -75,10 +76,16 @@ func RecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 						"path", r.URL.Path,
 						"stack", stack,
 					)
-					sendJSONError(w, http.StatusInternalServerError, "Internal server error", 0)
+					if sw.status == 0 {
+						if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+							sendAnthropicJSONError(sw, http.StatusInternalServerError, "Internal server error", 0)
+						} else {
+							sendJSONError(sw, http.StatusInternalServerError, "Internal server error", 0)
+						}
+					}
 				}
 			}()
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(sw, r)
 		})
 	}
 }
@@ -104,6 +111,10 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 					"path", r.URL.Path,
 					"remote", r.RemoteAddr,
 				)
+				if strings.HasPrefix(r.URL.Path, "/v1/messages") {
+					sendAnthropicJSONError(w, http.StatusUnauthorized, "Invalid API key. Provide Bearer or x-api-key matching agw config.", 0)
+					return
+				}
 				sendJSONError(w, http.StatusUnauthorized, "Invalid API key. Provide Bearer token matching agw config.", 0)
 				return
 			}

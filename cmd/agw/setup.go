@@ -100,7 +100,7 @@ func init() {
 	setupPiCmd.Flags().StringVar(&setupPiDir, "pi-dir", "", "Pi configuration directory (default ~/.pi/agent or $PI_AGENT_DIR)")
 	setupPiCmd.Flags().BoolVar(&setupPiCleanLegacy, "clean-legacy", true, "Clean legacy loopback proxy entries and placeholder tokens")
 
-	setupOpenCodeCmd.Flags().StringVar(&setupOpenCodePath, "config", "", "OpenCode configuration file (default ~/.config/opencode/opencode.json)")
+	setupOpenCodeCmd.Flags().StringVar(&setupOpenCodePath, "config-file", "", "OpenCode configuration file (default ~/.config/opencode/opencode.json)")
 
 	setupClaudeCmd.Flags().StringVar(&setupClaudeSettingsPath, "settings", "", "Claude settings file (default ~/.claude/settings.json)")
 	setupClaudeCmd.Flags().StringVar(&setupClaudeModel, "model", client.DefaultClaudeModel, "Default model configured for Claude CLI")
@@ -215,7 +215,7 @@ func loadAvailableModels(ctx context.Context, cfg *config.Config, baseURL string
 
 // runSetupPi executes configuration injection and legacy cleanup for the Pi Coding Agent.
 func runSetupPi(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -279,7 +279,7 @@ func runSetupPi(cmd *cobra.Command, args []string) error {
 
 // runSetupOpenCode executes configuration injection for the OpenCode agent.
 func runSetupOpenCode(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
@@ -339,7 +339,7 @@ func runSetupOpenCode(cmd *cobra.Command, args []string) error {
 
 // runSetupClaude executes configuration injection for Claude Code CLI.
 func runSetupClaude(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}

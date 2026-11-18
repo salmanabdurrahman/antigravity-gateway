@@ -374,3 +374,97 @@ func TestAnthropicStreamTranslator(t *testing.T) {
 		t.Error("missing signature_delta event")
 	}
 }
+
+// TestAnthropicThinkingDisabledTakesPrecedence verifies that an explicit {"thinking": {"type": "disabled"}}
+// payload overrides model default thinking capabilities and omits thinkingConfig.
+func TestAnthropicThinkingDisabledTakesPrecedence(t *testing.T) {
+	info := catalog.CatalogModel{
+		ID:              "claude-sonnet-4-6-thinking",
+		Thinking:        true,
+		MaxOutputTokens: 8192,
+	}
+
+	req := &AnthropicRequest{
+		Model: "claude-sonnet-4-6-thinking",
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "Hello world"},
+		},
+		Thinking: &AnthropicThinking{
+			Type: "disabled",
+		},
+	}
+
+	env, err := BuildAnthropicEnvelope(req, BuildOptions{
+		Info:      info,
+		ProjectID: "test-project",
+	})
+	if err != nil {
+		t.Fatalf("BuildAnthropicEnvelope failed: %v", err)
+	}
+
+	genConfig := env.Request.GenerationConfig
+	if _, exists := genConfig["thinkingConfig"]; exists {
+		t.Errorf("expected thinkingConfig to be omitted when thinking is disabled, but it exists: %v", genConfig["thinkingConfig"])
+	}
+}
+
+// TestAnthropicForcesToolDisablesClaudeThinking verifies that when a tool is forced via tool_choice,
+// thinking is suppressed for Claude models to prevent upstream HTTP 400 rejections.
+func TestAnthropicForcesToolDisablesClaudeThinking(t *testing.T) {
+	info := catalog.CatalogModel{
+		ID:              "claude-sonnet-4-6",
+		Thinking:        true,
+		MaxOutputTokens: 8192,
+	}
+
+	req := &AnthropicRequest{
+		Model: "claude-sonnet-4-6",
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "Run calculation"},
+		},
+		Tools: []AnthropicTool{
+			{Name: "calculator", Description: "Calculates numbers"},
+		},
+		ToolChoice: map[string]any{
+			"type": "tool",
+			"name": "calculator",
+		},
+	}
+
+	env, err := BuildAnthropicEnvelope(req, BuildOptions{
+		Info:      info,
+		ProjectID: "test-project",
+	})
+	if err != nil {
+		t.Fatalf("BuildAnthropicEnvelope failed: %v", err)
+	}
+
+	genConfig := env.Request.GenerationConfig
+	if _, exists := genConfig["thinkingConfig"]; exists {
+		t.Errorf("expected thinkingConfig suppressed when tool is forced, but it was set: %v", genConfig["thinkingConfig"])
+	}
+}
+
+// TestAnthropicStreamTranslatorFinishEmitsMessageStartWhenEmpty verifies that an empty stream
+// that terminates immediately emits message_start before message_delta and message_stop.
+func TestAnthropicStreamTranslatorFinishEmitsMessageStartWhenEmpty(t *testing.T) {
+	var eventTypes []string
+	translator := NewAnthropicStreamTranslator("claude-sonnet-4-6", func(eventType string, data any) {
+		eventTypes = append(eventTypes, eventType)
+	})
+
+	translator.Finish()
+
+	if len(eventTypes) < 3 {
+		t.Fatalf("expected at least 3 events (message_start, message_delta, message_stop), got %d: %v", len(eventTypes), eventTypes)
+	}
+	if eventTypes[0] != "message_start" {
+		t.Errorf("expected first event to be message_start, got %s", eventTypes[0])
+	}
+	if eventTypes[1] != "message_delta" {
+		t.Errorf("expected second event to be message_delta, got %s", eventTypes[1])
+	}
+	if eventTypes[2] != "message_stop" {
+		t.Errorf("expected third event to be message_stop, got %s", eventTypes[2])
+	}
+}

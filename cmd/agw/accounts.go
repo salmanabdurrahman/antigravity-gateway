@@ -84,7 +84,7 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
-	cfg, cfgErr := config.LoadOrCreate()
+	cfg, cfgErr := loadConfig()
 	now := time.Now()
 
 	for _, acc := range accounts {

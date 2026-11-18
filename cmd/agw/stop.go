@@ -4,7 +4,6 @@ package main
 import (
 	"fmt"
 
-	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/server"
 	"github.com/spf13/cobra"
 )
@@ -23,7 +22,7 @@ func init() {
 
 // runStop reads agw.pid and sends a SIGTERM signal to stop the background process.
 func runStop(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadOrCreate()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
