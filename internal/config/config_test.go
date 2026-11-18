@@ -337,3 +337,55 @@ func TestSaveStrategyMissingFileFails(t *testing.T) {
 		t.Errorf("expected config file to remain absent, stat error: %v", statErr)
 	}
 }
+
+// TestConfigBYOCEnvOverrides verifies that AGW_CLIENT_ID and AGW_CLIENT_SECRET environment variables
+// override DefaultClientID and DefaultClientSecret during DefaultConfig and Load.
+func TestConfigBYOCEnvOverrides(t *testing.T) {
+	t.Setenv(EnvClientID, "custom-client-id-999")
+	t.Setenv(EnvClientSecret, "custom-client-secret-999")
+
+	cfg := DefaultConfig()
+	if cfg.ClientID != "custom-client-id-999" {
+		t.Errorf("expected ClientID custom-client-id-999, got %s", cfg.ClientID)
+	}
+	if cfg.ClientSecret != "custom-client-secret-999" {
+		t.Errorf("expected ClientSecret custom-client-secret-999, got %s", cfg.ClientSecret)
+	}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "config.json")
+	loaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if loaded.ClientID != "custom-client-id-999" {
+		t.Errorf("expected loaded ClientID custom-client-id-999, got %s", loaded.ClientID)
+	}
+	if loaded.ClientSecret != "custom-client-secret-999" {
+		t.Errorf("expected loaded ClientSecret custom-client-secret-999, got %s", loaded.ClientSecret)
+	}
+}
+
+// TestConfigStringRedaction verifies that Config.String() redacts APIKey and ClientSecret
+// to prevent accidental credential leakage in log statements and diagnostics.
+func TestConfigStringRedaction(t *testing.T) {
+	cfg := &Config{
+		Host:         "127.0.0.1",
+		Port:         51400,
+		Strategy:     "sticky",
+		ClientID:     "test-client-id",
+		ClientSecret: "super-secret-client-secret-val",
+		APIKey:       "agw_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+	}
+
+	rendered := cfg.String()
+	if strings.Contains(rendered, "super-secret") {
+		t.Errorf("SECURITY LEAK: Config.String() exposed ClientSecret: %s", rendered)
+	}
+	if strings.Contains(rendered, "1234567890abcdef") {
+		t.Errorf("SECURITY LEAK: Config.String() exposed APIKey: %s", rendered)
+	}
+	if !strings.Contains(rendered, "test-client-id") {
+		t.Errorf("Config.String() missing ClientID: %s", rendered)
+	}
+}

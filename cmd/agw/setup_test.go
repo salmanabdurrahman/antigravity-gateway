@@ -169,3 +169,38 @@ func TestSetupClaudeCommand(t *testing.T) {
 		t.Fatalf("settings.json was not created: %v", err)
 	}
 }
+
+// TestSetupDryRunRedactsSecrets verifies that running setup commands in --dry-run mode masks
+// the gateway API key and auth token before printing the generated JSON payload to stdout.
+func TestSetupDryRunRedactsSecrets(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	piDir := filepath.Join(tempHome, "pi-agent")
+	t.Setenv("PI_AGENT_DIR", piDir)
+
+	buf := new(bytes.Buffer)
+	setupPiCmd.SetOut(buf)
+	setupPiCmd.SetErr(buf)
+
+	rawKey := "agw_abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	setupURL = "http://127.0.0.1:51400"
+	setupAPIKey = rawKey
+	setupNoVerify = true
+	setupDryRun = true
+	setupPiDir = piDir
+	setupPiCleanLegacy = false
+	setupModelsFilter = ""
+
+	if err := setupPiCmd.RunE(setupPiCmd, []string{}); err != nil {
+		t.Fatalf("setupPiCmd in dry-run mode failed: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, rawKey) {
+		t.Errorf("SECURITY LEAK: --dry-run output contains plaintext gateway API key: %s", out)
+	}
+	if !strings.Contains(out, "agw_••••••••") {
+		t.Errorf("expected redacted gateway key indicator in dry-run output, got: %s", out)
+	}
+}

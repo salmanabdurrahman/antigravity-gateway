@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Enforced loopback host validation and cross-site request checks on WebUI dashboard endpoints (`/ui`, `/ui/api/status`, `/ui/api/strategy`) to defend against DNS rebinding attacks.
+- Validated OAuth state parameter in manual redirect URL pastes and prioritized state checks before error callbacks to prevent OAuth CSRF and unauthorized authentication aborts.
+- Redacted API keys and bearer tokens in `agw setup --dry-run` output, and added masked `String()` representations for `Config` and `LocalSession`.
+- Added verified health checking before signalling background daemon processes in `StopDetached`, preventing termination of recycled OS PIDs.
+- Enforced bounded memory reads via `io.LimitReader` on upstream catalog fetching, health probes, test completions, database fallback scans, and SSE stream buffers.
+
 ## [0.1.0] - 2026-11-16
 
 ### Added

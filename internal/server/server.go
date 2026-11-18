@@ -59,6 +59,9 @@ type Server struct {
 	// httpServer is the underlying net/http Server.
 	httpServer *http.Server
 
+	// strategyMu serializes runtime rotation strategy updates and config disk writes.
+	strategyMu sync.Mutex
+
 	// legacySchemas tracks whether upstream rejected parametersJsonSchema, triggering legacy fallback.
 	legacySchemas atomic.Bool
 

@@ -6,7 +6,9 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // processListeningOnPort resolves the process ID owning the listening TCP socket for port by
@@ -20,9 +22,14 @@ func processListeningOnPort(port int) (int, error) {
 	ctx, cancel := portOwnerContext()
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "netstat", "-ano", "-p", "tcp").Output()
+	netstatCmd := "netstat"
+	if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+		netstatCmd = filepath.Join(systemRoot, "System32", "netstat.exe")
+	}
+
+	out, err := exec.CommandContext(ctx, netstatCmd, "-ano", "-p", "tcp").Output()
 	if err != nil {
-		return 0, fmt.Errorf("%w: port %d: %v", ErrProcessNotFound, port, err)
+		return 0, fmt.Errorf("%w: port %d: %w", ErrProcessNotFound, port, err)
 	}
 
 	if pid := parseNetstatPID(string(out), port); pid > 0 {

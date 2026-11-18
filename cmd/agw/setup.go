@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -255,7 +256,7 @@ func runSetupPi(cmd *cobra.Command, args []string) error {
 	}
 
 	if setupDryRun {
-		cmd.Println(res.WrittenJSON)
+		cmd.Println(redactSetupJSON(res.WrittenJSON, apiKey))
 		return nil
 	}
 
@@ -318,7 +319,7 @@ func runSetupOpenCode(cmd *cobra.Command, args []string) error {
 	}
 
 	if setupDryRun {
-		cmd.Println(res.WrittenJSON)
+		cmd.Println(redactSetupJSON(res.WrittenJSON, apiKey))
 		return nil
 	}
 
@@ -372,7 +373,7 @@ func runSetupClaude(cmd *cobra.Command, args []string) error {
 	}
 
 	if setupDryRun {
-		cmd.Println(res.WrittenJSON)
+		cmd.Println(redactSetupJSON(res.WrittenJSON, apiKey))
 		return nil
 	}
 
@@ -388,4 +389,20 @@ func runSetupClaude(cmd *cobra.Command, args []string) error {
 
 	cmd.Println("\nRun \"claude\" in your terminal to use Antigravity Gateway.")
 	return nil
+}
+
+// redactSetupJSON masks sensitive API keys and tokens in configuration JSON before printing to stdout.
+func redactSetupJSON(raw string, gatewayKey string) string {
+	if gatewayKey != "" {
+		raw = strings.ReplaceAll(raw, gatewayKey, "agw_••••••••")
+	}
+	re := regexp.MustCompile(`("apiKey"|"ANTHROPIC_AUTH_TOKEN"|"token"):\s*"([^"]+)"`)
+	raw = re.ReplaceAllStringFunc(raw, func(match string) string {
+		sub := re.FindStringSubmatch(match)
+		if len(sub) == 3 && len(sub[2]) > 8 {
+			return fmt.Sprintf(`%s: "%s••••••••"`, sub[1], sub[2][:4])
+		}
+		return match
+	})
+	return raw
 }

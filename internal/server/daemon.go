@@ -68,8 +68,26 @@ func WritePID(pidFile string, pid int) error {
 	tmpFile := fmt.Sprintf("%s.tmp.%d", pidFile, time.Now().UnixNano())
 	content := fmt.Sprintf("%d\n", pid)
 
-	if err := os.WriteFile(tmpFile, []byte(content), config.FilePerm); err != nil {
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, config.FilePerm)
+	if err != nil {
+		return fmt.Errorf("creating temp pid file: %w", err)
+	}
+
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
 		return fmt.Errorf("writing temp pid file: %w", err)
+	}
+
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("syncing temp pid file: %w", err)
+	}
+
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("closing temp pid file: %w", err)
 	}
 
 	if err := os.Rename(tmpFile, pidFile); err != nil {
@@ -107,7 +125,7 @@ func CheckHealth(ctx context.Context, healthURL string) (*HealthResponse, error)
 		return nil, fmt.Errorf("unexpected status HTTP %d from %s", resp.StatusCode, healthURL)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return nil, fmt.Errorf("reading health response body: %w", err)
 	}
@@ -261,7 +279,35 @@ func StopDetached(cfg *config.Config) (int, error) {
 	}
 
 	pid, err := ReadPID(pidFile)
+	isStale := false
 	if err != nil || !IsProcessAlive(pid) {
+		isStale = true
+	} else {
+		// When PID appears alive, verify it is actually an antigravity-gateway daemon by checking /health.
+		// If health is unreachable or does not report ServerName, check port ownership before signalling
+		// to avoid terminating an unrelated reused OS PID.
+		host := config.DefaultHost
+		port := config.DefaultPort
+		if cfg != nil {
+			host = cmp.Or(cfg.Host, config.DefaultHost)
+			if cfg.Port > 0 {
+				port = cfg.Port
+			}
+		}
+		healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
+		health, healthErr := CheckHealth(ctx, healthURL)
+		cancel()
+
+		if healthErr != nil || health == nil || !health.OK || health.Name != ServerName {
+			portPID, portErr := processListeningOnPort(port)
+			if portErr != nil || portPID != pid {
+				isStale = true
+			}
+		}
+	}
+
+	if isStale {
 		pidErr := err
 		_ = ClearPID(pidFile) // Best-effort cleanup of a missing or stale pid file.
 

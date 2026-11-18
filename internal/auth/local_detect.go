@@ -53,6 +53,15 @@ type LocalSession struct {
 	Name string `json:"name,omitempty"`
 }
 
+// String returns a redacted representation of LocalSession to prevent credential leakage in logs.
+func (s *LocalSession) String() string {
+	if s == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("LocalSession{Email:%s, Name:%s, APIKey:%s}",
+		s.Email, s.Name, maskSecret(s.APIKey))
+}
+
 var chatParamsRegex = regexp.MustCompile(`window\.chatParams\s*=\s*'([^']+)'`)
 
 // DetectAntigravityDBPath returns the platform-specific path to Antigravity's state.vscdb file.
@@ -87,7 +96,8 @@ func DetectAntigravityDBPath() (string, error) {
 
 // ExtractSessionFromDB queries or parses Antigravity's SQLite database to retrieve the active session.
 func ExtractSessionFromDB(dbPath string) (*LocalSession, error) {
-	if _, err := os.Stat(dbPath); err != nil {
+	fi, err := os.Stat(dbPath)
+	if err != nil {
 		return nil, fmt.Errorf("antigravity database not accessible: %w", err)
 	}
 
@@ -96,8 +106,10 @@ func ExtractSessionFromDB(dbPath string) (*LocalSession, error) {
 		if _, err := os.Stat(sqlitePath); err != nil {
 			continue
 		}
-		cmd := exec.Command(sqlitePath, dbPath, "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus' LIMIT 1;")
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		cmd := exec.CommandContext(ctx, sqlitePath, "--", dbPath, "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus' LIMIT 1;")
 		out, cmdErr := cmd.Output()
+		cancel()
 		if cmdErr != nil || len(out) == 0 {
 			continue
 		}
@@ -112,6 +124,12 @@ func ExtractSessionFromDB(dbPath string) (*LocalSession, error) {
 	}
 
 	// Method 2: Binary byte-scanning fallback (zero-dependency static binary compatibility)
+	// Bound fallback reading to 50 MB to prevent excessive memory usage on large databases.
+	const maxDBFallbackBytes = 50 << 20
+	if fi.Size() > maxDBFallbackBytes {
+		return nil, fmt.Errorf("database file %s exceeds fallback scanning size limit (%d bytes)", dbPath, fi.Size())
+	}
+
 	fileBytes, err := os.ReadFile(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading database file %s: %w", dbPath, err)

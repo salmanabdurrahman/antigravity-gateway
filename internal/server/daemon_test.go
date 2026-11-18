@@ -160,6 +160,40 @@ func TestStopDetachedNonExistentPID(t *testing.T) {
 	}
 }
 
+// TestStopDetachedRefusesToKillUnrelatedLiveProcess verifies that StopDetached does not kill an
+// arbitrary live process when agw.pid holds a stale recycled OS PID and /health check fails.
+func TestStopDetachedRefusesToKillUnrelatedLiveProcess(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	pidFile, err := config.PIDFilePath()
+	if err != nil {
+		t.Fatalf("resolving pid file path: %v", err)
+	}
+
+	// Use parent process PID (which is guaranteed alive and definitely not our daemon)
+	parentPID := os.Getppid()
+	if err := WritePID(pidFile, parentPID); err != nil {
+		t.Fatalf("writing pid file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Port = getFreePort(t)
+
+	stoppedPID, err := StopDetached(cfg)
+	if err != nil {
+		t.Fatalf("StopDetached failed: %v", err)
+	}
+	if stoppedPID != 0 {
+		t.Fatalf("expected stopped PID 0 (did not kill parent), got %d", stoppedPID)
+	}
+
+	// Stale PID file should have been cleaned up
+	if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected stale pid file to be removed, got err: %v", err)
+	}
+}
+
 // TestProcessListeningOnPortResolvesOwnProcess verifies that the socket table lookup attributes a
 // live loopback listener to the process that owns it, which is the recovery path used when agw.pid
 // has been deleted while the daemon keeps running.

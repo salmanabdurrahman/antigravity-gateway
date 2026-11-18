@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"os/exec"
@@ -136,6 +137,11 @@ func runLogin(cmd *cobra.Command, args []string) error {
 			if strings.Contains(line, "code=") {
 				parsed, parseErr := auth.ParseRedirectURL(line)
 				if parseErr == nil && parsed.Code != "" {
+					// Verify state parameter to prevent OAuth CSRF in manually pasted redirect URLs
+					if subtle.ConstantTimeCompare([]byte(parsed.State), []byte(state)) != 1 {
+						cmd.PrintErrln("Warning: Ignored pasted URL with mismatched OAuth state parameter.")
+						continue
+					}
 					select {
 					case codeChan <- parsed.Code:
 					default:

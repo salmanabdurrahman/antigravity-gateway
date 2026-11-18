@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -219,8 +220,30 @@ type UIStrategyRequest struct {
 	Strategy string `json:"strategy"`
 }
 
+// isLoopbackHost verifies whether the host header represents a local loopback interface.
+// This prevents DNS rebinding attacks against unauthenticated WebUI and local dashboard endpoints.
+func isLoopbackHost(hostHeader string) bool {
+	host := strings.TrimSpace(hostHeader)
+	if host == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // handleUI serves the embedded static WebUI dashboard HTML page.
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackHost(r.Host) {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(webui.IndexHTML))
@@ -228,6 +251,15 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 
 // handleUIStatus aggregates accounts, strategy, models, and quota metrics for the WebUI dashboard.
 func (s *Server) handleUIStatus(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackHost(r.Host) {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
+		return
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
+		return
+	}
+
 	_ = s.catalog.Ensure(r.Context())
 	snap, _ := s.catalog.Snapshot()
 	snapshots := s.rotator.Pool().Snapshots()
@@ -243,10 +275,19 @@ func (s *Server) handleUIStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleUIStrategy updates the active account rotation strategy dynamically via the WebUI dashboard.
 func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackHost(r.Host) {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
+		return
+	}
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
+		return
+	}
+
 	// Protocol Quirk: the dashboard is unauthenticated on loopback, so reject cross-site
 	// mutations that a malicious page could issue as a "simple" request without preflight.
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if host, err := url.Parse(origin); err != nil || !strings.EqualFold(host.Host, r.Host) {
+		if host, err := url.Parse(origin); err != nil || !strings.EqualFold(host.Host, r.Host) || !isLoopbackHost(host.Host) {
 			sendJSONError(w, http.StatusForbidden, "Cross-origin strategy mutation is not permitted.", 0)
 			return
 		}
@@ -264,6 +305,9 @@ func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
 		sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported strategy %q: must be 'sticky', 'round-robin', or 'hybrid'", req.Strategy), 0)
 		return
 	}
+
+	s.strategyMu.Lock()
+	defer s.strategyMu.Unlock()
 
 	s.rotator.SetStrategy(strat)
 	s.setConfig(func(c *config.Config) { c.Strategy = string(strat) })

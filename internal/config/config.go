@@ -52,6 +52,12 @@ const (
 
 	// APIKeyHexLen defines the number of hexadecimal characters following APIKeyPrefix in a generated key.
 	APIKeyHexLen = 64
+
+	// EnvClientID overrides ClientID from an environment variable for BYOC configurations.
+	EnvClientID = "AGW_CLIENT_ID"
+
+	// EnvClientSecret overrides ClientSecret from an environment variable for BYOC configurations.
+	EnvClientSecret = "AGW_CLIENT_SECRET"
 )
 
 // ErrInvalidAPIKey indicates that a gateway API key does not match the locally generated format
@@ -117,14 +123,35 @@ type Config struct {
 	ModelMapping map[string]string `json:"model_mapping,omitempty"`
 }
 
+// String returns a redacted representation of Config to avoid leaking secrets in logs and diagnostic outputs.
+func (c *Config) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	maskKey := "<empty>"
+	if len(c.APIKey) > 8 {
+		maskKey = c.APIKey[:4] + "••••••••"
+	} else if c.APIKey != "" {
+		maskKey = "••••••••"
+	}
+	maskSecret := "<empty>"
+	if len(c.ClientSecret) > 8 {
+		maskSecret = c.ClientSecret[:4] + "••••••••"
+	} else if c.ClientSecret != "" {
+		maskSecret = "••••••••"
+	}
+	return fmt.Sprintf("Config{Host:%s, Port:%d, Strategy:%s, ClientID:%s, ClientSecret:%s, APIKey:%s}",
+		c.Host, c.Port, c.Strategy, c.ClientID, maskSecret, maskKey)
+}
+
 // DefaultConfig instantiates a Config initialized with standard production defaults and fallback endpoints.
 func DefaultConfig() *Config {
 	return &Config{
 		Host:           DefaultHost,
 		Port:           DefaultPort,
 		Strategy:       DefaultStrategy,
-		ClientID:       DefaultClientID,
-		ClientSecret:   DefaultClientSecret,
+		ClientID:       cmp.Or(os.Getenv(EnvClientID), DefaultClientID),
+		ClientSecret:   cmp.Or(os.Getenv(EnvClientSecret), DefaultClientSecret),
 		AuthURL:        DefaultAuthURL,
 		TokenURL:       DefaultTokenURL,
 		UserInfoURL:    DefaultUserInfoURL,
@@ -199,8 +226,8 @@ func Load(path string) (*Config, error) {
 	cfg.Host = cmp.Or(cfg.Host, DefaultHost)
 	cfg.Port = cmp.Or(cfg.Port, DefaultPort)
 	cfg.Strategy = cmp.Or(cfg.Strategy, DefaultStrategy)
-	cfg.ClientID = cmp.Or(cfg.ClientID, DefaultClientID)
-	cfg.ClientSecret = cmp.Or(cfg.ClientSecret, DefaultClientSecret)
+	cfg.ClientID = cmp.Or(os.Getenv(EnvClientID), cfg.ClientID, DefaultClientID)
+	cfg.ClientSecret = cmp.Or(os.Getenv(EnvClientSecret), cfg.ClientSecret, DefaultClientSecret)
 	cfg.AuthURL = cmp.Or(cfg.AuthURL, DefaultAuthURL)
 	cfg.TokenURL = cmp.Or(cfg.TokenURL, DefaultTokenURL)
 	cfg.UserInfoURL = cmp.Or(cfg.UserInfoURL, DefaultUserInfoURL)

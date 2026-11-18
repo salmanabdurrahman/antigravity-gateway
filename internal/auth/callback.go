@@ -4,6 +4,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"html"
@@ -69,6 +70,9 @@ func ResolveCallbackEndpoint(rawURI string) (listenAddr string, callbackPath str
 	}
 
 	host := u.Hostname()
+	if host != "127.0.0.1" && host != "localhost" {
+		host = "127.0.0.1"
+	}
 	if host == "localhost" || host == "" {
 		host = "127.0.0.1"
 	}
@@ -126,6 +130,16 @@ func StartCallbackListener(ctx context.Context, listenAddr string, callbackPath 
 		state := q.Get("state")
 		errParam := q.Get("error")
 
+		// Validate state parameter first before processing code or error to prevent
+		// forged cancellations or foreign/scanner requests from aborting the listener.
+		if expectedState != "" && subtle.ConstantTimeCompare([]byte(state), []byte(expectedState)) != 1 {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(failureHTML("State mismatch parameter detected. Possible CSRF attempt.")))
+			// Do not abort the server on foreign or scanner requests; keep listening for legitimate redirect
+			return
+		}
+
 		if errParam != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
@@ -140,14 +154,6 @@ func StartCallbackListener(ctx context.Context, listenAddr string, callbackPath 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(failureHTML("Missing authorization code in redirect callback.")))
-			return
-		}
-
-		if expectedState != "" && state != expectedState {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(failureHTML("State mismatch parameter detected. Possible CSRF attempt.")))
-			// Do not abort the server on foreign or scanner requests; keep listening for legitimate redirect
 			return
 		}
 

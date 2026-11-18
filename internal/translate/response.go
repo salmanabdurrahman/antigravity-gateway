@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -502,13 +503,16 @@ func ReadSSEEvents(r io.Reader, handle func(event map[string]any) error) error {
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, maxScanCapacity)
 	var dataLines []string
+	var totalDataBytes int
 
 	flush := func() error {
 		if len(dataLines) == 0 {
+			totalDataBytes = 0
 			return nil
 		}
 		payload := strings.TrimSpace(strings.Join(dataLines, "\n"))
 		dataLines = nil
+		totalDataBytes = 0
 		if payload == "" || payload == "[DONE]" {
 			return nil
 		}
@@ -537,6 +541,10 @@ func ReadSSEEvents(r io.Reader, handle func(event map[string]any) error) error {
 		if strings.HasPrefix(line, "data:") {
 			dataContent := strings.TrimPrefix(line, "data:")
 			dataContent = strings.TrimPrefix(dataContent, " ")
+			totalDataBytes += len(dataContent)
+			if totalDataBytes > maxScanCapacity {
+				return fmt.Errorf("sse event payload exceeds maximum capacity of %d bytes", maxScanCapacity)
+			}
 			dataLines = append(dataLines, dataContent)
 		}
 	}

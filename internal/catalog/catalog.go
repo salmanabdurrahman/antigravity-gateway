@@ -63,7 +63,7 @@ func FetchCatalog(ctx context.Context, cfg *config.Config, httpClient *http.Clie
 			continue
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			lastErr = fmt.Errorf("reading response from %s: %w", targetURL, readErr)

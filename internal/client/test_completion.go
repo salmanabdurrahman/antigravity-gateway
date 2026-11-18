@@ -195,7 +195,7 @@ func TestAnthropicCompletion(ctx context.Context, baseURL string, apiKey string,
 
 	duration := time.Since(start)
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("reading test completion response: %w", err)
 	}

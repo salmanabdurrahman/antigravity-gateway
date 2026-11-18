@@ -699,6 +699,7 @@ func TestUIEndpoints(t *testing.T) {
 
 	// 1. GET /ui returns 200 HTML
 	reqUI := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	reqUI.Host = "127.0.0.1:51400"
 	recUI := httptest.NewRecorder()
 	handler.ServeHTTP(recUI, reqUI)
 
@@ -727,6 +728,7 @@ func TestUIEndpoints(t *testing.T) {
 
 	// 3. GET /ui/api/status returns JSON status payload
 	reqStatus := httptest.NewRequest(http.MethodGet, "/ui/api/status", nil)
+	reqStatus.Host = "127.0.0.1:51400"
 	recStatus := httptest.NewRecorder()
 	handler.ServeHTTP(recStatus, reqStatus)
 
@@ -757,6 +759,7 @@ func TestUIEndpoints(t *testing.T) {
 	}
 
 	reqStrat := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "hybrid"}`))
+	reqStrat.Host = "127.0.0.1:51400"
 	reqStrat.Header.Set("Content-Type", "application/json")
 	recStrat := httptest.NewRecorder()
 	handler.ServeHTTP(recStrat, reqStrat)
@@ -790,6 +793,7 @@ func TestUIEndpoints(t *testing.T) {
 
 	// 5. POST /ui/api/strategy rejects unsupported strategy names
 	reqBad := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "random"}`))
+	reqBad.Host = "127.0.0.1:51400"
 	reqBad.Header.Set("Content-Type", "application/json")
 	recBad := httptest.NewRecorder()
 	handler.ServeHTTP(recBad, reqBad)
@@ -803,6 +807,7 @@ func TestUIEndpoints(t *testing.T) {
 
 	// 6. POST /ui/api/strategy rejects cross-origin mutations
 	reqCSRF := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "sticky"}`))
+	reqCSRF.Host = "127.0.0.1:51400"
 	reqCSRF.Header.Set("Content-Type", "text/plain")
 	reqCSRF.Header.Set("Origin", "http://evil.example.com")
 	recCSRF := httptest.NewRecorder()
@@ -812,6 +817,15 @@ func TestUIEndpoints(t *testing.T) {
 		t.Fatalf("expected 403 for cross-origin mutation, got %d", recCSRF.Code)
 	}
 	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
-		t.Errorf("strategy must remain hybrid after blocked cross-origin request, got %s", harness.server.rotator.Strategy())
+		t.Errorf("strategy must remain hybrid after rejected CSRF update, got %s", harness.server.rotator.Strategy())
+	}
+
+	// 7. GET /ui/api/status and POST /ui/api/strategy reject non-loopback Host (DNS rebinding defense)
+	reqRebind := httptest.NewRequest(http.MethodGet, "/ui/api/status", nil)
+	reqRebind.Host = "attacker.example.com:51400"
+	recRebind := httptest.NewRecorder()
+	handler.ServeHTTP(recRebind, reqRebind)
+	if recRebind.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for DNS rebinding attempt, got %d", recRebind.Code)
 	}
 }

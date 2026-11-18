@@ -320,6 +320,46 @@ func checkPermissions() []CheckItem {
 		}
 	}
 
+	// Check optional state files if present: models-cache.json, agw.pid, agw.log
+	extraFiles := []struct {
+		name string
+		path func() (string, error)
+	}{
+		{"Models Cache (models-cache.json)", config.ModelsCacheFilePath},
+		{"Daemon PID File (agw.pid)", config.PIDFilePath},
+		{"Daemon Log File (agw.log)", func() (string, error) {
+			d, err := config.Dir()
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(d, "agw.log"), nil
+		}},
+	}
+
+	for _, ef := range extraFiles {
+		if p, err := ef.path(); err == nil {
+			if info, err := os.Stat(p); err == nil {
+				perm := info.Mode().Perm()
+				if perm&0o077 != 0 {
+					items = append(items, CheckItem{
+						Category: "File System & Security",
+						Name:     ef.name,
+						Status:   StatusWarn,
+						Message:  fmt.Sprintf("Permissions %04o (recommended 0600)", perm),
+						Hint:     fmt.Sprintf("Run 'chmod 0600 %s'", p),
+					})
+				} else {
+					items = append(items, CheckItem{
+						Category: "File System & Security",
+						Name:     ef.name,
+						Status:   StatusOK,
+						Message:  fmt.Sprintf("Secure permissions (%04o)", perm),
+					})
+				}
+			}
+		}
+	}
+
 	return items
 }
 

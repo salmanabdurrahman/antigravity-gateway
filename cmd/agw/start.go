@@ -2,6 +2,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -108,7 +109,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	if existingPID, readErr := server.ReadPID(pidFile); readErr == nil && server.IsProcessAlive(existingPID) {
 		if existingPID != os.Getpid() {
-			return fmt.Errorf("antigravity-gateway daemon is already running (PID: %d); run 'agw stop' to restart it", existingPID)
+			host := cmp.Or(cfg.Host, config.DefaultHost)
+			port := cmp.Or(cfg.Port, config.DefaultPort)
+			healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+			ctx, cancel := context.WithTimeout(cmd.Context(), server.DefaultHealthTimeout)
+			health, healthErr := server.CheckHealth(ctx, healthURL)
+			cancel()
+			if healthErr == nil && health != nil && health.OK && health.Name == server.ServerName {
+				return fmt.Errorf("antigravity-gateway daemon is already running (PID: %d); run 'agw stop' to restart it", existingPID)
+			}
+			// Stale PID from dead daemon or recycled PID; clean up and continue
+			_ = server.ClearPID(pidFile)
 		}
 	}
 

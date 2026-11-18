@@ -388,6 +388,8 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 ### Environment Overrides
 
 - `AGW_HOME`: Root path for local configuration and credential storage (default: `~/.agw`).
+- `AGW_CLIENT_ID`: Custom Google OAuth 2.0 Client ID for Bring-Your-Own-Client (BYOC) setups.
+- `AGW_CLIENT_SECRET`: Custom Google OAuth 2.0 Client Secret for Bring-Your-Own-Client (BYOC) setups.
 - `AGW_USER_AGENT` (legacy fallback: `PGA_USER_AGENT`): Custom User-Agent header override.
 - `AGW_API_CLIENT` (legacy fallback: `PGA_API_CLIENT`): Custom `X-Goog-Api-Client` header override.
 - `AGW_CLIENT_METADATA` (legacy fallback: `PGA_CLIENT_METADATA`): Custom `Client-Metadata` JSON header override.
