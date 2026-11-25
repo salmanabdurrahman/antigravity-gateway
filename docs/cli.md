@@ -9,6 +9,7 @@ Usage:
 Available Commands:
   accounts    List configured Google Antigravity accounts
   completion  Generate the autocompletion script for the specified shell
+  config      Inspect and update gateway configuration
   doctor      Run diagnostics on ports, permissions, accounts, and network connectivity
   help        Help about any command
   login       Authenticate a Google Antigravity account via OAuth PKCE
@@ -115,14 +116,41 @@ Removes the account's credentials and project mapping from `~/.agw/accounts.json
 
 ```bash
 agw models list            # instant, served from ~/.agw/models-cache.json
+agw models list --quota    # include cached remaining quota per model
 agw models list --refresh  # force a live upstream catalog refresh
+agw models list --json
 ```
 
-`--refresh` is a persistent flag on `models`, so it also works as `agw models --refresh list`. Listings include context window, maximum output tokens, and reasoning/multimodal capability flags.
+| Flag            | Purpose                                                                       |
+| :-------------- | :---------------------------------------------------------------------------- |
+| `--refresh`     | Force a live catalog refresh from upstream Google Cloud Code Assist.          |
+| `-q`, `--quota` | Include cached remaining quota and reset countdowns from `models-cache.json`. |
+| `--json`        | Output the model catalog, active aliases, and optional cached quotas as JSON. |
+
+`--refresh`, `--quota`, and `--json` are persistent flags on `models`, so `agw models --refresh list` and `agw models --quota` both work. Listings include context window, maximum output tokens, reasoning/multimodal capability flags, and any configured `model_mapping` aliases.
 
 Catalog parsing follows the capability metadata returned by `fetchAvailableModels`: `agentModelSorts` and `tieredModelIds` override name-based heuristics, `apiProvider`/`modelProvider` exclude non-conversational entries, and `<model>-disabled` placeholders are never listed. Gemini 4 Neon reports its documented 512K context window. When setup runs fully offline, `agw` falls back to a bundled manifest covering Gemini 4 (Neon, Carbon, Hydrogen) and Claude 5.5 instead of retired identifiers.
 
-## 7. `agw start`
+## 7. `agw config`
+
+Inspects redacted settings in `config.json`, resolves the active config file path, and updates the persisted rotation strategy safely.
+
+```bash
+agw config show
+agw config show --json
+agw config path
+agw config strategy hybrid
+```
+
+| Subcommand                  | Purpose                                                                     |
+| :-------------------------- | :-------------------------------------------------------------------------- |
+| `agw config show`           | Display redacted settings (API key and OAuth client secret remain masked).  |
+| `agw config path`           | Print the resolved `config.json` path (`--config` and `$AGW_HOME` honored). |
+| `agw config strategy [val]` | Print or persist `strategy` (`sticky`, `round-robin`, or `hybrid`).         |
+
+`--json` is supported across all `agw config` subcommands. Updating `strategy` rewrites only the `"strategy"` field in `config.json`; if a daemon is running, restart it (`agw stop && agw start -d`) for the new strategy to take effect.
+
+## 8. `agw start`
 
 Runs the gateway reverse proxy on `127.0.0.1:51400`.
 
@@ -144,15 +172,20 @@ Detached launchers forward every command-line override (`--strategy`, `--port`, 
 
 Before spawning, `agw start` probes `/health` on the configured port. If an orphaned daemon answers, the command reports it and restores the missing PID file instead of launching a second process that cannot bind. A listener that does not identify itself as `antigravity-gateway` is never touched.
 
-## 8. `agw stop`
+## 9. `agw stop`
 
 ```bash
 agw stop
+agw stop --port 51401
 ```
 
-Terminates the running daemon gracefully via `SIGTERM`. If `~/.agw/agw.pid` is missing or stale, `agw stop` rediscovers the daemon through its `/health` identity probe on the port recorded in the configuration and resolves the owning process from the operating system socket table. Because discovery uses the configured port, keep `port` in the configuration in sync when running on a custom `--port`.
+| Flag           | Purpose                                                                      |
+| :------------- | :--------------------------------------------------------------------------- |
+| `-p`, `--port` | Gateway HTTP port to probe and stop (default from `config.json` or `51400`). |
 
-## 9. `agw update`
+Terminates the running daemon gracefully via `SIGTERM`. If `~/.agw/agw.pid` is missing or stale, `agw stop` rediscovers the daemon through its `/health` identity probe on the target port (`--port` or `config.json`) and resolves the owning process from the operating system socket table.
+
+## 10. `agw update`
 
 Replaces the current executable with a newer release, atomically, in place.
 
@@ -173,9 +206,9 @@ agw update --no-restart     # leave a running daemon stopped
 
 A running daemon is stopped before the executable is replaced, and the restart preserves the `--config` path the daemon was launched with. If the stop request is refused or the daemon keeps answering `/health`, the upgrade aborts instead of swapping the binary underneath a live process; `--force` overrides that guard. Release metadata, archives, and checksums must be served over HTTPS (plain HTTP is accepted only for loopback mirrors), HTTPS-to-HTTP redirect downgrades are rejected, archives must contain `agw` as a regular file (symlinks and directories are refused), and extraction is size-capped. `agw upgrade` is an alias.
 
-## 10. `agw setup`
+## 11. `agw setup`
 
-Configures an AI coding agent to use the local gateway. Every subcommand creates a timestamped atomic backup (`*.bak-<timestamp>`) before writing, and by default performs a 1-token test completion to verify end-to-end connectivity.
+Configures an AI coding agent to use the local gateway. Every subcommand creates a timestamped atomic backup (`*.bak-<timestamp>`) before writing, and by default performs a 1-token test completion to verify end-to-end connectivity. Other OpenAI-compatible clients (such as Cursor) can point directly at `http://127.0.0.1:51400/v1` with the bearer key from `~/.agw/config.json`.
 
 Shared flags:
 
@@ -215,7 +248,7 @@ Configures Claude Code CLI to talk to the Anthropic Messages endpoint (`/v1/mess
 
 An `--api-key` value that does not match `agw_` plus 64 hexadecimal characters fails before any client file is written. To keep an intentionally custom key, edit `api_key` in `config.json` and the client files directly; `agw doctor` reports when a stored key no longer matches the generated format.
 
-## 11. `agw doctor`
+## 12. `agw doctor`
 
 ```bash
 agw doctor
@@ -229,6 +262,6 @@ Runs an end-to-end environment audit:
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
-## 12. `agw version`
+## 13. `agw version`
 
 Prints the semantic version embedded at build time (for example `agw version 0.2.1`).

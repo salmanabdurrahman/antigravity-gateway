@@ -87,6 +87,62 @@ func TestStopCommandWhenNotRunning(t *testing.T) {
 	}
 }
 
+// TestStopCommandWithPortFlag verifies that agw stop --port validates port bounds, targets the
+// specified port rather than cfg.Port, and preserves an unrelated primary daemon's agw.pid.
+func TestStopCommandWithPortFlag(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	cfg := config.DefaultConfig()
+	cfg.Port = getFreePort(t)
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	// Keep an alive PID in agw.pid representing a primary daemon on cfg.Port.
+	pidFile := filepath.Join(tempDir, "agw.pid")
+	if err := server.WritePID(pidFile, os.Getppid()); err != nil {
+		t.Fatalf("writing pid file: %v", err)
+	}
+
+	customPort := getFreePort(t)
+	prevStopPort := stopPort
+	t.Cleanup(func() {
+		stopPort = prevStopPort
+		stopCmd.SetContext(nil)
+		rootCmd.SetArgs(nil)
+	})
+
+	outBuf := new(bytes.Buffer)
+	errBuf := new(bytes.Buffer)
+	rootCmd.SetOut(outBuf)
+	rootCmd.SetErr(errBuf)
+
+	// 1. Invalid --port is rejected.
+	rootCmd.SetArgs([]string{"stop", "--port", "0"})
+	if err := rootCmd.Execute(); err == nil || !strings.Contains(err.Error(), "invalid --port") {
+		t.Fatalf("expected invalid --port error, got: %v", err)
+	}
+
+	// 2. Valid --port on an idle port reports no running daemon and preserves primary agw.pid.
+	outBuf.Reset()
+	errBuf.Reset()
+	rootCmd.SetArgs([]string{"stop", "--port", strconv.Itoa(customPort)})
+	if execErr := rootCmd.Execute(); execErr != nil {
+		t.Fatalf("unexpected error running stop --port: %v", execErr)
+	}
+	if !strings.Contains(outBuf.String(), "No running antigravity-gateway daemon found") {
+		t.Errorf("unexpected output: %s", outBuf.String())
+	}
+	if gotPID, readErr := server.ReadPID(pidFile); readErr != nil || gotPID != os.Getppid() {
+		t.Errorf("expected primary agw.pid (%d) preserved, got pid=%d err=%v", os.Getppid(), gotPID, readErr)
+	}
+}
+
 // helperBinaryPath returns the platform-correct path for a binary built by a test. Windows resolves
 // executables by their .exe suffix, so a bare "agw" name is never launchable there.
 func helperBinaryPath(dir, name string) string {

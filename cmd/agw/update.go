@@ -38,6 +38,10 @@ and replaces the current executable in-place atomically.
 
 If a background daemon is running, it will be automatically restarted with the new binary
 unless --no-restart is supplied.`,
+		Example: `  agw update --check
+  agw update
+  agw update --version 0.2.1
+  agw update --no-restart`,
 		RunE: runUpdate,
 	}
 

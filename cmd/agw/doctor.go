@@ -35,6 +35,8 @@ It inspects:
   - Configured Google accounts and token validity
   - Upstream network reachability to Google OAuth and Cloud Code Assist endpoints
   - Integration status in Pi Coding Agent and OpenCode configurations`,
+	Example: `  agw doctor
+  agw --config /etc/agw/config.json doctor`,
 	RunE: runDoctor,
 }
 

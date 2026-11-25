@@ -37,6 +37,9 @@ var (
 		Long: `Status probes the local Antigravity Gateway daemon (/health and /v1/accounts)
 to report whether the proxy is running, its PID, active rotation strategy,
 cached catalog summary, and per-account runtime request/429/cooldown metrics.`,
+		Example: `  agw status
+  agw status --port 51401
+  agw status --json`,
 		RunE: runStatus,
 	}
 )

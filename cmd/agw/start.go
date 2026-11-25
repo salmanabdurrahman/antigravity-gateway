@@ -41,6 +41,10 @@ coordinates multi-account rotation with transparent 429 failover, and preserves
 thinking signatures for Gemini 3 and Claude models.
 
 To run the daemon in the background, supply the --detach flag.`,
+		Example: `  agw start
+  agw start --detach
+  agw start --detach --strategy hybrid
+  agw start --detach --port 51401`,
 		RunE: runStart,
 	}
 )
@@ -106,6 +110,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 		cmd.Printf("Started antigravity-gateway daemon (PID: %d)\n", pid)
 		cmd.Printf("Listening on %s\n", config.BaseURL(host, port))
 		cmd.Printf("Logs written to %s\n", logFile)
+		cmd.Println("\nNext steps:")
+		if startPort > 0 {
+			cmd.Printf("  agw status --port %d   # check daemon health and runtime metrics\n", port)
+			cmd.Printf("  agw stop --port %d     # stop this background daemon\n", port)
+		} else {
+			cmd.Println("  agw status               # check daemon health and runtime metrics")
+			cmd.Println("  agw stop                 # stop the background daemon")
+		}
+		cmd.Println("  agw quota                # check live rolling and weekly quotas")
+		cmd.Println("  agw setup pi             # or: agw setup opencode | agw setup claude")
 		return nil
 	}
 

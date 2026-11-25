@@ -56,7 +56,14 @@ var (
 		Long: `Setup automatically registers Antigravity Gateway as an OpenAI-compatible
 model provider in your coding agent configurations (Pi Coding Agent, OpenCode, or Claude Code CLI).
 It preserves existing custom settings, creates timestamped backups of existing files,
-and performs a quick 1-token connectivity test against the local gateway.`,
+and performs a quick 1-token connectivity test against the local gateway.
+
+Other OpenAI-compatible clients (such as Cursor) can point directly at
+http://127.0.0.1:51400/v1 using the local API key from ~/.agw/config.json.`,
+		Example: `  agw setup pi
+  agw setup pi --models "gemini-*,!*-low"
+  agw setup opencode --dry-run
+  agw setup claude --model claude-sonnet-5-5-high`,
 	}
 
 	// setupPiCmd configures Pi Coding Agent's models.json and auth.json.
@@ -66,6 +73,9 @@ and performs a quick 1-token connectivity test against the local gateway.`,
 		Long: `Pi configures Pi Coding Agent to use the local Antigravity Gateway reverse proxy.
 It adds the "antigravity" provider block into ~/.pi/agent/models.json, backs up the previous
 configuration, and tests connectivity by sending a 1-token chat completion.`,
+		Example: `  agw setup pi
+  agw setup pi --models "gemini-*,!*-low"
+  agw setup pi --dry-run`,
 		RunE: runSetupPi,
 	}
 
@@ -76,6 +86,8 @@ configuration, and tests connectivity by sending a 1-token chat completion.`,
 		Long: `OpenCode configures the OpenCode CLI to use the local Antigravity Gateway reverse proxy.
 It registers the "@opencode/ai/providers/openai-compatible" provider block into
 ~/.config/opencode/opencode.json, backs up previous configuration, and verifies connectivity.`,
+		Example: `  agw setup opencode
+  agw setup opencode --dry-run`,
 		RunE: runSetupOpenCode,
 	}
 
@@ -86,6 +98,8 @@ It registers the "@opencode/ai/providers/openai-compatible" provider block into
 		Long: `Claude configures Claude Code CLI to route requests through Antigravity Gateway's
 Anthropic Messages API endpoint (/v1/messages). It registers ANTHROPIC_BASE_URL and
 ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json and verifies connectivity.`,
+		Example: `  agw setup claude
+  agw setup claude --model claude-sonnet-5-5-high`,
 		RunE: runSetupClaude,
 	}
 )

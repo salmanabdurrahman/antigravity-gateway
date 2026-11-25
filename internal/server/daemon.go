@@ -337,18 +337,54 @@ func StopDetached(cfg *config.Config) (int, error) {
 		pid = resolvedPID
 	}
 
+	return terminateDaemonProcess(pid, pidFile)
+}
+
+// StopOnPort discovers and terminates the gateway daemon listening on host:port via /health and OS
+// socket ownership, without clearing an unrelated daemon's PID file on disk.
+func StopOnPort(host string, port int) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
+	defer cancel()
+
+	pid, _, err := ResolveRunningDaemon(ctx, host, port)
+	if err != nil {
+		if errors.Is(err, ErrDaemonNotRunning) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	pidFile := ""
+	if candidatePath, pathErr := config.PIDFilePath(); pathErr == nil {
+		if recordedPID, readErr := ReadPID(candidatePath); readErr == nil && recordedPID == pid {
+			pidFile = candidatePath
+		}
+	}
+
+	return terminateDaemonProcess(pid, pidFile)
+}
+
+// terminateDaemonProcess gracefully signals pid (falling back to Kill after StopTimeout) and clears
+// pidFile when non-empty.
+func terminateDaemonProcess(pid int, pidFile string) (int, error) {
+	clearIfConfigured := func() {
+		if pidFile != "" {
+			_ = ClearPID(pidFile) // Best-effort cleanup of the matching daemon PID file.
+		}
+	}
+
 	if pid == os.Getpid() {
 		return 0, fmt.Errorf("refusing to terminate the current process (pid %d)", pid)
 	}
 
 	if !IsProcessAlive(pid) {
-		_ = ClearPID(pidFile) // Clean up pid file if process is already dead.
+		clearIfConfigured()
 		return 0, nil
 	}
 
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		_ = ClearPID(pidFile) // Clean up pid file if process handle resolution fails.
+		clearIfConfigured()
 		return 0, nil
 	}
 
@@ -356,7 +392,7 @@ func StopDetached(cfg *config.Config) (int, error) {
 	if err := terminateProcess(proc); err != nil {
 		if isProcessDoneErr(err) {
 			// Process exited concurrently before termination signal was delivered.
-			_ = ClearPID(pidFile) // Best-effort cleanup of stale pid file.
+			clearIfConfigured()
 			return pid, nil
 		}
 		return 0, fmt.Errorf("terminating process pid %d: %w", pid, err)
@@ -366,15 +402,15 @@ func StopDetached(cfg *config.Config) (int, error) {
 	deadline := time.Now().Add(StopTimeout)
 	for time.Now().Before(deadline) {
 		if !IsProcessAlive(pid) {
-			_ = ClearPID(pidFile) // Clean up pid file once process has exited.
+			clearIfConfigured()
 			return pid, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Force kill if process failed to terminate gracefully
-	_ = proc.Kill()       // Force kill if process failed to terminate within deadline.
-	_ = ClearPID(pidFile) // Clean up pid file after forceful termination.
+	_ = proc.Kill() // Force kill if process failed to terminate within deadline.
+	clearIfConfigured()
 	return pid, nil
 }
 

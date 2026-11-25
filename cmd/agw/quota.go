@@ -48,6 +48,10 @@ var (
 It separates rolling 5-hour and weekly allowance windows, reports family minimums,
 and highlights constrained or cooling models. Pass --models for the complete per-model
 table or --watch for continuous terminal monitoring.`,
+		Example: `  agw quota
+  agw quota --models
+  agw quota --watch --interval 30s
+  agw quota --json`,
 		RunE: runQuota,
 	}
 )

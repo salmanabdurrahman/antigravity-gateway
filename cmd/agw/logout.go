@@ -17,8 +17,9 @@ var (
 		Short: "Remove a Google account from the local account store",
 		Long: `Logout removes the specified Google account from ~/.agw/accounts.json.
 Future requests will no longer rotate to or authenticate with this account.`,
-		Args: cobra.ExactArgs(1),
-		RunE: runLogout,
+		Example: `  agw logout user@example.com`,
+		Args:    cobra.ExactArgs(1),
+		RunE:    runLogout,
 	}
 )
 

@@ -33,6 +33,9 @@ var (
 		Long: `Login opens Google's OAuth consent screen in your web browser.
 Upon authorization, it exchanges the authorization code for tokens, discovers the
 associated Cloud Code companion project, and saves the account in ~/.agw/accounts.json.`,
+		Example: `  agw login
+  agw login --no-browser
+  agw login --local`,
 		RunE: runLogin,
 	}
 )
@@ -68,7 +71,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		cmd.Printf("  Companion Project ID: %s\n", acc.ProjectID)
 		cmd.Println("  Credential: desktop session bearer token (no refresh token issued)")
 		cmd.Println("  Re-run 'agw login --local' when the token expires and requests start returning 401.")
-		cmd.Println("\nRun 'agw accounts' to view stored accounts.")
+		printPostLoginHints(cmd)
 		return nil
 	}
 
@@ -224,7 +227,16 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		cmd.Printf("Successfully refreshed account credentials: %s (Project: %s)\n", email, projectID)
 	}
 
+	printPostLoginHints(cmd)
 	return nil
+}
+
+// printPostLoginHints prints concise next-step commands after an account is added or updated.
+func printPostLoginHints(cmd *cobra.Command) {
+	cmd.Println("\nNext steps:")
+	cmd.Println("  agw accounts --check     # inspect live rolling (5h) and weekly quotas")
+	cmd.Println("  agw start --detach       # start the local gateway daemon")
+	cmd.Println("  agw setup pi             # or: agw setup opencode | agw setup claude")
 }
 
 // openBrowserFn launches the user's default web browser, swappable for isolated unit tests.

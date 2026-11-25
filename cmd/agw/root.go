@@ -16,6 +16,11 @@ var (
 		Short: "Antigravity Gateway local reverse proxy CLI and daemon",
 		Long: `Antigravity Gateway (agw) is a lightweight, zero-dependency local OpenAI-compatible
 reverse proxy connecting AI coding agents directly to Google Antigravity subscriptions.`,
+		Example: `  agw login
+  agw start --detach
+  agw status
+  agw quota --models
+  agw setup pi`,
 	}
 )
 

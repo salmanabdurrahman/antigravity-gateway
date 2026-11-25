@@ -98,6 +98,89 @@ func TestModelsListFromCache(t *testing.T) {
 	}
 }
 
+// TestModelsListQuotaAliasesAndJSON verifies --quota cached quota rendering, custom model_mapping
+// alias display, cache age hint, and --json serialization.
+func TestModelsListQuotaAliasesAndJSON(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	cfg := config.DefaultConfig()
+	cfg.APIKey = config.APIKeyPrefix + strings.Repeat("f", config.APIKeyHexLen)
+	cfg.ModelMapping = map[string]string{"alias-fast": "gemini-4-hydrogen-high"}
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	frac := 0.42
+	payload := catalog.CachePayload{
+		FetchedAt: 1731580000000,
+		Models: []catalog.CatalogModel{
+			{
+				ID:              "gemini-4-hydrogen-high",
+				DisplayName:     "Gemini 4 Hydrogen",
+				ContextWindow:   1048576,
+				MaxOutputTokens: 65536,
+				Thinking:        true,
+				Images:          true,
+			},
+		},
+		Quotas: map[string]catalog.ModelQuota{
+			"gemini-4-hydrogen-high": {
+				RemainingFraction: &frac,
+				ResetTime:         "2099-01-01T12:00:00Z",
+			},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshaling cache payload: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tempHome, "models-cache.json"), data, config.FilePerm); err != nil {
+		t.Fatalf("writing cache file: %v", err)
+	}
+
+	prevRefresh, prevQuota, prevJSON := refreshModels, modelsShowQuota, modelsJSON
+	t.Cleanup(func() {
+		refreshModels, modelsShowQuota, modelsJSON = prevRefresh, prevQuota, prevJSON
+		modelsCmd.SetContext(nil)
+	})
+	refreshModels = false
+	modelsShowQuota = true
+	modelsJSON = false
+
+	buf := new(bytes.Buffer)
+	modelsCmd.SetOut(buf)
+	modelsCmd.SetErr(buf)
+	modelsCmd.SetContext(t.Context())
+
+	if err := modelsCmd.RunE(modelsCmd, []string{}); err != nil {
+		t.Fatalf("modelsCmd.RunE --quota failed: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"CACHED QUOTA", "42%", "alias-fast -> gemini-4-hydrogen-high", "agw models list --refresh"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in models --quota output:\n%s", want, out)
+		}
+	}
+
+	modelsJSON = true
+	buf.Reset()
+	if err := modelsCmd.RunE(modelsCmd, []string{}); err != nil {
+		t.Fatalf("modelsCmd.RunE --json failed: %v", err)
+	}
+	jsonOut := buf.String()
+	if strings.Contains(jsonOut, cfg.APIKey) {
+		t.Fatalf("SECURITY LEAK: models --json leaked API key")
+	}
+	if !strings.Contains(jsonOut, `"alias-fast": "gemini-4-hydrogen-high"`) || !strings.Contains(jsonOut, `"quotas"`) {
+		t.Errorf("expected aliases and quotas in JSON output:\n%s", jsonOut)
+	}
+}
+
 // TestAccountsCommandCheck verifies that agw accounts --check queries upstream quotas and formats remaining fractions.
 func TestAccountsCommandCheck(t *testing.T) {
 	tempHome := t.TempDir()

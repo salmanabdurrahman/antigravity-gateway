@@ -41,6 +41,10 @@ var (
 along with their companion project IDs, tiers, credential sources, and statuses.
 Pass --check to inspect live upstream rolling (5h), weekly, and family quotas.
 Never reveals access or refresh tokens.`,
+		Example: `  agw accounts
+  agw accounts --check
+  agw accounts --check --re-enable
+  agw accounts --check --json`,
 		RunE: runAccounts,
 	}
 )
@@ -419,13 +423,24 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 
 		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
 		_, _ = fmt.Fprintln(w, "EMAIL\tPROJECT ID\tTIER\tSOURCE\tSTATUS\tADDED AT")
+		hasDisabled := false
 		for _, entry := range entries {
+			if entry.Disabled {
+				hasDisabled = true
+			}
 			tier := cmp.Or(entry.Tier, "-")
 			added := cmp.Or(entry.AddedAt, "-")
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 				entry.Email, entry.ProjectID, tier, entry.Source, entry.Status, added)
 		}
-		return w.Flush()
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		cmd.Println("\nRun 'agw accounts --check' for live quota, or 'agw quota --models' for per-model breakdown.")
+		if hasDisabled {
+			cmd.Println("Tip: verify and reactivate working disabled accounts with 'agw accounts --check --re-enable'.")
+		}
+		return nil
 	}
 
 	ctx := cmd.Context()
