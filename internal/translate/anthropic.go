@@ -304,18 +304,24 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 				budget = *info.ThinkingBudget
 			}
 
-			clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, info.MaxOutputTokens, claude)
+			// An explicit client max_tokens is a hard ceiling: the reasoning budget adapts to it instead of
+			// the ceiling growing to make room for reasoning.
+			clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, info.MaxOutputTokens, claude, req.MaxTokens > 0)
 			maxOut = adjMaxOut
 
-			if claude {
-				genConfig["thinkingConfig"] = map[string]any{
-					"include_thoughts": true,
-					"thinking_budget":  clampedBudget,
-				}
-			} else {
-				genConfig["thinkingConfig"] = map[string]any{
-					"includeThoughts": true,
-					"thinkingBudget":  clampedBudget,
+			// A zero budget means the ceiling is too small for reasoning, so the thinking configuration is
+			// omitted rather than sending an invalid budget upstream.
+			if clampedBudget > 0 {
+				if claude {
+					genConfig["thinkingConfig"] = map[string]any{
+						"include_thoughts": true,
+						"thinking_budget":  clampedBudget,
+					}
+				} else {
+					genConfig["thinkingConfig"] = map[string]any{
+						"includeThoughts": true,
+						"thinkingBudget":  clampedBudget,
+					}
 				}
 			}
 		}
@@ -323,10 +329,11 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 
 	genConfig["maxOutputTokens"] = maxOut
 
-	// Tools configuration
+	// Tools configuration. tool_choice "none" omits the declarations entirely: upstream models can still
+	// emit functionCall when tools are declared even with functionCallingConfig mode NONE.
 	var tools []any
 	var toolConfig map[string]any
-	if len(req.Tools) > 0 {
+	if len(req.Tools) > 0 && !toolChoiceDisabled(req.ToolChoice) {
 		fdecls := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
 			name := CleanToolName(t.Name)

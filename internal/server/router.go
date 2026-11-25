@@ -49,12 +49,17 @@ type streamTranslator interface {
 // opaque continuationToken once it reaches the per-request output boundary. Only the token may be
 // added to the follow-up request; the original contents, system instruction, tools, and
 // maxOutputTokens must be resent unchanged, and the partial model text must not be appended.
+//
+// allowContinuation is false when the client supplied an explicit output cap: Cloud Code accumulates
+// maxOutputTokens across continuation hops, so a capped request cannot resend the same ceiling and is
+// finished as a length-limited response instead of failing the follow-up with HTTP 400.
 func (s *Server) readUpstreamHops(
 	ctx context.Context,
 	upstream string,
 	first *rotator.AttemptResult,
 	continuation func(st *rotator.AccountState, token string) (any, error),
 	translator streamTranslator,
+	allowContinuation bool,
 ) error {
 	current := first
 	// The final hop body is closed on return; intermediate hops are closed as soon as they are drained
@@ -71,6 +76,11 @@ func (s *Server) readUpstreamHops(
 
 		token := translator.ContinuationToken()
 		if token == "" || continuation == nil {
+			return nil
+		}
+		if !allowContinuation {
+			s.logger.Debug("long-decode continuation skipped because the request set an explicit output cap",
+				"model", upstream, "hop", hop)
 			return nil
 		}
 		if hop >= maxContinuationHops {
@@ -685,7 +695,7 @@ func (s *Server) processCompletionsResponse(
 			})
 		})
 
-		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
+		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, chatReq.MaxTokens == nil && chatReq.MaxCompletionTokens == nil)
 
 		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -776,7 +786,7 @@ func (s *Server) processCompletionsResponse(
 
 	// Non-streaming completion
 	translator := translate.NewResponseTranslator(chatReq.Model, func(delta translate.Delta) {})
-	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
+	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, chatReq.MaxTokens == nil && chatReq.MaxCompletionTokens == nil)
 
 	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -935,7 +945,7 @@ func (s *Server) processAnthropicResponse(
 
 		translator := translate.NewAnthropicStreamTranslator(anthReq.Model, writeChunk)
 
-		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
+		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, anthReq.MaxTokens <= 0)
 
 		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -967,7 +977,7 @@ func (s *Server) processAnthropicResponse(
 
 	// Non-streaming completion
 	translator := translate.NewAnthropicStreamTranslator(anthReq.Model, nil)
-	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
+	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, anthReq.MaxTokens <= 0)
 
 	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)

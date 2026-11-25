@@ -8,22 +8,31 @@ import (
 
 // TestClampThinkingBudget verifies budget token clamping per model family and max tokens adjustments.
 func TestClampThinkingBudget(t *testing.T) {
-	// Gemini 2.5 Flash with excessive budget
-	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 50000, 4096, 65536, false)
-	if budget != Gemini25MaxThinkingBudget {
-		t.Errorf("expected budget clamped to %d, got %d", Gemini25MaxThinkingBudget, budget)
+	// Gemini 2.5 Flash with an explicit client ceiling: the budget shrinks instead of the ceiling growing.
+	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 50000, 4096, 65536, false, true)
+	if maxOut != 4096 {
+		t.Errorf("expected the explicit maxOut 4096 preserved, got %d", maxOut)
 	}
-	if maxOut <= budget {
-		t.Errorf("expected maxOut (%d) > budget (%d)", maxOut, budget)
+	if budget != 2048 {
+		t.Errorf("expected budget halved to 2048 under the cap, got %d", budget)
 	}
 
-	// Claude model with default budget
-	claudeBudget, claudeMaxOut := ClampThinkingBudget("claude-sonnet-4-6", 0, 2048, 64000, true)
-	if claudeBudget != DefaultClaudeThinkingBudget {
-		t.Errorf("expected default Claude budget %d, got %d", DefaultClaudeThinkingBudget, claudeBudget)
+	// Claude model with an explicit client ceiling: the default budget adapts to it.
+	claudeBudget, claudeMaxOut := ClampThinkingBudget("claude-sonnet-4-6", 0, 2048, 64000, true, true)
+	if claudeMaxOut != 2048 {
+		t.Errorf("expected the explicit maxOut 2048 preserved, got %d", claudeMaxOut)
+	}
+	if claudeBudget != 1024 {
+		t.Errorf("expected Claude budget halved to 1024 under the cap, got %d", claudeBudget)
 	}
 	if claudeMaxOut <= claudeBudget {
 		t.Errorf("expected claudeMaxOut (%d) > claudeBudget (%d)", claudeMaxOut, claudeBudget)
+	}
+
+	// Without a client ceiling the historical headroom expansion is preserved.
+	grownBudget, grownMaxOut := ClampThinkingBudget("gemini-2.5-flash", 4096, 0, 65536, false, false)
+	if grownMaxOut != grownBudget+thinkingHeadroomTokens {
+		t.Errorf("expected maxOut %d, got %d", grownBudget+thinkingHeadroomTokens, grownMaxOut)
 	}
 }
 
@@ -32,7 +41,7 @@ func TestClampThinkingBudget(t *testing.T) {
 // requests never exceed what upstream accepts.
 func TestClampThinkingBudgetRespectsModelCeiling(t *testing.T) {
 	t.Run("claude stays within 64k", func(t *testing.T) {
-		budget, maxOut := ClampThinkingBudget("claude-sonnet-4-6", 60000, 0, 64000, true)
+		budget, maxOut := ClampThinkingBudget("claude-sonnet-4-6", 60000, 0, 64000, true, false)
 		if maxOut > 64000 {
 			t.Errorf("expected maxOut clamped to 64000, got %d", maxOut)
 		}
@@ -42,7 +51,7 @@ func TestClampThinkingBudgetRespectsModelCeiling(t *testing.T) {
 	})
 
 	t.Run("non-gemini model uses catalog ceiling", func(t *testing.T) {
-		budget, maxOut := ClampThinkingBudget("gpt-oss-120b", 60000, 0, 32768, false)
+		budget, maxOut := ClampThinkingBudget("gpt-oss-120b", 60000, 0, 32768, false, false)
 		if maxOut != 32768 {
 			t.Errorf("expected maxOut clamped to the catalog ceiling 32768, got %d", maxOut)
 		}
@@ -52,11 +61,24 @@ func TestClampThinkingBudgetRespectsModelCeiling(t *testing.T) {
 	})
 
 	t.Run("unknown ceiling falls back to gemini ceiling", func(t *testing.T) {
-		_, maxOut := ClampThinkingBudget("gemini-4-hydrogen-high", 32000, 0, 0, false)
+		_, maxOut := ClampThinkingBudget("gemini-4-hydrogen-high", 32000, 0, 0, false, false)
 		if maxOut != 32000+thinkingHeadroomTokens {
 			t.Errorf("expected maxOut %d, got %d", 32000+thinkingHeadroomTokens, maxOut)
 		}
 	})
+}
+
+// TestClampThinkingBudgetHardCapDisablesTinyCeiling verifies a one-token client ceiling collapses the
+// reasoning budget to zero so callers can omit the thinking configuration instead of sending an invalid
+// budget upstream.
+func TestClampThinkingBudgetHardCapDisablesTinyCeiling(t *testing.T) {
+	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 4096, 1, 65536, false, true)
+	if maxOut != 1 {
+		t.Errorf("expected maxOut 1 preserved, got %d", maxOut)
+	}
+	if budget != 0 {
+		t.Errorf("expected reasoning disabled with budget 0, got %d", budget)
+	}
 }
 
 // TestInjectInterruptedToolResponses verifies synthetic tool responses are injected

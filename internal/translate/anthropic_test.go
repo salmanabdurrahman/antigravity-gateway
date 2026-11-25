@@ -994,3 +994,73 @@ func TestBuildAnthropicRequestGemini2SkipSignature(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildAnthropicRequestHonorsExplicitMaxTokens verifies an explicit Anthropic max_tokens stays a hard
+// ceiling while the thinking budget shrinks to fit, instead of the ceiling growing for reasoning.
+func TestBuildAnthropicRequestHonorsExplicitMaxTokens(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 4096,
+		Messages:  []AnthropicMessage{{Role: "user", Content: "list numbers"}},
+	}
+
+	geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.FamilyDefaults("claude-sonnet-4-6")})
+	if err != nil {
+		t.Fatalf("BuildAnthropicRequest failed: %v", err)
+	}
+
+	if got := geminiReq.GenerationConfig["maxOutputTokens"]; got != 4096 {
+		t.Errorf("expected maxOutputTokens 4096 honored, got %v", got)
+	}
+	thinkingConfig, ok := geminiReq.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig present, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+	if got := thinkingConfig["thinking_budget"]; got != 2048 {
+		t.Errorf("expected thinking_budget 2048 under the cap, got %v", got)
+	}
+}
+
+// TestBuildAnthropicRequestTinyMaxTokensDisablesThinking verifies ceilings below the Claude budget floor
+// omit the thinking configuration instead of sending an invalid budget upstream.
+func TestBuildAnthropicRequestTinyMaxTokensDisablesThinking(t *testing.T) {
+	for _, maxTokens := range []int{1, 16} {
+		req := &AnthropicRequest{
+			Model:     "claude-sonnet-4-6",
+			MaxTokens: maxTokens,
+			Messages:  []AnthropicMessage{{Role: "user", Content: "hi"}},
+		}
+
+		geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.FamilyDefaults("claude-sonnet-4-6")})
+		if err != nil {
+			t.Fatalf("BuildAnthropicRequest failed: %v", err)
+		}
+
+		if got := geminiReq.GenerationConfig["maxOutputTokens"]; got != maxTokens {
+			t.Errorf("max_tokens %d: expected maxOutputTokens %d honored, got %v", maxTokens, maxTokens, got)
+		}
+		if _, hasConfig := geminiReq.GenerationConfig["thinkingConfig"]; hasConfig {
+			t.Errorf("max_tokens %d: expected thinkingConfig omitted below the Claude floor, got %v", maxTokens, geminiReq.GenerationConfig["thinkingConfig"])
+		}
+	}
+}
+
+// TestBuildAnthropicRequestToolChoiceNoneOmitsTools verifies an Anthropic tool_choice of none removes the
+// declarations so upstream cannot call a tool the client disabled.
+func TestBuildAnthropicRequestToolChoiceNoneOmitsTools(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:      "claude-sonnet-4-6",
+		MaxTokens:  32,
+		Messages:   []AnthropicMessage{{Role: "user", Content: "Call get_weather for Rome."}},
+		Tools:      []AnthropicTool{{Name: "get_weather", Description: "weather", InputSchema: map[string]any{"type": "object"}}},
+		ToolChoice: map[string]any{"type": "none"},
+	}
+
+	geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.FamilyDefaults("claude-sonnet-4-6")})
+	if err != nil {
+		t.Fatalf("BuildAnthropicRequest failed: %v", err)
+	}
+	if geminiReq.Tools != nil || geminiReq.ToolConfig != nil {
+		t.Errorf("expected tools and toolConfig omitted for tool_choice none, got tools=%v toolConfig=%v", geminiReq.Tools, geminiReq.ToolConfig)
+	}
+}

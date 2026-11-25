@@ -1264,6 +1264,65 @@ func TestChatCompletionsLongDecodeContinuation(t *testing.T) {
 	}
 }
 
+// TestChatCompletionsLongDecodeSkipsContinuationUnderExplicitCap verifies a request that set max_tokens is
+// not chained onto a continuation hop, because Cloud Code accumulates maxOutputTokens across hops and would
+// reject the resent ceiling. The capped response finishes as length-limited output instead.
+func TestChatCompletionsLongDecodeSkipsContinuationUnderExplicitCap(t *testing.T) {
+	var calls atomic.Int64
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"partial answer"}]},"finishReason":"CONTINUATION","continuationToken":"cont-token-capped"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "gemini-4-hydrogen-high",
+		"messages": [{"role": "user", "content": "original prompt"}],
+		"max_tokens": 16
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 upstream hop under an explicit cap, got %d", got)
+	}
+
+	var completion translate.ChatCompletion
+	if err := json.Unmarshal(rec.Body.Bytes(), &completion); err != nil {
+		t.Fatalf("decoding completion: %v", err)
+	}
+	if len(completion.Choices) == 0 {
+		t.Fatalf("expected a completion choice, got %s", rec.Body.String())
+	}
+	if completion.Choices[0].FinishReason != "length" {
+		t.Errorf("expected finish reason length for a capped continuation, got %q", completion.Choices[0].FinishReason)
+	}
+	content, _ := completion.Choices[0].Message.Content.(string)
+	if !strings.Contains(content, "partial answer") {
+		t.Errorf("expected partial output preserved, got %q", content)
+	}
+}
+
 // TestUIStrategyPersistsToLaunchedConfigPath verifies a WebUI strategy mutation is written back to the
 // configuration file the daemon was launched with instead of the default location.
 func TestUIStrategyPersistsToLaunchedConfigPath(t *testing.T) {

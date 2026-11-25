@@ -25,6 +25,11 @@ const MaxGeminiOutputTokens = 65536
 // still emit its final answer after finishing the chain of thought.
 const thinkingHeadroomTokens = 8192
 
+// minClaudeThinkingBudget is the smallest numeric thinking budget upstream accepts for Claude models.
+// Cloud Code rejects smaller values with "budget_tokens: Input should be greater than or equal to 1024",
+// so a tighter client output cap disables reasoning instead of sending an invalid budget.
+const minClaudeThinkingBudget = 1024
+
 // claudeVersionRegex extracts the major/minor generation number from Claude model identifiers,
 // covering both family-first (claude-sonnet-4-6) and version-first (claude-4-6-sonnet) spellings.
 var claudeVersionRegex = regexp.MustCompile(`(?i)^claude-(?:[a-z]+-)*(\d+)(?:[.-](\d+))?`)
@@ -77,12 +82,18 @@ func ThinkingLevelForEffort(effort string) string {
 //
 // Protocol Quirk: Google Cloud Code Assist returns HTTP 400 if thinkingBudget >= maxOutputTokens.
 // Additionally, Gemini 2.5 models return HTTP 400 if thinking budget exceeds 24,576 tokens.
-// This function clamps the budget and expands maxOutputTokens to guarantee valid envelopes.
+// This function clamps the budget and, when no client ceiling is supplied, expands maxOutputTokens to
+// guarantee valid envelopes.
+//
+// hardCap marks maxOutputTokens as an explicit client output limit: the returned ceiling never exceeds
+// it and the reasoning budget shrinks to fit instead, so `max_tokens` behaves as a hard maximum. A
+// returned budget of zero means the ceiling is too small for reasoning and callers must omit the
+// thinking configuration entirely.
 //
 // modelMaxOutputTokens is the catalog ceiling for the concrete upstream model. Non-Gemini and
 // non-Claude families (for example gpt-oss-120b at 32,768 tokens) must never be expanded to the
 // generic Gemini ceiling, because upstream rejects any request above their own limit.
-func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMaxOutputTokens int, isClaude bool) (budget int, adjustedMaxTokens int) {
+func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMaxOutputTokens int, isClaude, hardCap bool) (budget int, adjustedMaxTokens int) {
 	lower := strings.ToLower(model)
 	budget = requestedBudget
 
@@ -106,7 +117,12 @@ func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMa
 	}
 
 	adjustedMaxTokens = maxOutputTokens
-	if adjustedMaxTokens <= 0 {
+	if hardCap {
+		// A client-supplied ceiling is authoritative: never raise it to make room for reasoning.
+		if adjustedMaxTokens <= 0 {
+			adjustedMaxTokens = ceiling
+		}
+	} else if adjustedMaxTokens <= 0 {
 		adjustedMaxTokens = budget + thinkingHeadroomTokens
 	} else if adjustedMaxTokens <= budget {
 		adjustedMaxTokens = budget + thinkingHeadroomTokens
@@ -120,7 +136,15 @@ func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMa
 		adjustedMaxTokens = ceiling
 	}
 	if budget >= adjustedMaxTokens {
+		// Half the ceiling keeps visible output usable while preserving the budget < maxOutputTokens
+		// invariant. A ceiling of one token collapses the budget to zero, which disables reasoning for
+		// that request instead of sending an invalid configuration upstream.
 		budget = adjustedMaxTokens / 2
+	}
+
+	if isClaude && budget < minClaudeThinkingBudget {
+		// Claude enforces a 1024-token floor, so a tighter ceiling disables reasoning entirely.
+		budget = 0
 	}
 
 	return budget, adjustedMaxTokens

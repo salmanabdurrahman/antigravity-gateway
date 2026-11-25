@@ -1019,3 +1019,138 @@ func TestBuildModelPartsCallBeforeTextPreservesSignature(t *testing.T) {
 		t.Errorf("expected call signature sig-call preserved, got %q", call.ThoughtSignature)
 	}
 }
+
+// TestAdjustFixedBudgetHonorsExplicitMaxTokens verifies an explicit client output cap is returned
+// unchanged while the reasoning budget shrinks to fit under it.
+func TestAdjustFixedBudgetHonorsExplicitMaxTokens(t *testing.T) {
+	maxOut := 16
+	budget, adjusted := adjustFixedBudget(catalog.CatalogModel{ID: "custom-model", MaxOutputTokens: 65536}, 4096, &maxOut)
+	if adjusted == nil || *adjusted != 16 {
+		t.Fatalf("expected the explicit maxOutputTokens 16 preserved, got %v", adjusted)
+	}
+	if budget == nil || *budget != 8 {
+		t.Fatalf("expected budget shrunk to 8, got %v", budget)
+	}
+}
+
+// TestAdjustFixedBudgetTinyCapDisablesThinking verifies a one-token cap reports no budget so callers omit
+// the thinking configuration instead of sending an invalid envelope.
+func TestAdjustFixedBudgetTinyCapDisablesThinking(t *testing.T) {
+	maxOut := 1
+	budget, adjusted := adjustFixedBudget(catalog.CatalogModel{ID: "custom-model", MaxOutputTokens: 65536}, 4096, &maxOut)
+	if adjusted == nil || *adjusted != 1 {
+		t.Fatalf("expected the explicit maxOutputTokens 1 preserved, got %v", adjusted)
+	}
+	if budget != nil {
+		t.Fatalf("expected no reasoning budget, got %v", *budget)
+	}
+}
+
+// TestBuildRequestHonorsExplicitMaxTokensWithAdaptiveThinking verifies the adaptive-thinking branch never
+// adds headroom on top of a client-supplied max_tokens value.
+func TestBuildRequestHonorsExplicitMaxTokensWithAdaptiveThinking(t *testing.T) {
+	maxTokens := 10
+	req := &ChatRequest{
+		Model:     "gemini-2.5-flash",
+		MaxTokens: &maxTokens,
+		Messages:  []ChatMessage{{Role: "user", Content: "list numbers"}},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.FamilyDefaults("gemini-2.5-flash")})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	if got := geminiReq.GenerationConfig["maxOutputTokens"]; got != 10 {
+		t.Errorf("expected maxOutputTokens 10 honored, got %v", got)
+	}
+	if _, hasConfig := geminiReq.GenerationConfig["thinkingConfig"]; !hasConfig {
+		t.Error("expected adaptive thinking to stay enabled")
+	}
+}
+
+// TestBuildRequestHonorsExplicitMaxTokensWithNumericBudget verifies the numeric-budget branch shrinks the
+// reasoning budget under an explicit max_tokens cap instead of expanding the output ceiling.
+func TestBuildRequestHonorsExplicitMaxTokensWithNumericBudget(t *testing.T) {
+	maxTokens := 4096
+	req := &ChatRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: &maxTokens,
+		Messages:  []ChatMessage{{Role: "user", Content: "list numbers"}},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.FamilyDefaults("claude-sonnet-4-6")})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	if got := geminiReq.GenerationConfig["maxOutputTokens"]; got != 4096 {
+		t.Errorf("expected maxOutputTokens 4096 honored, got %v", got)
+	}
+	thinkingConfig, ok := geminiReq.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig present, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+	if got := thinkingConfig["thinking_budget"]; got != 2048 {
+		t.Errorf("expected thinking_budget 2048 under the cap, got %v", got)
+	}
+}
+
+// TestBuildRequestTightCapDisablesClaudeThinking verifies an output cap below Claude's 1024-token budget
+// floor omits the thinking configuration instead of sending a budget upstream rejects.
+func TestBuildRequestTightCapDisablesClaudeThinking(t *testing.T) {
+	maxTokens := 16
+	req := &ChatRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: &maxTokens,
+		Messages:  []ChatMessage{{Role: "user", Content: "list numbers"}},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.FamilyDefaults("claude-sonnet-4-6")})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	if got := geminiReq.GenerationConfig["maxOutputTokens"]; got != 16 {
+		t.Errorf("expected maxOutputTokens 16 honored, got %v", got)
+	}
+	if _, hasConfig := geminiReq.GenerationConfig["thinkingConfig"]; hasConfig {
+		t.Errorf("expected thinkingConfig omitted below the Claude floor, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+}
+
+// TestBuildRequestToolChoiceNoneOmitsTools verifies tool_choice "none" removes declarations entirely,
+// because upstream can still call a declared tool even with functionCallingConfig mode NONE.
+func TestBuildRequestToolChoiceNoneOmitsTools(t *testing.T) {
+	tools := []any{map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":       "get_weather",
+			"parameters": map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}},
+		},
+	}}
+
+	disabled := &ChatRequest{
+		Model:      "gemini-2.5-flash",
+		Messages:   []ChatMessage{{Role: "user", Content: "Call get_weather for Rome."}},
+		Tools:      tools,
+		ToolChoice: "none",
+	}
+	geminiReq, err := BuildRequest(disabled, BuildOptions{Info: catalog.FamilyDefaults("gemini-2.5-flash")})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+	if geminiReq.Tools != nil || geminiReq.ToolConfig != nil {
+		t.Errorf("expected tools and toolConfig omitted for tool_choice none, got tools=%v toolConfig=%v", geminiReq.Tools, geminiReq.ToolConfig)
+	}
+
+	automatic := *disabled
+	automatic.ToolChoice = "auto"
+	geminiReq, err = BuildRequest(&automatic, BuildOptions{Info: catalog.FamilyDefaults("gemini-2.5-flash")})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+	if len(geminiReq.Tools) == 0 {
+		t.Error("expected declarations retained for tool_choice auto")
+	}
+}

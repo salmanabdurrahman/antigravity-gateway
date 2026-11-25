@@ -499,11 +499,13 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 			} else {
 				adjBudget, adjMaxOut := adjustFixedBudget(info, budget, maxOut)
 				maxOut = adjMaxOut
-				tc := map[string]any{"include_thoughts": true}
+				// nil means the explicit output cap is too small for reasoning at this model minimum.
 				if adjBudget != nil {
-					tc["thinking_budget"] = *adjBudget
+					genConfig["thinkingConfig"] = map[string]any{
+						"include_thoughts": true,
+						"thinking_budget":  *adjBudget,
+					}
 				}
-				genConfig["thinkingConfig"] = tc
 			}
 		} else {
 			// Gemini 3+ and tiered routing variants accept a categorical thinkingLevel,
@@ -518,23 +520,18 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 			if effortLevel != "" && (budget == -1 || geminiPrefersThinkingLevel(model)) {
 				genConfig["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingLevel": effortLevel}
 			} else if budget == -1 {
+				// Adaptive reasoning carries no explicit budget, so the client cap stays untouched.
 				genConfig["thinkingConfig"] = map[string]any{"includeThoughts": true}
-				if maxOut != nil {
-					limit := info.MaxOutputTokens
-					if limit <= 0 {
-						limit = 65536
-					}
-					bumped := min(*maxOut+8192, limit)
-					maxOut = &bumped
-				}
 			} else {
 				adjBudget, adjMaxOut := adjustFixedBudget(info, budget, maxOut)
 				maxOut = adjMaxOut
-				tc := map[string]any{"includeThoughts": true}
+				// nil means the explicit output cap is too small for reasoning at this model minimum.
 				if adjBudget != nil {
-					tc["thinkingBudget"] = *adjBudget
+					genConfig["thinkingConfig"] = map[string]any{
+						"includeThoughts": true,
+						"thinkingBudget":  *adjBudget,
+					}
 				}
-				genConfig["thinkingConfig"] = tc
 			}
 		}
 	}
@@ -560,7 +557,7 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 	}
 
 	decls := convertTools(req.Tools, model, opts.LegacySchemas)
-	if len(decls) > 0 {
+	if len(decls) > 0 && !toolChoiceDisabled(req.ToolChoice) {
 		result.Tools = []any{map[string]any{"functionDeclarations": decls}}
 		if cfg := buildToolConfig(req.ToolChoice); cfg != nil {
 			result.ToolConfig = cfg
@@ -940,6 +937,21 @@ func buildToolConfig(choice any) map[string]any {
 	return nil
 }
 
+// toolChoiceDisabled reports whether the client explicitly disabled tool invocation. Declarations are
+// omitted in that case because upstream Gemini models can still emit functionCall when tools are present
+// even with functionCallingConfig mode NONE.
+func toolChoiceDisabled(choice any) bool {
+	if s, ok := choice.(string); ok {
+		return strings.EqualFold(strings.TrimSpace(s), "none")
+	}
+	if m, ok := choice.(map[string]any); ok {
+		if typ, ok := m["type"].(string); ok {
+			return strings.EqualFold(strings.TrimSpace(typ), "none")
+		}
+	}
+	return false
+}
+
 // forcesTool checks if the tool_choice parameter requires an explicit tool execution.
 func forcesTool(choice any) bool {
 	if s, ok := choice.(string); ok && s == "required" {
@@ -956,6 +968,10 @@ func forcesTool(choice any) bool {
 // adjustFixedBudget bounds requested reasoning budgets within model minimums and maximum output limits.
 // When the catalog has no output ceiling for the model, the generic Gemini ceiling is assumed so the
 // budget is never collapsed to zero (which would disable reasoning) or to a one-token output limit.
+//
+// A non-nil maxOut is an explicit client output cap, so it is returned unchanged and the reasoning
+// budget shrinks to at most half of it. Returning a nil budget means the cap is too small to host any
+// reasoning, and the caller must omit the thinking configuration.
 func adjustFixedBudget(info catalog.CatalogModel, budget int, maxOut *int) (*int, *int) {
 	if strings.Contains(strings.ToLower(info.ID), "2.5") && budget > Gemini25MaxThinkingBudget {
 		budget = Gemini25MaxThinkingBudget
@@ -969,17 +985,31 @@ func adjustFixedBudget(info catalog.CatalogModel, budget int, maxOut *int) (*int
 	if info.MinThinkingBudget != nil {
 		minBudget = *info.MinThinkingBudget
 	}
+	// Claude rejects budgets below its protocol floor, so an explicit cap tighter than the floor has to
+	// disable reasoning rather than send an invalid envelope.
+	if config.IsClaude(info.ID) && minBudget < minClaudeThinkingBudget {
+		minBudget = minClaudeThinkingBudget
+	}
 	b := min(max(minBudget, budget), limit-1)
 	if b < minBudget {
 		return nil, maxOut
 	}
 
-	out := maxOut
-	if out == nil || *out <= b {
+	if maxOut == nil {
+		// No client ceiling: keep the historical headroom so reasoning is never starved for output space.
 		adj := max(b+1, min(b+8192, limit))
-		out = &adj
+		return &b, &adj
 	}
-	return &b, out
+
+	hardMax := min(*maxOut, limit)
+	if hardMax <= 1 || hardMax/2 < minBudget {
+		return nil, &hardMax
+	}
+	b = min(b, hardMax/2)
+	if b < minBudget {
+		return nil, &hardMax
+	}
+	return &b, &hardMax
 }
 
 // claudeLoopLacksSignedThinking checks if an assistant turn preceding tool results lacks signed thinking blocks.
