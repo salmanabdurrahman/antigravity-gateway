@@ -39,6 +39,7 @@ The gateway adopts a **Dual-Client Architecture** to satisfy both frictionless o
 - **Client Identifier**: `1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com`
 - **Companion Discovery**: Authorized to invoke `POST /v1internal:loadCodeAssist` and `POST /v1internal:onboardUser` to discover or automatically provision the companion cloud project required for Antigravity subscribers.
 - **Consent Screen Status**: Validated for Google Antigravity and Google One AI subscribers, bypassing unverified app consent warnings for companion services.
+- **Public Credential Disclosure**: the default companion client is a Desktop/public client, so its `client_secret` is not a confidential credential (RFC 8252 §8.5; Google documents installed-app secrets as non-secret). The value ships inside every released binary and repository checkout, making it public by design. Exposure cannot grant access to a user's tokens — tokens stay per-user via PKCE — but a third party could reuse the client identity for its own application, which affects this project's consent-screen reputation and Google quota. Use BYOC (`AGW_CLIENT_ID` / `AGW_CLIENT_SECRET`) when a private client identity is required.
 
 ### 3.2 Tier 2: Bring-Your-Own-Client (BYOC / Enterprise Self-Hosted)
 

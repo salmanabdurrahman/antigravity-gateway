@@ -7,6 +7,21 @@
 
 Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy and CLI daemon. It connects modern AI coding agents (such as Pi Coding Agent, OpenCode, and Cursor) to personal Google Antigravity / Google AI subscriptions over a local OpenAI-compatible HTTP interface (`http://127.0.0.1:51400/v1`).
 
+## ⚠️ Unofficial Tool & Account Risk
+
+> **`agw` is an independent community project. It is not affiliated with, endorsed by, sponsored by, or supported by Google LLC.**
+> It reaches Cloud Code Assist through the same undocumented internal endpoints the Antigravity IDE uses, on the strength of your own consumer subscription. That is a reverse-engineered integration, not a public Google product surface.
+
+**By using this software you acknowledge:**
+
+- **It may violate the provider's terms.** Review the [Google Terms of Service](https://policies.google.com/terms) and the [Generative AI Additional Terms of Service](https://policies.google.com/terms/generative-ai) yourself; judging whether proxying a subscription counts as permitted use is your responsibility.
+- **Your Google account can be restricted or disabled.** Community proxies built on the same endpoints report accounts being suspended, shadow-restricted, or permanently disabled for terms-of-service violations. Prefer a secondary account you can afford to lose over the account you depend on.
+- **Nothing here is guaranteed.** Upstream endpoints, quota rules, model availability, and authentication can change without notice and break the gateway.
+- **No warranty.** The software is provided "as is" under the [MIT license](LICENSE); the authors accept no liability for lost access, lost data, or quota spend.
+- **Credentials stay local.** Tokens are stored only in `~/.agw/` with `0600` permissions behind a loopback-only daemon, and nothing is reported back to the project. See [SECURITY.md](SECURITY.md) for the security invariants and the public-client OAuth disclosure.
+
+If those terms are unacceptable to you, do not use this project.
+
 ## Key Features
 
 - **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format), `/v1/messages` (Anthropic format), and OpenAI-style model discovery (`/v1/models`, `/v1/models/{id}`) bounded strictly to local loopback (`127.0.0.1:51400`).
@@ -456,7 +471,7 @@ Operational thresholds are tunable without code changes:
 
 - `AGW_HOME`: Root path for local configuration and credential storage (default: `~/.agw`).
 - `AGW_CLIENT_ID`: Custom Google OAuth 2.0 Client ID for Bring-Your-Own-Client (BYOC) setups.
-- `AGW_CLIENT_SECRET`: Custom Google OAuth 2.0 Client Secret for Bring-Your-Own-Client (BYOC) setups.
+- `AGW_CLIENT_SECRET`: Custom Google OAuth 2.0 Client Secret for Bring-Your-Own-Client (BYOC) setups. The bundled default client is a desktop **public client**, so its embedded credential is public by design (RFC 8252 §8.5); use these overrides when you need a private client identity.
 - `AGW_USER_AGENT` (legacy fallback: `PGA_USER_AGENT`): Custom User-Agent header override.
 - `AGW_API_CLIENT` (legacy fallback: `PGA_API_CLIENT`): Custom `X-Goog-Api-Client` header override.
 - `AGW_CLIENT_METADATA` (legacy fallback: `PGA_CLIENT_METADATA`): Custom `Client-Metadata` JSON header override.
