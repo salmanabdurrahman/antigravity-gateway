@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -86,6 +87,15 @@ func TestStopCommandWhenNotRunning(t *testing.T) {
 	}
 }
 
+// helperBinaryPath returns the platform-correct path for a binary built by a test. Windows resolves
+// executables by their .exe suffix, so a bare "agw" name is never launchable there.
+func helperBinaryPath(dir, name string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(dir, name+".exe")
+	}
+	return filepath.Join(dir, name)
+}
+
 // getFreePort binds an ephemeral TCP listener on 127.0.0.1 to obtain an available port for isolated test servers.
 func getFreePort(t *testing.T) int {
 	t.Helper()
@@ -103,7 +113,7 @@ func TestEndToEndDaemonLifecycle(t *testing.T) {
 	t.Setenv(config.EnvHome, tempDir)
 
 	// Build real binary for detached execution
-	binPath := filepath.Join(tempDir, "agw")
+	binPath := helperBinaryPath(tempDir, "agw")
 	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed building test binary: %v\nOutput: %s", err, string(out))
@@ -217,8 +227,10 @@ func TestStartForegroundAlreadyRunning(t *testing.T) {
 	}
 
 	pidFile := filepath.Join(tempDir, "agw.pid")
-	// Simulate an active process matching init/launchd
-	activePID := 1
+	// A live, unrelated process stands in for an init/launchd-managed daemon. The parent process is alive
+	// on every platform, differs from this test process (the foreground guard ignores its own PID), and
+	// unlike PID 1 also exists on Windows.
+	activePID := os.Getppid()
 	if err := server.WritePID(pidFile, activePID); err != nil {
 		t.Fatalf("writing fake active pid failed: %v", err)
 	}
@@ -253,7 +265,7 @@ func TestEndToEndStopWithoutPIDFile(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv(config.EnvHome, tempDir)
 
-	binPath := filepath.Join(tempDir, "agw")
+	binPath := helperBinaryPath(tempDir, "agw")
 	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed building test binary: %v\nOutput: %s", err, string(out))
@@ -318,7 +330,7 @@ func TestEndToEndStartDetectsOrphanDaemon(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv(config.EnvHome, tempDir)
 
-	binPath := filepath.Join(tempDir, "agw")
+	binPath := helperBinaryPath(tempDir, "agw")
 	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed building test binary: %v\nOutput: %s", err, string(out))

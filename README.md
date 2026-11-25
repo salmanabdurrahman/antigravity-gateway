@@ -44,6 +44,8 @@ Antigravity Gateway is compiled as a static, zero-dependency binary across moder
 | **Windows** | x86_64 (AMD64)               | `windows/amd64` | **Tier 1** |
 | **Windows** | ARM64                        | `windows/arm64` | **Tier 2** |
 
+Tier 1 platforms are exercised by the native continuous-integration test matrix: the race-enabled unit suite and a CLI `version` smoke run on Linux, macOS, and Windows runners, alongside the cross-compilation build matrix. Platform-specific daemon, port-owner, and binary-applier paths therefore run natively instead of only compiling.
+
 For details on packaging, filesystem layout, upgrade flow, and uninstallation, see the [Binary Installation Contract](docs/distribution.md).
 
 ## Installation & Build

@@ -3,12 +3,12 @@
 package auth
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 )
@@ -200,7 +200,9 @@ func TestStoreConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			email := filepath.Join("worker", time.Now().Format("150405.000000")) + "@example.com"
+			// A per-worker address keeps the fixture deterministic: timestamp-based names collide on
+			// platforms with a coarse wall clock, so a concurrent removal could delete the only entry.
+			email := fmt.Sprintf("worker%d@example.com", id)
 			_, _ = store.Upsert(&Account{
 				Email:        email,
 				RefreshToken: "ref",

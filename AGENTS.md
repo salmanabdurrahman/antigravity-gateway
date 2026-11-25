@@ -196,22 +196,23 @@ When assigned an implementation or maintenance task:
 
 ## 7. Testing & Verification Matrix
 
-| Change Surface        | Minimum Safe Check                                    |
-| :-------------------- | :---------------------------------------------------- |
-| `internal/config`     | `go test -v -race ./internal/config/...`              |
-| `internal/auth`       | `go test -v -race ./internal/auth/...`                |
-| `internal/rotator`    | `go test -v -race ./internal/rotator/...`             |
-| `internal/catalog`    | `go test -v -race ./internal/catalog/...`             |
-| `internal/translate`  | `go test -v -race ./internal/translate/...`           |
-| `internal/server`     | `go test -v -race ./internal/server/...`              |
-| `internal/client`     | `go test -v -race ./internal/client/...`              |
-| `internal/updater`    | `go test -v -race ./internal/updater/...`             |
-| `test/integration`    | `go test -v -tags=integration ./test/integration/...` |
-| `scripts/install.sh`  | `make test-installer`                                 |
-| Full Repository       | `go test -v -race ./... && go vet ./...`              |
-| Full Preflight (Make) | `make check` (or `make test-all`)                     |
-| Release Packaging     | `make release` (cross-platform matrix + SHA256SUMS)   |
-| CLI Binary Build      | `go build -o bin/agw ./cmd/agw && ./bin/agw version`  |
+| Change Surface                                                       | Minimum Safe Check                                                                                                                                 |
+| :------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/config`                                                    | `go test -v -race ./internal/config/...`                                                                                                           |
+| `internal/auth`                                                      | `go test -v -race ./internal/auth/...`                                                                                                             |
+| `internal/rotator`                                                   | `go test -v -race ./internal/rotator/...`                                                                                                          |
+| `internal/catalog`                                                   | `go test -v -race ./internal/catalog/...`                                                                                                          |
+| `internal/translate`                                                 | `go test -v -race ./internal/translate/...`                                                                                                        |
+| `internal/server`                                                    | `go test -v -race ./internal/server/...`                                                                                                           |
+| `internal/client`                                                    | `go test -v -race ./internal/client/...`                                                                                                           |
+| `internal/updater`                                                   | `go test -v -race ./internal/updater/...`                                                                                                          |
+| `test/integration`                                                   | `go test -v -tags=integration ./test/integration/...`                                                                                              |
+| `scripts/install.sh`                                                 | `make test-installer`                                                                                                                              |
+| Platform-specific code (`*_windows.go`, `*_unix.go`, platform tests) | `GOOS=windows GOARCH=amd64 go vet ./...` and `GOOS=windows GOARCH=amd64 go test -c` for touched packages, so POSIX-only assumptions never reach CI |
+| Full Repository                                                      | `go test -v -race ./... && go vet ./...`                                                                                                           |
+| Full Preflight (Make)                                                | `make check` (or `make test-all`)                                                                                                                  |
+| Release Packaging                                                    | `make release` (cross-platform matrix + SHA256SUMS)                                                                                                |
+| CLI Binary Build                                                     | `go build -o bin/agw ./cmd/agw && ./bin/agw version`                                                                                               |
 
 ## 8. Stop Conditions & Escalation
 

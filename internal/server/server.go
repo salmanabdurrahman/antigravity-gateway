@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
@@ -248,7 +247,7 @@ func (s *Server) Start() error {
 // lookups are best-effort: the original bind error is always preserved for errors.Is/As callers.
 func (s *Server) bindError(err error) error {
 	addr := s.httpServer.Addr
-	if !errors.Is(err, syscall.EADDRINUSE) {
+	if !isAddrInUse(err) {
 		return fmt.Errorf("listening on %s: %w", addr, err)
 	}
 

@@ -21,6 +21,48 @@ import (
 	"testing"
 )
 
+// buildPlatformArchive builds the release archive the updater expects for the current platform: a zip
+// holding agw.exe on Windows, or a tar.gz holding agw elsewhere. The fixture must match
+// FormatArchiveName, because archive type is selected from the published file extension.
+func buildPlatformArchive(t *testing.T, content []byte) []byte {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		var buf bytes.Buffer
+		zipWriter := zip.NewWriter(&buf)
+		header := &zip.FileHeader{Name: "agw.exe", Method: zip.Deflate}
+		header.SetMode(0o755)
+		entry, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			t.Fatalf("creating zip entry: %v", err)
+		}
+		if _, err := entry.Write(content); err != nil {
+			t.Fatalf("writing zip entry: %v", err)
+		}
+		if err := zipWriter.Close(); err != nil {
+			t.Fatalf("closing zip archive: %v", err)
+		}
+		return buf.Bytes()
+	}
+
+	var buf bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buf)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "agw", Size: int64(len(content)), Mode: 0o755}); err != nil {
+		t.Fatalf("writing tar header: %v", err)
+	}
+	if _, err := tarWriter.Write(content); err != nil {
+		t.Fatalf("writing tar entry: %v", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("closing tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("closing gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // TestCompareSemver verifies semantic version ordering across major, minor, patch, and equivalent versions.
 func TestCompareSemver(t *testing.T) {
 	tests := []struct {
@@ -183,15 +225,7 @@ func TestDownloadAndVerify(t *testing.T) {
 	ctx := t.Context()
 
 	binaryContent := []byte("compiled-agw-v0.2.0-binary-content")
-	var tarGzBuf bytes.Buffer
-	gw := gzip.NewWriter(&tarGzBuf)
-	tw := tar.NewWriter(gw)
-	_ = tw.WriteHeader(&tar.Header{Name: "agw", Size: int64(len(binaryContent)), Mode: 0o755})
-	_, _ = tw.Write(binaryContent)
-	_ = tw.Close()
-	_ = gw.Close()
-
-	archiveBytes := tarGzBuf.Bytes()
+	archiveBytes := buildPlatformArchive(t, binaryContent)
 	hasher := sha256.New()
 	hasher.Write(archiveBytes)
 	validHash := hex.EncodeToString(hasher.Sum(nil))

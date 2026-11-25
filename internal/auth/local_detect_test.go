@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -205,6 +206,11 @@ func TestValidateLocalSession(t *testing.T) {
 // TestSQLiteCandidatesUseAbsolutePaths verifies that the sqlite3 probe list never relies on PATH
 // resolution, so a shadowed binary cannot be handed the credential database.
 func TestSQLiteCandidatesUseAbsolutePaths(t *testing.T) {
+	// The candidate list holds POSIX absolute paths (/usr/bin, /bin, ...). filepath.IsAbs reports false
+	// for them on Windows, where the sqlite3 CLI probe is unused, so the invariant is POSIX-only.
+	if runtime.GOOS == "windows" {
+		t.Skip("sqlite3 candidate paths are POSIX-only absolute paths")
+	}
 	if len(sqlite3Candidates) == 0 {
 		t.Fatal("expected at least one sqlite3 candidate")
 	}
