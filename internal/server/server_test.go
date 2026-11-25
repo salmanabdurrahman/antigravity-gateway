@@ -509,24 +509,14 @@ func TestServerIPv6LoopbackBinding(t *testing.T) {
 		t.Errorf("unexpected IPv6 health response: %+v", health)
 	}
 
-	// WebUI Host/Origin guards must accept bracketed IPv6 loopback authorities.
+	// Bracketed IPv6 loopback Host authorities must be accepted on /health as well.
 	handler := srv.buildHandler()
-	uiReq := httptest.NewRequest(http.MethodGet, "/ui", nil)
-	uiReq.Host = wantAddr
-	uiRec := httptest.NewRecorder()
-	handler.ServeHTTP(uiRec, uiReq)
-	if uiRec.Code != http.StatusOK {
-		t.Errorf("expected /ui to accept IPv6 loopback host, got %d: %s", uiRec.Code, uiRec.Body.String())
-	}
-
-	strategyReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"sticky"}`))
-	strategyReq.Host = wantAddr
-	strategyReq.Header.Set("Content-Type", "application/json")
-	strategyReq.Header.Set("Origin", "http://"+wantAddr)
-	strategyRec := httptest.NewRecorder()
-	handler.ServeHTTP(strategyRec, strategyReq)
-	if strategyRec.Code != http.StatusOK {
-		t.Errorf("expected strategy mutation to accept IPv6 loopback origin, got %d: %s", strategyRec.Code, strategyRec.Body.String())
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthReq.Host = wantAddr
+	healthRec := httptest.NewRecorder()
+	handler.ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Errorf("expected /health to accept IPv6 loopback host, got %d: %s", healthRec.Code, healthRec.Body.String())
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Second)

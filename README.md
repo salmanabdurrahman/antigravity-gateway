@@ -68,7 +68,6 @@ Deeper design notes: [Architecture Overview](docs/architecture.md).
 | `agw models list [--refresh]`    | Inspect catalog models, context windows, output limits         |
 | `agw start [--detach]`           | Run the gateway (`--strategy`, `--port`, `--config`)           |
 | `agw stop`                       | Stop the daemon, rediscovering it from `/health` if needed     |
-| `agw ui`                         | Open the embedded dashboard at `/ui`                           |
 | `agw setup <pi/opencode/claude>` | Transactional client configuration with backups + verification |
 | `agw doctor`                     | Ports, permissions, accounts, upstream reachability, clients   |
 | `agw update [--check]`           | Verify-and-replace the binary in place (alias: `upgrade`)      |
@@ -78,14 +77,13 @@ Full flag reference: [CLI Reference](docs/cli.md).
 
 ## Endpoints at a Glance
 
-| Route                       | Purpose                                                    |
-| :-------------------------- | :--------------------------------------------------------- |
-| `GET /health`               | Liveness probe (loopback authority required)               |
-| `GET /v1/models`            | OpenAI-style model listing (`/v1/models/{id}` too)         |
-| `POST /v1/chat/completions` | OpenAI chat completions, buffered or SSE streaming         |
-| `POST /v1/messages`         | Anthropic Messages API                                     |
-| `GET /v1/accounts`          | Redacted account diagnostics and metrics                   |
-| `GET /ui`                   | Embedded dashboard (read-only GETs, same-origin mutations) |
+| Route                       | Purpose                                            |
+| :-------------------------- | :------------------------------------------------- |
+| `GET /health`               | Liveness probe (loopback authority required)       |
+| `GET /v1/models`            | OpenAI-style model listing (`/v1/models/{id}` too) |
+| `POST /v1/chat/completions` | OpenAI chat completions, buffered or SSE streaming |
+| `POST /v1/messages`         | Anthropic Messages API                             |
+| `GET /v1/accounts`          | Redacted account diagnostics and metrics           |
 
 `/v1/*` requires the generated bearer key from `~/.agw/config.json`; Anthropic clients may use `x-api-key`. Payload translation, session affinity, and migration notes: [HTTP API Reference](docs/api.md).
 
@@ -112,7 +110,6 @@ Every key, threshold, rotation rule, and alias is documented in the [Configurati
 | [Configuration Reference](docs/configuration.md)     | Files, `config.json` keys, env vars, aliases, rotation rules     |
 | [Architecture Overview](docs/architecture.md)        | Request pipeline, package map, protocol fidelity, benchmarks     |
 | [OAuth 2.0 Client Strategy](docs/oauth-strategy.md)  | PKCE design, bundled client, BYOC setup                          |
-| [Web Dashboard Contract](docs/webui.md)              | Dashboard endpoints, trust model, same-origin rules              |
 | [Security Policy](SECURITY.md)                       | Supported versions, disclosure process, security invariants      |
 | [Changelog](CHANGELOG.md)                            | Release history                                                  |
 

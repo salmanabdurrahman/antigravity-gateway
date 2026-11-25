@@ -176,8 +176,8 @@ func TestSendJSONErrorForbiddenType(t *testing.T) {
 	}
 }
 
-// TestAuthMiddlewareRejectsPathTraversal verifies the unauthenticated /ui prefix cannot be reached
-// through a parent-directory segment that ServeMux would otherwise clean away.
+// TestAuthMiddlewareRejectsPathTraversal verifies unauthenticated root/health prefixes cannot be
+// bypassed through a parent-directory segment that ServeMux would otherwise clean away.
 func TestAuthMiddlewareRejectsPathTraversal(t *testing.T) {
 	apiKey := "test_secret_key_12345"
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -190,7 +190,7 @@ func TestAuthMiddlewareRejectsPathTraversal(t *testing.T) {
 	})
 
 	handler := AuthMiddleware(apiKey, logger)(mux)
-	for _, rawPath := range []string{"/ui/../v1/accounts", "/ui/./../v1/accounts", "/v1/../v1/accounts"} {
+	for _, rawPath := range []string{"/health/../v1/accounts", "/health/./../v1/accounts", "/v1/../v1/accounts"} {
 		req := httptest.NewRequest(http.MethodGet, rawPath, nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)

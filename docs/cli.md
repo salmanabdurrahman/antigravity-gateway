@@ -17,7 +17,6 @@ Available Commands:
   setup       Configure AI coding agents (Pi Coding Agent, OpenCode, Claude Code CLI)
   start       Start the local OpenAI-compatible gateway reverse proxy
   stop        Stop the running background gateway daemon
-  ui          Open the embedded web management dashboard
   update      Update the gateway executable in place from GitHub Releases (alias: upgrade)
   version     Print the semantic version of agw
 ```
@@ -135,15 +134,7 @@ agw update --no-restart     # leave a running daemon stopped
 
 A running daemon is stopped before the executable is replaced, and the restart preserves the `--config` path the daemon was launched with. If the stop request is refused or the daemon keeps answering `/health`, the upgrade aborts instead of swapping the binary underneath a live process; `--force` overrides that guard. Release metadata, archives, and checksums must be served over HTTPS (plain HTTP is accepted only for loopback mirrors), HTTPS-to-HTTP redirect downgrades are rejected, archives must contain `agw` as a regular file (symlinks and directories are refused), and extraction is size-capped. `agw upgrade` is an alias.
 
-## 8. `agw ui`
-
-```bash
-agw ui
-```
-
-Opens the embedded dashboard in your default browser. The dashboard is also reachable directly at `http://127.0.0.1:51400/ui`; see the [Web Dashboard Contract](webui.md).
-
-## 9. `agw setup`
+## 8. `agw setup`
 
 Configures an AI coding agent to use the local gateway. Every subcommand creates a timestamped atomic backup (`*.bak-<timestamp>`) before writing, and by default performs a 1-token test completion to verify end-to-end connectivity.
 
@@ -185,7 +176,7 @@ Configures Claude Code CLI to talk to the Anthropic Messages endpoint (`/v1/mess
 
 An `--api-key` value that does not match `agw_` plus 64 hexadecimal characters fails before any client file is written. To keep an intentionally custom key, edit `api_key` in `config.json` and the client files directly; `agw doctor` reports when a stored key no longer matches the generated format.
 
-## 10. `agw doctor`
+## 9. `agw doctor`
 
 ```bash
 agw doctor
@@ -199,6 +190,6 @@ Runs an end-to-end environment audit:
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
-## 11. `agw version`
+## 10. `agw version`
 
 Prints the semantic version embedded at build time (for example `agw version 0.2.1`).

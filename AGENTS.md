@@ -101,7 +101,7 @@ All documentation and comments in this repository MUST be written in clear techn
 
 Follow the standard Go project layout (`golang-standards/project-layout`):
 
-- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands (`root.go`, `start.go`, `stop.go`, `login.go`, `logout.go`, `accounts.go`, `models.go`, `setup.go`, `doctor.go`, `ui.go`, `update.go`, `version.go`). No business logic.
+- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands (`root.go`, `start.go`, `stop.go`, `login.go`, `logout.go`, `accounts.go`, `models.go`, `setup.go`, `doctor.go`, `update.go`, `version.go`). No business logic.
 - `internal/`: All core logic belongs under `internal/` packages:
   - `internal/config`: Paths (`paths.go`), defaults and env overrides (`config.go`), loopback address helpers (`addr.go`), upstream headers (`headers.go`), HTTP transport (`transport.go`).
   - `internal/auth`: OAuth PKCE (`oauth.go`, `pkce.go`, `callback.go`), token refresh (`token.go`), companion project discovery (`discovery.go`), IDE/CLI session detection (`local_detect.go`), account persistence (`store.go`).
@@ -162,25 +162,24 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 
 ## 5. Repository Map & Boundaries
 
-| Path                     | Responsibility                                    | Invariants & Rules                                                                                                                                          |
-| :----------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages; includes native `update` self-upgrade                                                        |
-| `docs/`                  | User-facing documentation & contracts             | Installation contract, CLI reference, HTTP API reference, configuration reference, architecture notes, OAuth strategy, web dashboard contract               |
-| `internal/config/`       | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                                                                     |
-| `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                                                             |
-| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky`, `round-robin` & `hybrid`; transparent 429 retry                                                                                        |
-| `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                                                          |
-| `internal/translate/`    | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                                                                       |
-| `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write; bounded signature cache                                                   |
-| `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; same-origin mutations; no external assets                                                                            |
-| `internal/client/`       | Agent configuration injectors                     | Pi, OpenCode, and Claude Code injectors; safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                           |
-| `internal/updater/`      | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                                                                 |
-| `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); native Linux/macOS/Windows test jobs; release publishes only after artifact and installer verification |
-| `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                                                                        |
-| `scripts/`               | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer                                                                                  |
-| `Makefile`               | Standard task runner                              | Canonical build, format, test, and verification commands                                                                                                    |
-| `.agents/skills/`        | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases                                                                                  |
-| `CHANGELOG.md` / `*.md`  | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide; strict release-only edit rule                                           |
+| Path                    | Responsibility                                    | Invariants & Rules                                                                                                                                          |
+| :---------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/agw/`              | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages; includes native `update` self-upgrade                                                        |
+| `docs/`                 | User-facing documentation & contracts             | Installation contract, CLI reference, HTTP API reference, configuration reference, architecture notes, OAuth strategy                                       |
+| `internal/config/`      | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                                                                     |
+| `internal/auth/`        | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                                                             |
+| `internal/rotator/`     | Account pool, failover, cooldowns                 | Implements `sticky`, `round-robin` & `hybrid`; transparent 429 retry                                                                                        |
+| `internal/catalog/`     | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                                                          |
+| `internal/translate/`   | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                                                                       |
+| `internal/server/`      | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write; bounded signature cache                                                   |
+| `internal/client/`      | Agent configuration injectors                     | Pi, OpenCode, and Claude Code injectors; safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                           |
+| `internal/updater/`     | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                                                                 |
+| `.github/`              | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); native Linux/macOS/Windows test jobs; release publishes only after artifact and installer verification |
+| `.githooks/`            | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                                                                        |
+| `scripts/`              | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer                                                                                  |
+| `Makefile`              | Standard task runner                              | Canonical build, format, test, and verification commands                                                                                                    |
+| `.agents/skills/`       | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases                                                                                  |
+| `CHANGELOG.md` / `*.md` | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide; strict release-only edit rule                                           |
 
 ### 5.1 Strict Changelog Policy: Release-Only Mutations
 

@@ -11,17 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
-	"github.com/salmanabdurrahman/antigravity-gateway/internal/server/webui"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/translate"
 )
 
@@ -189,13 +186,8 @@ func (s *Server) buildHandler() http.Handler {
 
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /{$}", s.handleHealth)
-	mux.HandleFunc("GET /ui", s.handleUI)
-	mux.HandleFunc("GET /ui/", s.handleUI)
-	mux.HandleFunc("GET /ui/api/status", s.handleUIStatus)
-	mux.HandleFunc("POST /ui/api/strategy", s.handleUIStrategy)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/models/{id}", s.handleModelByID)
-	mux.HandleFunc("POST /ui/api/refresh", s.handleUIRefresh)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("GET /v1/accounts", s.handleAccounts)
@@ -211,14 +203,10 @@ func (s *Server) buildHandler() http.Handler {
 }
 
 // handleHealth answers liveness probes and reports gateway version and usable account counts. The
-// endpoint is unauthenticated, so it stays restricted to loopback authorities like the dashboard.
+// endpoint is unauthenticated, so it stays restricted to loopback authorities.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackHost(r.Host) {
 		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
-		return
-	}
-	if (r.URL.Path == "/" || r.URL.Path == "") && strings.Contains(r.Header.Get("Accept"), "text/html") {
-		http.Redirect(w, r, "/ui", http.StatusFound)
 		return
 	}
 
@@ -328,35 +316,8 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// UIStatusResponse represents the comprehensive status payload consumed by the local WebUI dashboard.
-type UIStatusResponse struct {
-	// Version is the compiled gateway version.
-	Version string `json:"version"`
-
-	// Strategy is the currently active rotation strategy.
-	Strategy string `json:"strategy"`
-
-	// Accounts lists all registered account states.
-	Accounts []rotator.AccountSnapshot `json:"accounts"`
-
-	// Models lists available chat models.
-	Models []catalog.CatalogModel `json:"models"`
-
-	// Quotas maps model identifiers to their live remaining quota metrics.
-	Quotas map[string]catalog.ModelQuota `json:"quotas,omitempty"`
-
-	// AccountQuota separates the rolling five-hour window from the weekly allowance.
-	AccountQuota *catalog.AccountQuotaSummary `json:"account_quota,omitzero"`
-}
-
-// UIStrategyRequest represents the incoming JSON payload to dynamically update the rotation strategy.
-type UIStrategyRequest struct {
-	// Strategy is the requested rotation strategy ("sticky", "round-robin", or "hybrid").
-	Strategy string `json:"strategy"`
-}
-
 // isLoopbackHost verifies whether the host header represents a local loopback interface.
-// This prevents DNS rebinding attacks against unauthenticated WebUI and local dashboard endpoints.
+// This prevents DNS rebinding attacks against unauthenticated local liveness endpoints.
 func isLoopbackHost(hostHeader string) bool {
 	host := strings.TrimSpace(hostHeader)
 	if host == "" {
@@ -371,153 +332,6 @@ func isLoopbackHost(hostHeader string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-// handleUI serves the embedded static WebUI dashboard HTML page.
-func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackHost(r.Host) {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// The dashboard is unauthenticated on loopback, so framing defenses stop a remote page from
-	// embedding it and driving the strategy control through a victim browser. Only frame-ancestors is
-	// declared because the page relies on inline styles and scripts.
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(webui.IndexHTML))
-}
-
-// handleUIStatus aggregates accounts, strategy, models, and quota metrics for the WebUI dashboard.
-func (s *Server) handleUIStatus(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackHost(r.Host) {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
-		return
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
-		return
-	}
-
-	_ = s.catalog.Ensure(r.Context())
-	snap, _ := s.catalog.Snapshot()
-	snapshots := s.rotator.Pool().Snapshots()
-
-	sendJSON(w, http.StatusOK, UIStatusResponse{
-		Version:      config.Version,
-		Strategy:     string(s.rotator.Strategy()),
-		Accounts:     snapshots,
-		Models:       snap.Models,
-		Quotas:       snap.Quotas,
-		AccountQuota: snap.AccountQuota,
-	})
-}
-
-// handleUIRefresh forces a live model catalog and quota refresh for the dashboard.
-func (s *Server) handleUIRefresh(w http.ResponseWriter, r *http.Request) {
-	if !authorizeSameOriginMutation(w, r) {
-		return
-	}
-
-	if err := s.catalog.Refresh(r.Context()); err != nil {
-		// Refresh failures are surfaced without leaking upstream credentials; the dashboard keeps
-		// rendering the last known snapshot.
-		s.logger.Warn("dashboard quota refresh failed", "error", err)
-		sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Quota refresh failed: %v", err), 0)
-		return
-	}
-
-	snap, _ := s.catalog.Snapshot()
-	sendJSON(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"models": len(snap.Models),
-	})
-}
-
-// authorizeSameOriginMutation enforces loopback authority plus a same-origin request signal on the
-// unauthenticated dashboard mutation endpoints, and writes the rejection response itself when the
-// request must not proceed.
-func authorizeSameOriginMutation(w http.ResponseWriter, r *http.Request) bool {
-	if !isLoopbackHost(r.Host) {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
-		return false
-	}
-
-	// Protocol Quirk: the dashboard is unauthenticated on loopback, so reject cross-site mutations that a
-	// malicious page could issue as a "simple" request without preflight. A mutation must carry a
-	// same-origin signal: browsers always send Origin on cross-origin POSTs and modern browsers also send
-	// Sec-Fetch-Site, so older clients that send neither are rejected rather than trusted by default.
-	site := r.Header.Get("Sec-Fetch-Site")
-	if site != "" && site != "same-origin" && site != "none" {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
-		return false
-	}
-
-	origin := r.Header.Get("Origin")
-	if origin != "" {
-		parsedOrigin, parseErr := url.Parse(origin)
-		if parseErr != nil || !strings.EqualFold(parsedOrigin.Host, r.Host) || !isLoopbackHost(parsedOrigin.Host) {
-			sendJSONError(w, http.StatusForbidden, "Cross-origin strategy mutation is not permitted.", 0)
-			return false
-		}
-		return true
-	}
-
-	if site != "same-origin" && site != "none" {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: mutations require a same-origin Origin or Sec-Fetch-Site header", 0)
-		return false
-	}
-	return true
-}
-
-// handleUIStrategy updates the active account rotation strategy dynamically via the WebUI dashboard.
-func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
-	if !authorizeSameOriginMutation(w, r) {
-		return
-	}
-
-	if mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaErr != nil || mediaType != "application/json" {
-		sendJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json", 0)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
-	var req UIStrategyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONError(w, http.StatusBadRequest, "Invalid JSON payload", 0)
-		return
-	}
-
-	strat := rotator.Strategy(req.Strategy)
-	if strat != rotator.StrategySticky && strat != rotator.StrategyRoundRobin && strat != rotator.StrategyHybrid {
-		sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("Unsupported strategy %q: must be 'sticky', 'round-robin', or 'hybrid'", req.Strategy), 0)
-		return
-	}
-
-	s.strategyMu.Lock()
-	defer s.strategyMu.Unlock()
-
-	s.rotator.SetStrategy(strat)
-	s.setConfig(func(c *config.Config) { c.Strategy = string(strat) })
-
-	// Persist best-effort: the in-memory strategy is already active, so a write failure only
-	// affects the next daemon restart and must not fail the UI request. Only the strategy field
-	// is written back; the config file on disk remains the source of truth for every other value.
-	// The file used is the one the daemon was launched with, so a --config override is honored.
-	cfgPath := s.configPath
-	if cfgPath == "" {
-		if resolved, err := config.ConfigFilePath(); err == nil {
-			cfgPath = resolved
-		}
-	}
-	if cfgPath != "" {
-		if saveErr := config.SaveStrategy(cfgPath, string(strat)); saveErr != nil {
-			s.logger.Warn("failed persisting strategy to config file", "path", cfgPath, "error", saveErr)
-		}
-	}
-
-	sendJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // handleChatCompletions processes OpenAI chat completions requests, coordinating schema translation,

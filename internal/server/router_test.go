@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -810,226 +809,20 @@ func TestAnthropicMessagesUnauthorizedReturnsAnthropicFormat(t *testing.T) {
 	}
 }
 
-// TestUIEndpoints verifies serving embedded WebUI dashboard HTML and API status/strategy endpoints.
-func TestUIEndpoints(t *testing.T) {
+// TestHealthRejectsNonLoopbackHost verifies the unauthenticated liveness endpoint rejects
+// non-loopback Host headers to defend against DNS rebinding attacks.
+func TestHealthRejectsNonLoopbackHost(t *testing.T) {
 	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	handler := harness.server.buildHandler()
 
-	// 1. GET /ui returns 200 HTML
-	reqUI := httptest.NewRequest(http.MethodGet, "/ui", nil)
-	reqUI.Host = "127.0.0.1:51400"
-	recUI := httptest.NewRecorder()
-	handler.ServeHTTP(recUI, reqUI)
-
-	if recUI.Code != http.StatusOK {
-		t.Fatalf("expected /ui status 200, got %d", recUI.Code)
-	}
-	if !strings.Contains(recUI.Header().Get("Content-Type"), "text/html") {
-		t.Errorf("expected text/html Content-Type, got %s", recUI.Header().Get("Content-Type"))
-	}
-	if !strings.Contains(recUI.Body.String(), "Antigravity Gateway Dashboard") {
-		t.Errorf("expected dashboard title in HTML, got %s", recUI.Body.String())
-	}
-
-	// 2. GET / with Accept: text/html redirects to /ui
-	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
-	reqRoot.Host = "127.0.0.1:51400"
-	reqRoot.Header.Set("Accept", "text/html,application/xhtml+xml")
-	recRoot := httptest.NewRecorder()
-	handler.ServeHTTP(recRoot, reqRoot)
-
-	if recRoot.Code != http.StatusFound {
-		t.Fatalf("expected / to redirect with 302, got %d", recRoot.Code)
-	}
-	if loc := recRoot.Header().Get("Location"); loc != "/ui" {
-		t.Errorf("expected redirect Location /ui, got %s", loc)
-	}
-
-	// 3. GET /ui/api/status returns JSON status payload
-	reqStatus := httptest.NewRequest(http.MethodGet, "/ui/api/status", nil)
-	reqStatus.Host = "127.0.0.1:51400"
-	recStatus := httptest.NewRecorder()
-	handler.ServeHTTP(recStatus, reqStatus)
-
-	if recStatus.Code != http.StatusOK {
-		t.Fatalf("expected /ui/api/status 200, got %d", recStatus.Code)
-	}
-	var statusResp UIStatusResponse
-	if err := json.Unmarshal(recStatus.Body.Bytes(), &statusResp); err != nil {
-		t.Fatalf("unmarshaling status failed: %v", err)
-	}
-	if statusResp.Version != config.Version {
-		t.Errorf("expected version %s, got %s", config.Version, statusResp.Version)
-	}
-
-	// 4. POST /ui/api/strategy updates active strategy
-	// Seed a config file on disk whose values intentionally differ from the in-memory harness
-	// config, so the assertion below proves the handler never overwrites the file with process state.
-	cfgPath, err := config.ConfigFilePath()
-	if err != nil {
-		t.Fatalf("resolving config path: %v", err)
-	}
-	diskCfg := config.DefaultConfig()
-	diskCfg.Port = 52400
-	diskCfg.APIKey = config.APIKeyPrefix + strings.Repeat("a", config.APIKeyHexLen)
-	diskCfg.UserAgent = "disk-agent/1.0"
-	if err := config.Save(cfgPath, diskCfg); err != nil {
-		t.Fatalf("seeding config file: %v", err)
-	}
-
-	reqStrat := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "hybrid"}`))
-	reqStrat.Host = "127.0.0.1:51400"
-	reqStrat.Header.Set("Content-Type", "application/json")
-	reqStrat.Header.Set("Sec-Fetch-Site", "same-origin")
-	recStrat := httptest.NewRecorder()
-	handler.ServeHTTP(recStrat, reqStrat)
-
-	if recStrat.Code != http.StatusOK {
-		t.Fatalf("expected /ui/api/strategy 200, got %d: %s", recStrat.Code, recStrat.Body.String())
-	}
-	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
-		t.Errorf("expected strategy updated to hybrid, got %s", harness.server.rotator.Strategy())
-	}
-
-	persisted, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatalf("reloading persisted config: %v", err)
-	}
-	if persisted.Strategy != string(rotator.StrategyHybrid) {
-		t.Errorf("persisted strategy = %q, expected %q", persisted.Strategy, rotator.StrategyHybrid)
-	}
-	if persisted.Port != 52400 {
-		t.Errorf("persisted port = %d, expected the on-disk value 52400", persisted.Port)
-	}
-	if persisted.APIKey != diskCfg.APIKey {
-		t.Errorf("persisted api_key was replaced by the in-memory key")
-	}
-	if persisted.UserAgent != "disk-agent/1.0" {
-		t.Errorf("persisted user_agent = %q, expected 'disk-agent/1.0'", persisted.UserAgent)
-	}
-	if got := harness.server.config().Strategy; got != string(rotator.StrategyHybrid) {
-		t.Errorf("in-memory config snapshot strategy = %q, expected %q", got, rotator.StrategyHybrid)
-	}
-
-	// 5. POST /ui/api/strategy rejects unsupported strategy names
-	reqBad := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "random"}`))
-	reqBad.Host = "127.0.0.1:51400"
-	reqBad.Header.Set("Content-Type", "application/json")
-	reqBad.Header.Set("Sec-Fetch-Site", "same-origin")
-	recBad := httptest.NewRecorder()
-	handler.ServeHTTP(recBad, reqBad)
-
-	if recBad.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for unsupported strategy, got %d", recBad.Code)
-	}
-	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
-		t.Errorf("strategy must remain hybrid after rejected update, got %s", harness.server.rotator.Strategy())
-	}
-
-	// 6. POST /ui/api/strategy rejects cross-origin mutations
-	reqCSRF := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "sticky"}`))
-	reqCSRF.Host = "127.0.0.1:51400"
-	reqCSRF.Header.Set("Content-Type", "text/plain")
-	reqCSRF.Header.Set("Origin", "http://evil.example.com")
-	recCSRF := httptest.NewRecorder()
-	handler.ServeHTTP(recCSRF, reqCSRF)
-
-	if recCSRF.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for cross-origin mutation, got %d", recCSRF.Code)
-	}
-	if harness.server.rotator.Strategy() != rotator.StrategyHybrid {
-		t.Errorf("strategy must remain hybrid after rejected CSRF update, got %s", harness.server.rotator.Strategy())
-	}
-
-	// 7. GET /ui/api/status and POST /ui/api/strategy reject non-loopback Host (DNS rebinding defense)
-	reqRebind := httptest.NewRequest(http.MethodGet, "/ui/api/status", nil)
-	reqRebind.Host = "attacker.example.com:51400"
-	recRebind := httptest.NewRecorder()
-	handler.ServeHTTP(recRebind, reqRebind)
-	if recRebind.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for DNS rebinding attempt, got %d", recRebind.Code)
-	}
-}
-
-// TestUIEndpointsSecFetchSiteAndCrossPortOrigin verifies the loopback-only CSRF and framing defenses
-// on the unauthenticated dashboard endpoints.
-func TestUIEndpointsSecFetchSiteAndCrossPortOrigin(t *testing.T) {
-	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	handler := harness.server.buildHandler()
-
-	// 1. /ui advertises framing defenses alongside the dashboard HTML.
-	uiReq := httptest.NewRequest(http.MethodGet, "/ui", nil)
-	uiReq.Host = "127.0.0.1:51400"
-	uiRec := httptest.NewRecorder()
-	handler.ServeHTTP(uiRec, uiReq)
-	if uiRec.Code != http.StatusOK {
-		t.Fatalf("/ui status = %d; want 200", uiRec.Code)
-	}
-	if got := uiRec.Header().Get("X-Frame-Options"); got != "DENY" {
-		t.Errorf("X-Frame-Options = %q; want DENY", got)
-	}
-	if got := uiRec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
-		t.Errorf("Content-Security-Policy = %q; want frame-ancestors 'none'", got)
-	}
-
-	// 2. /health rejects a non-loopback authority so DNS rebinding cannot reach it.
 	rebindReq := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rebindReq.Host = "attacker.example.com:51400"
 	rebindRec := httptest.NewRecorder()
 	handler.ServeHTTP(rebindRec, rebindReq)
 	if rebindRec.Code != http.StatusForbidden {
 		t.Fatalf("/health with foreign host status = %d; want 403", rebindRec.Code)
-	}
-
-	// 3. A same-origin Sec-Fetch-Site signal alone authorizes a JSON strategy mutation.
-	sameSiteReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"sticky"}`))
-	sameSiteReq.Host = "127.0.0.1:51400"
-	sameSiteReq.Header.Set("Content-Type", "application/json")
-	sameSiteReq.Header.Set("Sec-Fetch-Site", "same-origin")
-	sameSiteRec := httptest.NewRecorder()
-	handler.ServeHTTP(sameSiteRec, sameSiteReq)
-	if sameSiteRec.Code != http.StatusOK {
-		t.Fatalf("same-origin Sec-Fetch-Site status = %d; want 200: %s", sameSiteRec.Code, sameSiteRec.Body.String())
-	}
-
-	// 4. A cross-port loopback Origin is still cross-origin.
-	crossPortReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"hybrid"}`))
-	crossPortReq.Host = "127.0.0.1:51400"
-	crossPortReq.Header.Set("Content-Type", "application/json")
-	crossPortReq.Header.Set("Origin", "http://127.0.0.1:52400")
-	crossPortRec := httptest.NewRecorder()
-	handler.ServeHTTP(crossPortRec, crossPortReq)
-	if crossPortRec.Code != http.StatusForbidden {
-		t.Fatalf("cross-port origin status = %d; want 403", crossPortRec.Code)
-	}
-
-	// 5. A request with neither Origin nor Sec-Fetch-Site is rejected instead of trusted.
-	noSignalReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"hybrid"}`))
-	noSignalReq.Host = "127.0.0.1:51400"
-	noSignalReq.Header.Set("Content-Type", "application/json")
-	noSignalRec := httptest.NewRecorder()
-	handler.ServeHTTP(noSignalRec, noSignalReq)
-	if noSignalRec.Code != http.StatusForbidden {
-		t.Fatalf("missing same-origin signal status = %d; want 403", noSignalRec.Code)
-	}
-
-	// 6. A same-origin signal does not bypass the JSON content-type requirement.
-	textPlainReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`strategy=hybrid`))
-	textPlainReq.Host = "127.0.0.1:51400"
-	textPlainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	textPlainReq.Header.Set("Sec-Fetch-Site", "same-origin")
-	textPlainRec := httptest.NewRecorder()
-	handler.ServeHTTP(textPlainRec, textPlainReq)
-	if textPlainRec.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("form-encoded strategy mutation status = %d; want 415", textPlainRec.Code)
-	}
-
-	if strat := harness.server.rotator.Strategy(); strat != rotator.StrategySticky {
-		t.Errorf("expected only the same-origin mutation to apply, got strategy %s", strat)
 	}
 }
 
@@ -1317,58 +1110,7 @@ func TestChatCompletionsLongDecodeSkipsContinuationUnderExplicitCap(t *testing.T
 	if completion.Choices[0].FinishReason != "length" {
 		t.Errorf("expected finish reason length for a capped continuation, got %q", completion.Choices[0].FinishReason)
 	}
-	content, _ := completion.Choices[0].Message.Content.(string)
-	if !strings.Contains(content, "partial answer") {
+	if content, _ := completion.Choices[0].Message.Content.(string); !strings.Contains(content, "partial answer") {
 		t.Errorf("expected partial output preserved, got %q", content)
-	}
-}
-
-// TestUIStrategyPersistsToLaunchedConfigPath verifies a WebUI strategy mutation is written back to the
-// configuration file the daemon was launched with instead of the default location.
-func TestUIStrategyPersistsToLaunchedConfigPath(t *testing.T) {
-	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	customPath := filepath.Join(t.TempDir(), "custom-config.json")
-	seed := config.DefaultConfig()
-	seed.APIKey = harness.apiKey
-	seed.Strategy = "sticky"
-	if err := config.Save(customPath, seed); err != nil {
-		t.Fatalf("seeding custom config: %v", err)
-	}
-	harness.server.configPath = customPath
-
-	defaultPath, err := config.ConfigFilePath()
-	if err != nil {
-		t.Fatalf("resolving default config path: %v", err)
-	}
-
-	handler := harness.server.buildHandler()
-	req := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"round-robin"}`))
-	req.Host = "127.0.0.1:51400"
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected strategy mutation to succeed, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	raw, err := os.ReadFile(customPath)
-	if err != nil {
-		t.Fatalf("reading custom config: %v", err)
-	}
-	var persisted config.Config
-	if err := json.Unmarshal(raw, &persisted); err != nil {
-		t.Fatalf("parsing custom config: %v", err)
-	}
-	if persisted.Strategy != "round-robin" {
-		t.Errorf("expected strategy persisted to the launched config path, got %q", persisted.Strategy)
-	}
-
-	if _, statErr := os.Stat(defaultPath); statErr == nil {
-		t.Errorf("expected the default config path %s to stay untouched", defaultPath)
 	}
 }

@@ -14,7 +14,7 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 | `~/.agw/agw.pid`           | Running daemon process ID (written once listening)                                           | `0600`      |
 | `~/.agw/agw.log`           | Background daemon stdout/stderr                                                              | `0600`      |
 
-`config.json` is the single source of truth for gateway settings. Runtime mutations rewrite only the field being changed after re-reading the file first, so a running daemon never persists stale or partial state over your API key, endpoints, or model mapping. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
+`config.json` is the single source of truth for gateway settings, and a running daemon treats it as read-only rather than overwriting your API key, endpoints, or model mapping. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
 
 ## 2. `config.json` keys
 

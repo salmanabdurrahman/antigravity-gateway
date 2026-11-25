@@ -58,9 +58,6 @@ type Server struct {
 	// httpServer is the underlying net/http Server.
 	httpServer *http.Server
 
-	// strategyMu serializes runtime rotation strategy updates and config disk writes.
-	strategyMu sync.Mutex
-
 	// legacySchemas tracks whether upstream rejected parametersJsonSchema, triggering legacy fallback.
 	legacySchemas atomic.Bool
 
@@ -70,8 +67,8 @@ type Server struct {
 	// pidFile is the optional path where the daemon records its own process ID once listening.
 	pidFile string
 
-	// configPath is the configuration file the daemon was started with. Runtime settings changed
-	// through the WebUI are persisted here instead of always rewriting the default location.
+	// configPath is the configuration file the daemon was started with, logged at startup so
+	// operators can verify which configuration source is active.
 	configPath string
 
 	// recipeCache replays recent thought signatures for sessions whose client stripped
@@ -101,7 +98,7 @@ type Options struct {
 	PIDFile string
 
 	// ConfigPath is the optional configuration file path the daemon was started with. When empty, the
-	// default configuration path is resolved lazily on persistence (useful for tests).
+	// default configuration path is resolved lazily for startup logging (useful for tests).
 	ConfigPath string
 }
 
@@ -205,7 +202,11 @@ func (s *Server) Start() error {
 	// Surface the active configuration file and any API-key shape anomaly before serving: a key
 	// that does not match the generated format makes every client request fail with HTTP 401,
 	// which is hard to diagnose from the client side alone.
-	if cfgPath, err := config.ConfigFilePath(); err == nil {
+	cfgPath := s.configPath
+	if cfgPath == "" {
+		cfgPath, _ = config.ConfigFilePath()
+	}
+	if cfgPath != "" {
 		s.logger.Info("active configuration file", "path", cfgPath, "strategy", s.rotator.Strategy())
 	}
 	if err := config.ValidateAPIKey(s.config().APIKey); err != nil {

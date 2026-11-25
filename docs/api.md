@@ -11,12 +11,8 @@ The gateway exposes OpenAI Chat Completions and Anthropic Messages on local loop
 | `GET /v1/models/{id}`       | Single model descriptor by identifier or alias, OpenAI 404 otherwise   | Bearer token                       |
 | `POST /v1/chat/completions` | OpenAI-compatible chat completions, streaming or buffered              | Bearer token                       |
 | `POST /v1/messages`         | Anthropic Messages API for Claude Code CLI and compatible clients      | `x-api-key` or Bearer              |
-| `GET /v1/accounts`          | Redacted account diagnostics, cooldowns, and request metrics           | Bearer token                       |
-| `GET /`                     | Health payload, or `302` to `/ui` for HTML clients                     | None (loopback only)               |
-| `GET /ui`                   | Embedded dashboard HTML                                                | None (loopback only)               |
-| `GET /ui/api/status`        | Dashboard status, catalog, quotas, and rolling quota windows           | None (loopback only)               |
-| `POST /ui/api/strategy`     | Same-origin rotation strategy change, persisted to the launched config | Same-origin request signal         |
-| `POST /ui/api/refresh`      | Same-origin forced live quota and catalog refresh                      | Same-origin request signal         |
+| `GET /v1/accounts`          | Redacted account diagnostics, cooldowns, and request metrics          | Bearer token                       |
+| `GET /`                     | Health payload (alias of `GET /health`)                               | None (loopback authority required) |
 
 Errors use a single envelope across endpoints:
 
@@ -25,8 +21,6 @@ Errors use a single envelope across endpoints:
 ```
 
 `code` carries the HTTP status code; `type` categorizes the failure (for example `invalid_request_error`, `authentication_error`, `rate_limit_error`).
-
-Dashboard endpoints, framing headers, and same-origin rules are specified in the [Web Dashboard Contract](webui.md).
 
 ## 2. Quick tests
 
@@ -78,15 +72,6 @@ The gateway transparently translates OpenAI Chat Completions requests into Googl
 These behaviors are intentionally stricter than earlier releases. Review them before upgrading scripts or automation that talks to the daemon directly.
 
 - **`/health` requires a loopback authority.** The unauthenticated liveness probe only answers requests whose `Host` header (or bracketed `Host` for IPv6) resolves to `127.0.0.1`, `localhost`, or `::1`; anything else receives `403`. SSH local forwards and `agw`'s own probes keep working because they preserve the loopback authority, while a reverse proxy that rewrites `Host` to a public name no longer passes.
-- **Dashboard mutations require a same-origin signal and JSON.** `POST /ui/api/strategy` and `POST /ui/api/refresh` reject requests that carry neither a matching `Origin` nor `Sec-Fetch-Site: same-origin`, and cross-port loopback origins count as cross-origin. `POST /ui/api/strategy` additionally requires `Content-Type: application/json`; form-encoded bodies receive `415`.
-
-  ```bash
-  curl -s -X POST http://127.0.0.1:51400/ui/api/strategy \
-    -H 'Content-Type: application/json' \
-    -H 'Sec-Fetch-Site: same-origin' \
-    -d '{"strategy":"sticky"}'
-  ```
-
 - **`agw accounts --check` exits non-zero when the configuration cannot be loaded.** It previously printed an `Error (config)` status column and exited `0`, letting broken configuration pass unnoticed in scripts. Live quota inspection now aborts with the configuration error, and `--re-enable` still requires `--check`.
 - **Explicit output caps are enforced.** `max_tokens` / `max_completion_tokens` / Anthropic `max_tokens` bound total generation instead of being expanded to leave reasoning headroom. Reasoning adapts to the cap and is disabled when the cap is below the model minimum, and `tool_choice: "none"` omits tool declarations so upstream cannot invoke a disabled tool.
 - **Tool-enabled requests derive a session identifier.** See session affinity above; clients that want explicit affinity should send `X-Session-Affinity`.

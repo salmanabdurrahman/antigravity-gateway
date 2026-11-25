@@ -100,8 +100,9 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Normalize the request path before the public-endpoint decision: an uncleaned
-			// "/ui/../v1/accounts" must never inherit the unauthenticated /ui prefix, and any leftover
-			// traversal segment is rejected outright instead of relying on ServeMux redirect behavior.
+			// "/health/../v1/accounts" must never inherit an unauthenticated prefix, and any
+			// leftover traversal segment is rejected outright instead of relying on ServeMux
+			// redirect behavior.
 			if hasTraversalSegment(r.URL.Path) {
 				logger.Warn("rejected request path traversal attempt",
 					"method", r.Method,
@@ -113,7 +114,7 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 			}
 
 			cleanPath := path.Clean("/" + r.URL.Path)
-			if cleanPath == "/" || cleanPath == "/health" || cleanPath == "/ui" || strings.HasPrefix(cleanPath, "/ui/") {
+			if cleanPath == "/" || cleanPath == "/health" {
 				next.ServeHTTP(w, r)
 				return
 			}

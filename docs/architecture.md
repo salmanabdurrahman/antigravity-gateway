@@ -31,8 +31,7 @@ Responses travel the same path backwards: Cloud Code SSE chunks and JSON payload
 | `internal/rotator/`      | Account pool, `sticky`/`round-robin`/`hybrid` pickers, cooldowns.    |
 | `internal/catalog/`      | Model discovery, token limits, quota tracking, disk cache.           |
 | `internal/translate/`    | Bidirectional schema mapping, thought signatures, SSE streaming.     |
-| `internal/server/`       | `net/http` daemon, middleware, routes, signature cache, WebUI embed. |
-| `internal/server/webui/` | Embedded dashboard assets served from `embed.FS`.                    |
+| `internal/server/`       | `net/http` daemon, middleware, routes, signature cache.              |
 | `internal/client/`       | Pi, OpenCode, and Claude Code config injectors with backups.         |
 | `internal/updater/`      | Release discovery, SHA-256 verification, atomic self-upgrade.        |
 
@@ -50,8 +49,8 @@ Cloud Code Assist is an internal surface, so correctness depends on reproducing 
 
 - **Loopback only**: the daemon and the OAuth callback listener bind strictly to `127.0.0.1`; configured non-loopback hosts are coerced back to loopback.
 - **Local credentials**: tokens, the generated API key, and cached catalog data live in `~/.agw` with `0700`/`0600` permissions and atomic writes; nothing is reported to the project.
-- **No secret logging**: access tokens, refresh tokens, bearer keys, and authorization headers are never printed or serialized — including by the dashboard.
-- **Unauthenticated reads are read-only**: dashboard GET endpoints return account metadata and quota fractions only, and mutations require a same-origin signal plus JSON.
+- **No secret logging**: access tokens, refresh tokens, bearer keys, and authorization headers are never printed or serialized.
+- **Authenticated API surface**: all `/v1/*` endpoints require the local Bearer key (`x-api-key` also accepted on `/v1/messages`), leaving only the loopback-restricted liveness probe (`/health` and `/`) unauthenticated.
 
 Full invariants and the public-client OAuth disclosure are in [SECURITY.md](../SECURITY.md).
 
@@ -86,4 +85,3 @@ End-to-end measurements against live accounts (macOS arm64, `gemini-2.5-flash`):
 - [Configuration Reference](configuration.md)
 - [Binary Installation Contract](distribution.md)
 - [OAuth 2.0 Client Strategy](oauth-strategy.md)
-- [Web Dashboard Contract](webui.md)
