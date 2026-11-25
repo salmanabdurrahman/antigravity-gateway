@@ -16,6 +16,7 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/client"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -101,6 +102,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// 5. Client Integrations
 	results = append(results, checkClientIntegrations(cfg)...)
+
+	// 6. Release & Version Status (Non-blocking probe)
+	results = append(results, checkVersionRelease(ctx)...)
 
 	// Render diagnostics report
 	hasFailures := false
@@ -703,4 +707,42 @@ func checkClientIntegrations(cfg *config.Config) []CheckItem {
 	}
 
 	return items
+}
+
+// versionChecker abstracts release discovery for deterministic doctor unit testing.
+var versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return updater.CheckUpdate(probeCtx, updater.DefaultGitHubRepo, config.Version, "", nil)
+}
+
+// checkVersionRelease queries GitHub Releases non-blockingly to surface update notifications.
+func checkVersionRelease(ctx context.Context) []CheckItem {
+	rel, err := versionChecker(ctx)
+	if err != nil {
+		// Non-blocking: network timeout or offline environments must never fail doctor report
+		return []CheckItem{{
+			Category: "Release & Updates",
+			Name:     "Gateway Version",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Running v%s (unable to check for updates: %v)", config.Version, err),
+		}}
+	}
+
+	if rel.UpdateAvailable {
+		return []CheckItem{{
+			Category: "Release & Updates",
+			Name:     "Gateway Version",
+			Status:   StatusWarn,
+			Message:  fmt.Sprintf("v%s installed · newer release v%s is available", config.Version, rel.TargetVersion),
+			Hint:     "Run 'agw update' to upgrade in-place automatically",
+		}}
+	}
+
+	return []CheckItem{{
+		Category: "Release & Updates",
+		Name:     "Gateway Version",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("v%s (latest release)", config.Version),
+	}}
 }

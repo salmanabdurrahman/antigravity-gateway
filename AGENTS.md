@@ -167,6 +167,7 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 | `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write                                  |
 | `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; same-origin mutations; no external assets                                  |
 | `internal/client/`       | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                          |
+| `internal/updater/`      | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                       |
 | `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); zero secrets in logs                                         |
 | `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                              |
 | `scripts/`               | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer                                        |
@@ -204,6 +205,7 @@ When assigned an implementation or maintenance task:
 | `internal/translate`  | `go test -v -race ./internal/translate/...`           |
 | `internal/server`     | `go test -v -race ./internal/server/...`              |
 | `internal/client`     | `go test -v -race ./internal/client/...`              |
+| `internal/updater`    | `go test -v -race ./internal/updater/...`             |
 | `test/integration`    | `go test -v -tags=integration ./test/integration/...` |
 | `scripts/install.sh`  | `make test-installer`                                 |
 | Full Repository       | `go test -v -race ./... && go vet ./...`              |

@@ -256,6 +256,23 @@ agw stop
 
 The PID file is written by the daemon itself as soon as it reaches the listening state (foreground and detached alike) and removed on graceful shutdown. If `~/.agw/agw.pid` is missing or stale, `agw stop` rediscovers the daemon through its `/health` identity probe on the port recorded in `config.json` and resolves the owning process from the operating system socket table; a listener that does not identify itself as `antigravity-gateway` is never signalled. `agw start` performs the same probe before spawning a process, so an orphaned daemon is reported (and its PID file restored) instead of launching a second process that cannot bind. Because discovery uses the configured port, keep `port` in `config.json` in sync when running the daemon on a custom `--port`.
 
+#### In-Place Gateway Self-Upgrade (`update` / `upgrade`)
+
+Update the gateway executable to the latest release in-place atomically without manually running install scripts:
+
+```bash
+agw update
+```
+
+Optional flags:
+
+- `--check`: Query GitHub Releases and display update availability without downloading or installing
+- `--version <v>`: Pin or downgrade to a specific version (e.g. `agw update --version 0.1.0`)
+- `--force`: Force download and reinstallation even when already on the latest version
+- `--no-restart`: Skip automatically restarting a running background daemon after binary replacement
+
+Alias `agw upgrade` is also supported.
+
 ### Web Management Dashboard
 
 Launch your default browser to open the embedded zero-dependency dashboard hosted by the running gateway daemon:

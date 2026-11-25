@@ -185,14 +185,38 @@ All runtime states, cached models, logs, and credentials reside in the user's ho
 
 ### 5.1 In-Place Upgrade Flow
 
-Upgrading to a newer binary version preserves all configuration, cached models, and authenticated accounts:
+Upgrading to a newer binary version preserves all configuration, cached models, and authenticated accounts.
+
+#### Option A: Automated CLI Self-Upgrade (Recommended)
+
+Run the native in-place self-upgrade command:
+
+```bash
+agw update
+```
+
+The CLI automatically:
+
+1. Queries GitHub Releases for newer releases.
+2. Downloads the platform-specific release archive and `SHA256SUMS`.
+3. Verifies cryptographic digest integrity before touching the local binary.
+4. Atomically replaces the current executable in-place.
+5. Gracefully restarts the background daemon if one was running.
+
+To inspect available releases without applying changes:
+
+```bash
+agw update --check
+```
+
+#### Option B: Manual Reinstallation Flow
 
 1. **Stop active daemon**:
    ```bash
    agw stop
    ```
 2. **Replace executable**:
-   Replace the existing binary in `~/.local/bin/agw` or `/usr/local/bin/agw` with the new version.
+   Replace the existing binary in `~/.local/bin/agw` or `/usr/local/bin/agw` with the new version (or re-run `install.sh --force`).
 3. **Verify version**:
    ```bash
    agw version

@@ -12,6 +12,7 @@ import (
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/updater"
 )
 
 // TestDoctorCommand verifies that agw doctor executes all diagnostic categories and renders structured output.
@@ -24,6 +25,16 @@ func TestDoctorCommand(t *testing.T) {
 		return 5 * time.Millisecond, nil
 	}
 	defer func() { connectivityDialer = origDialer }()
+
+	origChecker := versionChecker
+	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
+		return &updater.ReleaseInfo{
+			CurrentVersion:  config.Version,
+			TargetVersion:   config.Version,
+			UpdateAvailable: false,
+		}, nil
+	}
+	defer func() { versionChecker = origChecker }()
 
 	// Populate accounts.json so account diagnostic is happy
 	accPath := filepath.Join(tempHome, "accounts.json")
@@ -64,6 +75,16 @@ func TestDoctorReportsInvalidAPIKey(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv(config.EnvHome, tempHome)
 
+	origChecker := versionChecker
+	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
+		return &updater.ReleaseInfo{
+			CurrentVersion:  config.Version,
+			TargetVersion:   config.Version,
+			UpdateAvailable: false,
+		}, nil
+	}
+	defer func() { versionChecker = origChecker }()
+
 	cfg := config.DefaultConfig()
 	cfg.APIKey = "test-gateway-key-999"
 	if err := config.Save(filepath.Join(tempHome, "config.json"), cfg); err != nil {
@@ -92,6 +113,16 @@ func TestDoctorReportsInvalidAPIKey(t *testing.T) {
 func TestDoctorDetectsClientKeyMismatch(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv(config.EnvHome, tempHome)
+
+	origChecker := versionChecker
+	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
+		return &updater.ReleaseInfo{
+			CurrentVersion:  config.Version,
+			TargetVersion:   config.Version,
+			UpdateAvailable: false,
+		}, nil
+	}
+	defer func() { versionChecker = origChecker }()
 
 	gatewayKey, err := config.GenerateAPIKey()
 	if err != nil {
@@ -132,6 +163,39 @@ func TestDoctorDetectsClientKeyMismatch(t *testing.T) {
 	}
 	if strings.Contains(out, staleKey) || strings.Contains(out, gatewayKey) {
 		t.Errorf("doctor must never render raw API keys, got: %s", out)
+	}
+}
+
+// TestDoctorReportsReleaseUpdatesSurfacesUpdateNotification verifies that agw doctor warns
+// when a newer release is available and suggests running 'agw update'.
+func TestDoctorReportsReleaseUpdatesSurfacesUpdateNotification(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	origChecker := versionChecker
+	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
+		return &updater.ReleaseInfo{
+			CurrentVersion:  config.Version,
+			TargetVersion:   "0.2.0",
+			UpdateAvailable: true,
+		}, nil
+	}
+	defer func() { versionChecker = origChecker }()
+
+	buf := new(bytes.Buffer)
+	doctorCmd.SetOut(buf)
+	doctorCmd.SetErr(buf)
+	_ = doctorCmd.RunE(doctorCmd, []string{})
+
+	out := buf.String()
+	if !strings.Contains(out, "[Release & Updates]") {
+		t.Errorf("expected [Release & Updates] category in doctor report, got: %s", out)
+	}
+	if !strings.Contains(out, "newer release v0.2.0 is available") {
+		t.Errorf("expected update notification in doctor report, got: %s", out)
+	}
+	if !strings.Contains(out, "Run 'agw update' to upgrade in-place automatically") {
+		t.Errorf("expected update hint in doctor report, got: %s", out)
 	}
 }
 

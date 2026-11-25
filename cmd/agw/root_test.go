@@ -76,3 +76,20 @@ func TestGlobalConfigFlagRouting(t *testing.T) {
 		t.Errorf("expected loaded strategy 'hybrid', got %s", loaded.Strategy)
 	}
 }
+
+// TestUpdateCommandRegisteredInRoot verifies that the update command and upgrade alias are registered in rootCmd.
+func TestUpdateCommandRegisteredInRoot(t *testing.T) {
+	cmd, _, err := rootCmd.Find([]string{"update"})
+	if err != nil || cmd == nil {
+		t.Fatalf("expected 'update' subcommand to be registered in rootCmd: %v", err)
+	}
+
+	aliasCmd, _, err := rootCmd.Find([]string{"upgrade"})
+	if err != nil || aliasCmd == nil {
+		t.Fatalf("expected 'upgrade' alias to be registered in rootCmd: %v", err)
+	}
+
+	if cmd != aliasCmd {
+		t.Errorf("expected 'update' and 'upgrade' to point to the same cobra command")
+	}
+}
