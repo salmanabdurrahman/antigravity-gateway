@@ -846,3 +846,69 @@ func TestGeminiFourEffortOverridesNumericBudget(t *testing.T) {
 		t.Errorf("expected effort level to replace numeric thinkingBudget, got %v", tc)
 	}
 }
+
+// TestOpenAIToolMessageImagesBecomeInlineData verifies image_url blocks inside an OpenAI tool role
+// message become inlineData parts next to the function response instead of being dropped.
+func TestOpenAIToolMessageImagesBecomeInlineData(t *testing.T) {
+	req := &ChatRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "capture the page"},
+			{
+				Role: "assistant",
+				ToolCalls: []ChatToolCall{{
+					ID:       "call_1",
+					Type:     "function",
+					Function: ChatFunctionCall{Name: "screenshot", Arguments: "{}"},
+				}},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_1",
+				Name:       "screenshot",
+				Content: []any{
+					map[string]any{"type": "text", "text": "captured"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "data:image/jpeg;base64,AAAA"},
+					},
+				},
+			},
+		},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.CatalogModel{ID: "gemini-2.5-flash", MaxOutputTokens: 8192}})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	var sawInline, sawResponse bool
+	for _, content := range geminiReq.Contents {
+		for _, part := range content.Parts {
+			if part.InlineData != nil && part.InlineData.MimeType == "image/jpeg" && part.InlineData.Data == "AAAA" {
+				sawInline = true
+			}
+			if part.FunctionResponse != nil && part.FunctionResponse.Name == "screenshot" {
+				sawResponse = true
+			}
+		}
+	}
+	if !sawResponse {
+		t.Error("expected a functionResponse part for the tool message")
+	}
+	if !sawInline {
+		t.Error("expected the tool message image to produce an inlineData part")
+	}
+}
+
+// TestAdjustFixedBudgetZeroCeilingFallback verifies a model without a catalog output ceiling falls
+// back to the generic Gemini ceiling instead of collapsing budget and maxOutputTokens to zero and one.
+func TestAdjustFixedBudgetZeroCeilingFallback(t *testing.T) {
+	budget, maxOut := adjustFixedBudget(catalog.CatalogModel{ID: "custom-model"}, 4096, nil)
+	if budget == nil || *budget != 4096 {
+		t.Fatalf("expected thinking budget preserved at 4096, got %v", budget)
+	}
+	if maxOut == nil || *maxOut <= *budget || *maxOut != 4096+8192 {
+		t.Fatalf("expected maxOutputTokens %d, got %v", 4096+8192, maxOut)
+	}
+}

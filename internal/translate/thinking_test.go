@@ -9,7 +9,7 @@ import (
 // TestClampThinkingBudget verifies budget token clamping per model family and max tokens adjustments.
 func TestClampThinkingBudget(t *testing.T) {
 	// Gemini 2.5 Flash with excessive budget
-	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 50000, 4096, false)
+	budget, maxOut := ClampThinkingBudget("gemini-2.5-flash", 50000, 4096, 65536, false)
 	if budget != Gemini25MaxThinkingBudget {
 		t.Errorf("expected budget clamped to %d, got %d", Gemini25MaxThinkingBudget, budget)
 	}
@@ -18,13 +18,45 @@ func TestClampThinkingBudget(t *testing.T) {
 	}
 
 	// Claude model with default budget
-	claudeBudget, claudeMaxOut := ClampThinkingBudget("claude-sonnet-4-6", 0, 2048, true)
+	claudeBudget, claudeMaxOut := ClampThinkingBudget("claude-sonnet-4-6", 0, 2048, 64000, true)
 	if claudeBudget != DefaultClaudeThinkingBudget {
 		t.Errorf("expected default Claude budget %d, got %d", DefaultClaudeThinkingBudget, claudeBudget)
 	}
 	if claudeMaxOut <= claudeBudget {
 		t.Errorf("expected claudeMaxOut (%d) > claudeBudget (%d)", claudeMaxOut, claudeBudget)
 	}
+}
+
+// TestClampThinkingBudgetRespectsModelCeiling verifies the generation ceiling is clamped to the
+// concrete model limit instead of the generic Gemini ceiling, so high-budget Claude and gpt-oss
+// requests never exceed what upstream accepts.
+func TestClampThinkingBudgetRespectsModelCeiling(t *testing.T) {
+	t.Run("claude stays within 64k", func(t *testing.T) {
+		budget, maxOut := ClampThinkingBudget("claude-sonnet-4-6", 60000, 0, 64000, true)
+		if maxOut > 64000 {
+			t.Errorf("expected maxOut clamped to 64000, got %d", maxOut)
+		}
+		if budget >= maxOut {
+			t.Errorf("expected budget (%d) < maxOut (%d)", budget, maxOut)
+		}
+	})
+
+	t.Run("non-gemini model uses catalog ceiling", func(t *testing.T) {
+		budget, maxOut := ClampThinkingBudget("gpt-oss-120b", 60000, 0, 32768, false)
+		if maxOut != 32768 {
+			t.Errorf("expected maxOut clamped to the catalog ceiling 32768, got %d", maxOut)
+		}
+		if budget >= maxOut {
+			t.Errorf("expected budget (%d) < maxOut (%d)", budget, maxOut)
+		}
+	})
+
+	t.Run("unknown ceiling falls back to gemini ceiling", func(t *testing.T) {
+		_, maxOut := ClampThinkingBudget("gemini-4-hydrogen-high", 32000, 0, 0, false)
+		if maxOut != 32000+thinkingHeadroomTokens {
+			t.Errorf("expected maxOut %d, got %d", 32000+thinkingHeadroomTokens, maxOut)
+		}
+	})
 }
 
 // TestInjectInterruptedToolResponses verifies synthetic tool responses are injected

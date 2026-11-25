@@ -52,6 +52,25 @@ func init() {
 	rootCmd.AddCommand(startCmd)
 }
 
+// detachArgs builds the CLI flags forwarded to a detached child daemon.
+//
+// The spawned process re-parses flags from scratch, so every launch override must be forwarded
+// explicitly. Dropping --config in particular would make the daemon silently read the default
+// configuration file with a different API key and port than the operator asked for.
+func detachArgs(strategy string, port int, configPath string) []string {
+	var args []string
+	if strategy != "" {
+		args = append(args, "--strategy", strategy)
+	}
+	if port > 0 {
+		args = append(args, "--port", fmt.Sprintf("%d", port))
+	}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	return args
+}
+
 // runStart validates flags, ensures single-instance execution, and launches the HTTP server.
 func runStart(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
@@ -73,30 +92,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	if startDetach {
-		var extraArgs []string
-		if startStrategy != "" {
-			extraArgs = append(extraArgs, "--strategy", startStrategy)
-		}
-		if startPort > 0 {
-			extraArgs = append(extraArgs, "--port", fmt.Sprintf("%d", startPort))
-		}
-
-		pid, logFile, err := server.StartDetached(cfg, extraArgs)
+		pid, logFile, err := server.StartDetached(cfg, detachArgs(startStrategy, startPort, cfgFile))
 		if err != nil {
 			return fmt.Errorf("starting detached daemon: %w", err)
 		}
 
-		host := cfg.Host
-		if host == "" {
-			host = config.DefaultHost
-		}
+		host := config.LoopbackHost(cfg.Host)
 		port := cfg.Port
 		if port <= 0 {
 			port = config.DefaultPort
 		}
 
 		cmd.Printf("Started antigravity-gateway daemon (PID: %d)\n", pid)
-		cmd.Printf("Listening on http://%s:%d\n", host, port)
+		cmd.Printf("Listening on %s\n", config.BaseURL(host, port))
 		cmd.Printf("Logs written to %s\n", logFile)
 		return nil
 	}
@@ -109,9 +117,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	if existingPID, readErr := server.ReadPID(pidFile); readErr == nil && server.IsProcessAlive(existingPID) {
 		if existingPID != os.Getpid() {
-			host := cmp.Or(cfg.Host, config.DefaultHost)
+			host := config.LoopbackHost(cfg.Host)
 			port := cmp.Or(cfg.Port, config.DefaultPort)
-			healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+			healthURL := config.URL(host, port, "/health")
 			ctx, cancel := context.WithTimeout(cmd.Context(), server.DefaultHealthTimeout)
 			health, healthErr := server.CheckHealth(ctx, healthURL)
 			cancel()
@@ -142,25 +150,23 @@ func runStart(cmd *cobra.Command, args []string) error {
 	_ = cat.LoadCache()
 
 	srv, err := server.NewServer(server.Options{
-		Config:  cfg,
-		Rotator: rot,
-		Catalog: cat,
-		Logger:  logger,
-		PIDFile: pidFile,
+		Config:     cfg,
+		Rotator:    rot,
+		Catalog:    cat,
+		Logger:     logger,
+		PIDFile:    pidFile,
+		ConfigPath: activeConfigPath(),
 	})
 	if err != nil {
 		return fmt.Errorf("initializing server: %w", err)
 	}
 
-	host := cfg.Host
-	if host == "" {
-		host = config.DefaultHost
-	}
+	host := config.LoopbackHost(cfg.Host)
 	port := cfg.Port
 	if port <= 0 {
 		port = config.DefaultPort
 	}
-	cmd.Printf("Antigravity Gateway running on http://%s:%d\n", host, port)
+	cmd.Printf("Antigravity Gateway running on %s\n", config.BaseURL(host, port))
 	cmd.Println("Press Ctrl+C to terminate.")
 
 	serverErrCh := make(chan error, 1)

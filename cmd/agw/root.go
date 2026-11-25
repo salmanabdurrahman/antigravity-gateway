@@ -37,3 +37,17 @@ func loadConfig() (*config.Config, error) {
 	}
 	return config.LoadOrCreate()
 }
+
+// activeConfigPath returns the configuration file path this process actually loaded, so runtime
+// changes (such as the rotation strategy selected in the WebUI) are persisted to the file the
+// daemon was started with instead of always rewriting the default location.
+func activeConfigPath() string {
+	if cfgFile != "" {
+		return cfgFile
+	}
+	path, err := config.ConfigFilePath()
+	if err != nil {
+		return ""
+	}
+	return path
+}

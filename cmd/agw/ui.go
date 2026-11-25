@@ -2,7 +2,6 @@
 package main
 
 import (
-	"cmp"
 	"fmt"
 	"net/http"
 	"time"
@@ -31,17 +30,17 @@ func runUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	host := cmp.Or(cfg.Host, config.DefaultHost)
+	host := config.LoopbackHost(cfg.Host)
 	port := cfg.Port
 	if port <= 0 {
 		port = config.DefaultPort
 	}
 
-	dashboardURL := fmt.Sprintf("http://%s:%d/ui", host, port)
+	dashboardURL := config.URL(host, port, "/ui")
 
 	// Check if daemon is running
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", host, port))
+	resp, err := client.Get(config.URL(host, port, "/health"))
 	if err != nil {
 		cmd.Println("Warning: Antigravity Gateway daemon does not appear to be running.")
 		cmd.Println("Start the daemon in the background first:")

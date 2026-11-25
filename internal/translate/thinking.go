@@ -21,6 +21,10 @@ const DefaultGeminiThinkingBudget = 16000
 // MaxGeminiOutputTokens defines the global generation ceiling for Gemini endpoints.
 const MaxGeminiOutputTokens = 65536
 
+// thinkingHeadroomTokens reserves output space above the thinking budget so a reasoning model can
+// still emit its final answer after finishing the chain of thought.
+const thinkingHeadroomTokens = 8192
+
 // claudeVersionRegex extracts the major/minor generation number from Claude model identifiers,
 // covering both family-first (claude-sonnet-4-6) and version-first (claude-4-6-sonnet) spellings.
 var claudeVersionRegex = regexp.MustCompile(`(?i)^claude-(?:[a-z]+-)*(\d+)(?:[.-](\d+))?`)
@@ -74,9 +78,18 @@ func ThinkingLevelForEffort(effort string) string {
 // Protocol Quirk: Google Cloud Code Assist returns HTTP 400 if thinkingBudget >= maxOutputTokens.
 // Additionally, Gemini 2.5 models return HTTP 400 if thinking budget exceeds 24,576 tokens.
 // This function clamps the budget and expands maxOutputTokens to guarantee valid envelopes.
-func ClampThinkingBudget(model string, requestedBudget int, maxOutputTokens int, isClaude bool) (budget int, adjustedMaxTokens int) {
+//
+// modelMaxOutputTokens is the catalog ceiling for the concrete upstream model. Non-Gemini and
+// non-Claude families (for example gpt-oss-120b at 32,768 tokens) must never be expanded to the
+// generic Gemini ceiling, because upstream rejects any request above their own limit.
+func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMaxOutputTokens int, isClaude bool) (budget int, adjustedMaxTokens int) {
 	lower := strings.ToLower(model)
 	budget = requestedBudget
+
+	ceiling := modelMaxOutputTokens
+	if ceiling <= 0 {
+		ceiling = MaxGeminiOutputTokens
+	}
 
 	if isClaude {
 		if budget <= 0 {
@@ -94,16 +107,20 @@ func ClampThinkingBudget(model string, requestedBudget int, maxOutputTokens int,
 
 	adjustedMaxTokens = maxOutputTokens
 	if adjustedMaxTokens <= 0 {
-		adjustedMaxTokens = budget + 8192
+		adjustedMaxTokens = budget + thinkingHeadroomTokens
 	} else if adjustedMaxTokens <= budget {
-		adjustedMaxTokens = budget + 8192
+		adjustedMaxTokens = budget + thinkingHeadroomTokens
 	}
 
-	if !isClaude && adjustedMaxTokens > MaxGeminiOutputTokens {
-		adjustedMaxTokens = MaxGeminiOutputTokens
-		if budget >= adjustedMaxTokens {
-			budget = adjustedMaxTokens - 8192
-		}
+	// Keep the generation ceiling inside what the concrete model actually accepts, then shrink the
+	// budget so the invariant thinkingBudget < maxOutputTokens still holds after the clamp. Halving is
+	// used instead of subtracting the headroom because a small ceiling would otherwise collapse the
+	// budget to zero and silently disable reasoning.
+	if adjustedMaxTokens > ceiling {
+		adjustedMaxTokens = ceiling
+	}
+	if budget >= adjustedMaxTokens {
+		budget = adjustedMaxTokens / 2
 	}
 
 	return budget, adjustedMaxTokens

@@ -14,6 +14,21 @@ import (
 	"time"
 )
 
+// NewNoRedirectClient returns an HTTP client that never follows redirects.
+//
+// Protocol Quirk: Go strips the Authorization header on cross-host redirects but forwards custom
+// headers such as x-api-key verbatim. A misconfigured or malicious --url that answers with a 3xx
+// would therefore leak the local gateway API key to the redirect target, so probe clients treat
+// every redirect as the final response and report the unexpected status instead.
+func NewNoRedirectClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // TestResult records the outcome of an end-to-end completion connectivity probe.
 type TestResult struct {
 	// Model is the model name probed during the test.
@@ -68,9 +83,7 @@ func TestChatCompletion(ctx context.Context, baseURL string, apiKey string, mode
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{
-		Timeout: 45 * time.Second,
-	}
+	client := NewNoRedirectClient(45 * time.Second)
 
 	start := time.Now()
 	resp, err := client.Do(httpReq)
@@ -183,9 +196,7 @@ func TestAnthropicCompletion(ctx context.Context, baseURL string, apiKey string,
 	}
 
 	start := time.Now()
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	client := NewNoRedirectClient(30 * time.Second)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {

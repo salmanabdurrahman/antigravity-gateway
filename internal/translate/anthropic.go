@@ -255,6 +255,9 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	}
 
 	maxOut := req.MaxTokens
+	if limit := info.MaxOutputTokens; limit > 0 && maxOut > limit {
+		maxOut = limit
+	}
 	if maxOut <= 0 {
 		maxOut = info.MaxOutputTokens
 		if maxOut <= 0 {
@@ -301,7 +304,7 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 				budget = *info.ThinkingBudget
 			}
 
-			clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, claude)
+			clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, info.MaxOutputTokens, claude)
 			maxOut = adjMaxOut
 
 			if claude {
@@ -326,7 +329,7 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	if len(req.Tools) > 0 {
 		fdecls := make([]map[string]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			name := CleanToolCallID(t.Name)
+			name := CleanToolName(t.Name)
 			if name == "" {
 				continue
 			}
@@ -438,8 +441,10 @@ func buildAnthropicAssistantParts(content any, callNames map[string]string, mode
 					input = make(map[string]any)
 				}
 				cleanID := CleanToolCallID(id)
-				if id != "" && name != "" {
-					callNames[cleanID] = name
+				if name = CleanToolName(name); name != "" {
+					if cleanID != "" {
+						callNames[cleanID] = name
+					}
 					callNames[id] = name
 				}
 				fc := &FunctionCallPart{
@@ -506,28 +511,69 @@ func buildAnthropicUserParts(content any, callNames map[string]string, withID bo
 			case "tool_result":
 				toolUseID, _ := m["tool_use_id"].(string)
 				resContent := m["content"]
-				resText := extractText(resContent)
 				cleanID := CleanToolCallID(toolUseID)
-				name := callNames[cleanID]
+				name := CleanToolName(callNames[cleanID])
 				if name == "" {
-					name = callNames[toolUseID]
+					name = CleanToolName(callNames[toolUseID])
 				}
 				if name == "" {
 					name = "tool"
 				}
 				fnResp := &FunctionResponse{
 					Name:     name,
-					Response: map[string]any{"output": resText},
+					Response: map[string]any{"output": extractText(resContent)},
 				}
 				if withID && cleanID != "" {
 					fnResp.ID = cleanID
 				}
 				parts = append(parts, Part{FunctionResponse: fnResp})
+				// Protocol Quirk: Anthropic tool results may embed images next to their text output
+				// (screenshots, PDF renders). Emitting them as inlineData parts keeps multimodal MCP
+				// and browser tools functional instead of silently dropping the visual payload.
+				for _, inline := range extractInlineImages(resContent) {
+					parts = append(parts, Part{InlineData: inline})
+				}
 			}
 		}
 		return parts
 	default:
 		return nil
+	}
+}
+
+// applySignatureToLastThinking assigns a thoughtSignature to the most recent thinking block.
+// Signatures observed on text or tool-call parts are replayed through thinking blocks, because the
+// Anthropic message schema only exposes a signature field on thinking blocks.
+func applySignatureToLastThinking(blocks []AnthropicContentBlock, sig string) {
+	if sig == "" {
+		return
+	}
+	if n := len(blocks); n > 0 && blocks[n-1].Type == "thinking" {
+		blocks[n-1].Signature = sig
+	}
+}
+
+// anthropicStopReason maps a Google Cloud Code Assist finishReason to an Anthropic stop_reason.
+//
+// Protocol Quirk: Anthropic clients branch on stop_reason, so a safety refusal must not look like a
+// clean `end_turn`. Content-filtering finish reasons surface as `refusal`, tool invocations as
+// `tool_use`, and unknown reasons are lowercased so clients can still inspect them.
+func anthropicStopReason(finishReason string, hasToolCalls bool) string {
+	reason := strings.ToUpper(strings.TrimSpace(finishReason))
+	switch reason {
+	case "MAX_TOKENS":
+		return "max_tokens"
+	case "TOOL_USE":
+		return "tool_use"
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY":
+		return "refusal"
+	case "", "STOP", "FINISH_REASON_UNSPECIFIED":
+		if hasToolCalls {
+			return "tool_use"
+		}
+		return "end_turn"
+	default:
+		return strings.ToLower(reason)
 	}
 }
 
@@ -555,21 +601,28 @@ func ConvertGoogleToAnthropicResponse(googleResp map[string]any, model string) (
 		if !ok {
 			continue
 		}
+		sig, _ := part["thoughtSignature"].(string)
 
 		if thought, ok := part["thought"].(bool); ok && thought {
 			txt, _ := part["text"].(string)
-			sig, _ := part["thoughtSignature"].(string)
 			blocks = append(blocks, AnthropicContentBlock{
 				Type:      "thinking",
 				Thinking:  txt,
 				Signature: sig,
 			})
 		} else if txt, ok := part["text"].(string); ok {
-			blocks = append(blocks, AnthropicContentBlock{
-				Type: "text",
-				Text: txt,
-			})
+			// A signature on a text part or a tool call belongs to the reasoning block that produced
+			// it; attaching it there keeps the signature replayable on the next turn instead of
+			// silently dropping it (Gemini 3+ rejects unsigned reasoning turns with HTTP 400).
+			applySignatureToLastThinking(blocks, sig)
+			if txt != "" || sig == "" {
+				blocks = append(blocks, AnthropicContentBlock{
+					Type: "text",
+					Text: txt,
+				})
+			}
 		} else if fc, ok := part["functionCall"].(map[string]any); ok {
+			applySignatureToLastThinking(blocks, sig)
 			name, _ := fc["name"].(string)
 			id, _ := fc["id"].(string)
 			if id == "" {
@@ -594,14 +647,7 @@ func ConvertGoogleToAnthropicResponse(googleResp map[string]any, model string) (
 
 	stopReason := "end_turn"
 	if finishReason, ok := firstCand["finishReason"].(string); ok {
-		switch finishReason {
-		case "MAX_TOKENS":
-			stopReason = "max_tokens"
-		case "TOOL_USE":
-			stopReason = "tool_use"
-		case "STOP":
-			stopReason = "end_turn"
-		}
+		stopReason = anthropicStopReason(finishReason, hasToolCalls)
 	}
 	if hasToolCalls {
 		stopReason = "tool_use"
@@ -671,6 +717,10 @@ type AnthropicStreamTranslator struct {
 	// currentSignature caches thoughtSignature for delta emission.
 	currentSignature string
 
+	// pendingSignature holds a signature observed before any thinking block was open, so the next
+	// thinking block can carry it instead of losing the signature.
+	pendingSignature string
+
 	// stopReason tracks the completion stop reason.
 	stopReason string
 
@@ -683,11 +733,17 @@ type AnthropicStreamTranslator struct {
 	// promptTokens accumulates total prompt token counts.
 	promptTokens int
 
-	// outputTokens accumulates total generated output token counts.
-	outputTokens int
+	// candidatesTokens tracks the latest visible output token count reported by upstream.
+	candidatesTokens int
+
+	// thoughtsTokens tracks the latest thinking token count reported by upstream.
+	thoughtsTokens int
 
 	// cachedTokens accumulates cache read token counts.
 	cachedTokens int
+
+	// continuationToken holds the long-decode continuation token of the current hop, if any.
+	continuationToken string
 
 	// emit callback delivers formatted Anthropic SSE event bytes.
 	emit func(eventType string, data any)
@@ -710,6 +766,45 @@ func (t *AnthropicStreamTranslator) SawOutput() bool {
 	return t.sawOutput
 }
 
+// ContinuationToken returns the long-decode continuation token captured from the current hop.
+func (t *AnthropicStreamTranslator) ContinuationToken() string {
+	return t.continuationToken
+}
+
+// ClearContinuationToken discards the token captured so far, so the next hop's upstream response is
+// what decides whether another continuation is required.
+func (t *AnthropicStreamTranslator) ClearContinuationToken() {
+	t.continuationToken = ""
+}
+
+// outputTokens returns the combined visible and thinking output token count.
+//
+// Protocol Quirk: Google re-sends cumulative usageMetadata frames, so the two counters are tracked
+// separately and summed once here instead of being accumulated into a running total.
+func (t *AnthropicStreamTranslator) outputTokens() int {
+	return t.candidatesTokens + t.thoughtsTokens
+}
+
+// captureSignature records a thoughtSignature that upstream attached to a part other than an open
+// thinking block (an empty text part or a tool call).
+//
+// Anthropic replays reasoning signatures through thinking blocks, so the signature is attached to
+// the most recent thinking block; when no thinking block exists yet it is held pending for the next
+// one. Dropping the signature makes Gemini 3+ reject the following turn with HTTP 400.
+func (t *AnthropicStreamTranslator) captureSignature(sig string) {
+	if sig == "" {
+		return
+	}
+	if t.currentBlockType == "thinking" {
+		t.currentSignature = sig
+	}
+	if n := len(t.accumulatedBlocks); n > 0 && t.accumulatedBlocks[n-1].Type == "thinking" {
+		t.accumulatedBlocks[n-1].Signature = sig
+		return
+	}
+	t.pendingSignature = sig
+}
+
 // Push processes a raw Google Cloud Code SSE event map.
 func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 	inner := event
@@ -721,11 +816,14 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 		if v, ok := usage["promptTokenCount"].(float64); ok {
 			t.promptTokens = int(v)
 		}
+		// Google re-sends cumulative usageMetadata frames on every SSE event. Assigning the latest
+		// counts (instead of adding each frame into a running total) keeps output_tokens exact even
+		// when later frames omit candidatesTokenCount or re-report thinking tokens.
 		if v, ok := usage["candidatesTokenCount"].(float64); ok {
-			t.outputTokens = int(v)
+			t.candidatesTokens = int(v)
 		}
 		if v, ok := usage["thoughtsTokenCount"].(float64); ok {
-			t.outputTokens += int(v)
+			t.thoughtsTokens = int(v)
 		}
 		if v, ok := usage["cachedContentTokenCount"].(float64); ok {
 			t.cachedTokens = int(v)
@@ -776,13 +874,19 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 			txt, _ := part["text"].(string)
 			sig, _ := part["thoughtSignature"].(string)
 
+			// A different signature marks a distinct thinking block. Close the previous block first so
+			// its signature is emitted before the new one starts instead of being overwritten.
+			if sig != "" && t.currentBlockType == "thinking" && t.currentSignature != "" && t.currentSignature != sig {
+				t.closeCurrentBlock()
+			}
+
 			if t.currentBlockType != "thinking" {
 				t.closeCurrentBlock()
 				t.currentBlockType = "thinking"
-				t.currentSignature = ""
-				t.accumulatedBlocks = append(t.accumulatedBlocks, AnthropicContentBlock{
-					Type: "thinking",
-				})
+				t.currentSignature = t.pendingSignature
+				t.pendingSignature = ""
+				block := AnthropicContentBlock{Type: "thinking", Signature: t.currentSignature}
+				t.accumulatedBlocks = append(t.accumulatedBlocks, block)
 				if t.emit != nil {
 					t.emit("content_block_start", map[string]any{
 						"type":  "content_block_start",
@@ -820,7 +924,12 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 				}
 			}
 		} else if txt, ok := part["text"].(string); ok {
+			sig, _ := part["thoughtSignature"].(string)
 			if txt == "" {
+				// Protocol Quirk: Gemini may attach the reasoning signature to an empty text part.
+				// Skipping empty parts before reading thoughtSignature drops the signature that the
+				// next turn must replay, so it is captured even when there is no visible text.
+				t.captureSignature(sig)
 				continue
 			}
 			t.sawOutput = true
@@ -848,6 +957,10 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 				t.accumulatedBlocks[lastIdx].Text += txt
 			}
 
+			if sig != "" {
+				t.captureSignature(sig)
+			}
+
 			if t.emit != nil {
 				t.emit("content_block_delta", map[string]any{
 					"type":  "content_block_delta",
@@ -860,6 +973,11 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 			}
 		} else if fc, ok := part["functionCall"].(map[string]any); ok {
 			t.sawOutput = true
+			// A signature attached to the tool call belongs to the reasoning block that produced it,
+			// so it is preserved before the open block is closed.
+			if sig, _ := part["thoughtSignature"].(string); sig != "" {
+				t.captureSignature(sig)
+			}
 			t.closeCurrentBlock()
 			t.currentBlockType = "tool_use"
 			t.stopReason = "tool_use"
@@ -913,12 +1031,14 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 		}
 	}
 
-	if finishReason, ok := firstCand["finishReason"].(string); ok && t.stopReason == "" {
-		switch finishReason {
-		case "MAX_TOKENS":
-			t.stopReason = "max_tokens"
-		case "STOP":
-			t.stopReason = "end_turn"
+	if finishReason, ok := firstCand["finishReason"].(string); ok && finishReason != "" {
+		// Long decode stops mid-generation: keep any captured continuation token and do not treat the
+		// hop as the final stop reason; the router chains the next hop instead.
+		if token, _ := firstCand["continuationToken"].(string); token != "" {
+			t.continuationToken = token
+		}
+		if t.stopReason == "" && !strings.EqualFold(finishReason, "CONTINUATION") {
+			t.stopReason = anthropicStopReason(finishReason, false)
 		}
 	}
 }
@@ -942,7 +1062,7 @@ func (t *AnthropicStreamTranslator) Response() *AnthropicResponse {
 		StopReason: stopReason,
 		Usage: AnthropicUsage{
 			InputTokens:          max(0, t.promptTokens-t.cachedTokens),
-			OutputTokens:         t.outputTokens,
+			OutputTokens:         t.outputTokens(),
 			CacheReadInputTokens: t.cachedTokens,
 		},
 	}
@@ -1017,7 +1137,7 @@ func (t *AnthropicStreamTranslator) Finish() {
 				"stop_sequence": nil,
 			},
 			"usage": map[string]any{
-				"output_tokens": t.outputTokens,
+				"output_tokens": t.outputTokens(),
 			},
 		})
 

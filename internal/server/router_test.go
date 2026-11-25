@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1021,5 +1023,132 @@ func TestChatCompletionsEnvelopeRequestTypeShape(t *testing.T) {
 	agentic := <-envelopes
 	if got := agentic["requestType"]; got != "agent" {
 		t.Errorf("expected tool-enabled envelope requestType 'agent', got %v", got)
+	}
+}
+
+// TestChatCompletionsLongDecodeContinuation verifies a hop that stops with finishReason CONTINUATION
+// is chained into a bounded follow-up request carrying only the continuation token, and that both
+// segments reach the client as one streamed answer.
+func TestChatCompletionsLongDecodeContinuation(t *testing.T) {
+	var calls atomic.Int64
+	var mu sync.Mutex
+	var hopBodies []string
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			hopBodies = append(hopBodies, string(body))
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+
+			if calls.Add(1) == 1 {
+				_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"segment one "}]},"finishReason":"CONTINUATION","continuationToken":"cont-token-1"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}}` + "\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"segment two"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":4}}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+
+	payload := `{
+		"model": "gemini-4-hydrogen-high",
+		"messages": [{"role": "user", "content": "original prompt"}],
+		"stream": true
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "segment one ") || !strings.Contains(body, "segment two") {
+		t.Errorf("expected both continuation segments in the stream, got:\n%s", body)
+	}
+	if !strings.HasSuffix(body, "data: [DONE]\n\n") {
+		t.Errorf("expected streamed response to terminate with [DONE], got:\n%s", body)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hopBodies) != 2 {
+		t.Fatalf("expected exactly 2 upstream hops, got %d", len(hopBodies))
+	}
+	if !strings.Contains(hopBodies[1], `"continuationToken":"cont-token-1"`) {
+		t.Errorf("expected second hop to carry the continuation token, got:\n%s", hopBodies[1])
+	}
+	if !strings.Contains(hopBodies[1], "original prompt") {
+		t.Errorf("expected second hop to resend the original prompt, got:\n%s", hopBodies[1])
+	}
+	if strings.Contains(hopBodies[1], "segment one") {
+		t.Errorf("expected second hop to omit partial model text, got:\n%s", hopBodies[1])
+	}
+}
+
+// TestUIStrategyPersistsToLaunchedConfigPath verifies a WebUI strategy mutation is written back to the
+// configuration file the daemon was launched with instead of the default location.
+func TestUIStrategyPersistsToLaunchedConfigPath(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	customPath := filepath.Join(t.TempDir(), "custom-config.json")
+	seed := config.DefaultConfig()
+	seed.APIKey = harness.apiKey
+	seed.Strategy = "sticky"
+	if err := config.Save(customPath, seed); err != nil {
+		t.Fatalf("seeding custom config: %v", err)
+	}
+	harness.server.configPath = customPath
+
+	defaultPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving default config path: %v", err)
+	}
+
+	handler := harness.server.buildHandler()
+	req := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"round-robin"}`))
+	req.Host = "127.0.0.1:51400"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected strategy mutation to succeed, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(customPath)
+	if err != nil {
+		t.Fatalf("reading custom config: %v", err)
+	}
+	var persisted config.Config
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("parsing custom config: %v", err)
+	}
+	if persisted.Strategy != "round-robin" {
+		t.Errorf("expected strategy persisted to the launched config path, got %q", persisted.Strategy)
+	}
+
+	if _, statErr := os.Stat(defaultPath); statErr == nil {
+		t.Errorf("expected the default config path %s to stay untouched", defaultPath)
 	}
 }

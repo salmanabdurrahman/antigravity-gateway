@@ -203,6 +203,8 @@ The CLI automatically:
 4. Atomically replaces the current executable in-place.
 5. Gracefully restarts the background daemon if one was running.
 
+Release metadata, archives, and checksum files must be served over HTTPS (plain HTTP is accepted only for loopback mirrors), and HTTPS-to-HTTP redirect downgrades are rejected. Archives must contain the executable as a regular file; symlink and directory entries named `agw` are refused, and extraction is size-capped. A running daemon is stopped before the replacement: if the stop is refused or the daemon keeps answering `/health`, the upgrade aborts and suggests `--force` rather than swapping the binary underneath a live process. The restart reuses the `--config` path supplied on the command line.
+
 To inspect available releases without applying changes:
 
 ```bash

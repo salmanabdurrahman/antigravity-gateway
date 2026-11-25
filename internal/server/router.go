@@ -4,6 +4,7 @@ package server
 
 import (
 	"cmp"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,73 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/server/webui"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/translate"
 )
+
+// maxContinuationHops bounds Gemini 4 long-decode chaining so a misbehaving upstream cannot keep a
+// single client request alive indefinitely across continuation segments.
+const maxContinuationHops = 16
+
+// streamTranslator is the shared surface required to chain long-decode continuation hops across the
+// OpenAI and Anthropic stream translators.
+type streamTranslator interface {
+	// Push ingests one upstream SSE event map.
+	Push(event map[string]any)
+
+	// ContinuationToken returns the long-decode token captured from the current hop, if any.
+	ContinuationToken() string
+
+	// ClearContinuationToken resets the token before the next hop is read.
+	ClearContinuationToken()
+}
+
+// readUpstreamHops consumes the upstream SSE body of the current attempt and, while Gemini reports a
+// long-decode continuation token, dispatches bounded follow-up hops that reuse the original payload.
+//
+// Protocol Quirk: a Gemini 4 long decode stops a candidate with finishReason "CONTINUATION" plus an
+// opaque continuationToken once it reaches the per-request output boundary. Only the token may be
+// added to the follow-up request; the original contents, system instruction, tools, and
+// maxOutputTokens must be resent unchanged, and the partial model text must not be appended.
+func (s *Server) readUpstreamHops(
+	ctx context.Context,
+	upstream string,
+	first *rotator.AttemptResult,
+	continuation func(st *rotator.AccountState, token string) (any, error),
+	translator streamTranslator,
+) error {
+	current := first
+	// The final hop body is closed on return; intermediate hops are closed as soon as they are drained
+	// so a long continuation chain never accumulates open response bodies.
+	defer func() { _ = current.Response.Body.Close() }()
+	for hop := range maxContinuationHops + 1 {
+		translator.ClearContinuationToken()
+		if err := translate.ReadSSEEvents(current.Response.Body, func(event map[string]any) error {
+			translator.Push(event)
+			return nil
+		}); err != nil {
+			return err
+		}
+
+		token := translator.ContinuationToken()
+		if token == "" || continuation == nil {
+			return nil
+		}
+		if hop >= maxContinuationHops {
+			s.logger.Warn("long-decode continuation hop limit reached", "model", upstream, "hops", hop)
+			return nil
+		}
+
+		next, err := s.rotator.Generate(ctx, upstream, func(st *rotator.AccountState) (any, error) {
+			return continuation(st, token)
+		})
+		if err != nil {
+			return fmt.Errorf("continuing long decode after %d hop(s): %w", hop+1, err)
+		}
+		// Closing the previous hop body after its stream is drained is safe and keeps descriptors
+		// bounded across long continuation chains.
+		_ = current.Response.Body.Close()
+		current = next
+	}
+	return nil
+}
 
 // HealthResponse describes the health and identity status returned by /health.
 type HealthResponse struct {
@@ -315,9 +383,16 @@ func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
 	// Persist best-effort: the in-memory strategy is already active, so a write failure only
 	// affects the next daemon restart and must not fail the UI request. Only the strategy field
 	// is written back; the config file on disk remains the source of truth for every other value.
-	if cfgPath, err := config.ConfigFilePath(); err == nil {
+	// The file used is the one the daemon was launched with, so a --config override is honored.
+	cfgPath := s.configPath
+	if cfgPath == "" {
+		if resolved, err := config.ConfigFilePath(); err == nil {
+			cfgPath = resolved
+		}
+	}
+	if cfgPath != "" {
 		if saveErr := config.SaveStrategy(cfgPath, string(strat)); saveErr != nil {
-			s.logger.Warn("failed persisting strategy to config file", "error", saveErr)
+			s.logger.Warn("failed persisting strategy to config file", "path", cfgPath, "error", saveErr)
 		}
 	}
 
@@ -405,8 +480,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Long-decode continuations resend the identical payload with only the token added.
+		continuation := func(st *rotator.AccountState, token string) (any, error) {
+			hopReq := *geminiReq
+			hopReq.ContinuationToken = token
+			return translate.WrapEnvelope(&hopReq, upstream, st.ProjectID()), nil
+		}
+
 		chatReq.Model = originalModel
-		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, id, created, upstream, attempt)
+		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, continuation, id, created, upstream, attempt)
 		if retry {
 			chatReq.Model = resolvedModel
 			continue
@@ -424,6 +506,7 @@ func (s *Server) processCompletionsResponse(
 	r *http.Request,
 	chatReq *translate.ChatRequest,
 	result *rotator.AttemptResult,
+	continuation func(st *rotator.AccountState, token string) (any, error),
 	id string,
 	created int64,
 	upstream string,
@@ -481,10 +564,7 @@ func (s *Server) processCompletionsResponse(
 			})
 		})
 
-		streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
-			translator.Push(event)
-			return nil
-		})
+		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
 
 		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -574,10 +654,7 @@ func (s *Server) processCompletionsResponse(
 
 	// Non-streaming completion
 	translator := translate.NewResponseTranslator(chatReq.Model, func(delta translate.Delta) {})
-	streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
-		translator.Push(event)
-		return nil
-	})
+	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
 
 	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -669,8 +746,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
+		// Long-decode continuations resend the identical payload with only the token added.
+		continuation := func(st *rotator.AccountState, token string) (any, error) {
+			hopReq := *geminiReq
+			hopReq.ContinuationToken = token
+			return translate.WrapEnvelope(&hopReq, upstream, st.ProjectID()), nil
+		}
+
 		anthReq.Model = originalModel
-		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, upstream, attempt)
+		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, continuation, upstream, attempt)
 		if retry {
 			anthReq.Model = resolvedModel
 			continue
@@ -687,6 +771,7 @@ func (s *Server) processAnthropicResponse(
 	r *http.Request,
 	anthReq *translate.AnthropicRequest,
 	result *rotator.AttemptResult,
+	continuation func(st *rotator.AccountState, token string) (any, error),
 	upstream string,
 	attempt int,
 ) (done bool, retry bool) {
@@ -715,10 +800,7 @@ func (s *Server) processAnthropicResponse(
 
 		translator := translate.NewAnthropicStreamTranslator(anthReq.Model, writeChunk)
 
-		streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
-			translator.Push(event)
-			return nil
-		})
+		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
 
 		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
@@ -750,10 +832,7 @@ func (s *Server) processAnthropicResponse(
 
 	// Non-streaming completion
 	translator := translate.NewAnthropicStreamTranslator(anthReq.Model, nil)
-	streamErr := translate.ReadSSEEvents(result.Response.Body, func(event map[string]any) error {
-		translator.Push(event)
-		return nil
-	})
+	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator)
 
 	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)

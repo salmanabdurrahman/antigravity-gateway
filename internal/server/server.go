@@ -70,6 +70,10 @@ type Server struct {
 
 	// pidFile is the optional path where the daemon records its own process ID once listening.
 	pidFile string
+
+	// configPath is the configuration file the daemon was started with. Runtime settings changed
+	// through the WebUI are persisted here instead of always rewriting the default location.
+	configPath string
 }
 
 // Options encapsulates configuration parameters for initializing a Server instance.
@@ -92,6 +96,10 @@ type Options struct {
 	// PIDFile is an optional path where the daemon records its own process ID once it reaches the
 	// listening state. When empty, no PID file is managed (useful for tests and embedded usage).
 	PIDFile string
+
+	// ConfigPath is the optional configuration file path the daemon was started with. When empty, the
+	// default configuration path is resolved lazily on persistence (useful for tests).
+	ConfigPath string
 }
 
 // NewServer initializes a new Server with configured routes, middleware, and loopback enforcement.
@@ -112,11 +120,12 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	s := &Server{
-		rotator:  opts.Rotator,
-		catalog:  opts.Catalog,
-		logger:   logger,
-		listener: opts.Listener,
-		pidFile:  opts.PIDFile,
+		rotator:    opts.Rotator,
+		catalog:    opts.Catalog,
+		logger:     logger,
+		listener:   opts.Listener,
+		pidFile:    opts.PIDFile,
+		configPath: opts.ConfigPath,
 	}
 	// Clone so later mutation of the caller's configuration cannot change what handlers observe.
 	s.cfg.Store(opts.Config.Clone())
@@ -125,16 +134,12 @@ func NewServer(opts Options) (*Server, error) {
 
 	// Enforce strict local loopback binding address
 	cfg := s.config()
-	host := cfg.Host
-	ip := net.ParseIP(host)
-	if host != "127.0.0.1" && host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		host = config.DefaultHost
-	}
+	host := config.LoopbackHost(cfg.Host)
 	port := cfg.Port
 	if port <= 0 {
 		port = config.DefaultPort
 	}
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := config.ListenAddress(host, port)
 
 	s.httpServer = &http.Server{
 		Addr:              addr,

@@ -166,9 +166,9 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 	// an orphaned daemon can still own the port after its pid file was removed manually, and spawning
 	// a second process would either fail to bind or report the wrong PID back to the operator.
 	if existingPID, readErr := ReadPID(pidFile); readErr == nil && IsProcessAlive(existingPID) {
-		host := cmp.Or(cfg.Host, config.DefaultHost)
+		host := config.LoopbackHost(cfg.Host)
 		port := cmp.Or(cfg.Port, config.DefaultPort)
-		healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+		healthURL := config.URL(host, port, "/health")
 
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
 		defer cancel()
@@ -217,9 +217,9 @@ func StartDetached(cfg *config.Config, extraArgs []string) (int, string, error) 
 		return 0, "", fmt.Errorf("saving pid file %s: %w", pidFile, err)
 	}
 
-	host := cmp.Or(cfg.Host, config.DefaultHost)
+	host := config.LoopbackHost(cfg.Host)
 	port := cmp.Or(cfg.Port, config.DefaultPort)
-	healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+	healthURL := config.URL(host, port, "/health")
 
 	// Poll until server answers /health or deadline expires
 	deadline := time.Now().Add(DetachedStartupTimeout)
@@ -253,7 +253,8 @@ func ResolveRunningDaemon(ctx context.Context, host string, port int) (int, *Hea
 		return 0, nil, fmt.Errorf("%w: invalid port %d", ErrDaemonNotRunning, port)
 	}
 
-	healthURL := fmt.Sprintf("http://%s:%d/health", cmp.Or(host, config.DefaultHost), port)
+	// The probe targets the loopback-clamped host, matching the interface the daemon actually binds.
+	healthURL := config.URL(config.LoopbackHost(host), port, "/health")
 	health, err := CheckHealth(ctx, healthURL)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: %w", ErrDaemonNotRunning, err)
@@ -289,12 +290,12 @@ func StopDetached(cfg *config.Config) (int, error) {
 		host := config.DefaultHost
 		port := config.DefaultPort
 		if cfg != nil {
-			host = cmp.Or(cfg.Host, config.DefaultHost)
+			host = config.LoopbackHost(cfg.Host)
 			if cfg.Port > 0 {
 				port = cfg.Port
 			}
 		}
-		healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+		healthURL := config.URL(host, port, "/health")
 		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
 		health, healthErr := CheckHealth(ctx, healthURL)
 		cancel()

@@ -145,3 +145,49 @@ func TestLoginLocalCommand(t *testing.T) {
 		t.Errorf("expected desktop@example.com, got %s", accounts[0].Email)
 	}
 }
+
+// TestAccountsCheckDoesNotReEnableWithoutOptIn verifies a live --check inspection leaves the disabled
+// flag untouched unless the explicit --re-enable opt-in is supplied.
+func TestAccountsCheckDoesNotReEnableWithoutOptIn(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	accPath := filepath.Join(tempHome, "accounts.json")
+	store := auth.NewStore(accPath)
+	if _, err := store.Upsert(&auth.Account{
+		Email:        "disabled@example.com",
+		RefreshToken: "refresh-secret",
+		ProjectID:    "project-disabled",
+		Disabled:     true,
+		LastError:    "violation of terms of service",
+	}); err != nil {
+		t.Fatalf("seeding account: %v", err)
+	}
+
+	prevQuota, prevReenable := checkAccountsQuota, checkAccountsReenable
+	t.Cleanup(func() {
+		checkAccountsQuota, checkAccountsReenable = prevQuota, prevReenable
+	})
+
+	// Without --check the command only lists accounts, so no account state may change.
+	checkAccountsQuota = false
+	checkAccountsReenable = false
+
+	buf := new(bytes.Buffer)
+	accountsCmd.SetOut(buf)
+	accountsCmd.SetErr(buf)
+	if err := accountsCmd.RunE(accountsCmd, []string{}); err != nil {
+		t.Fatalf("accountsCmd.RunE failed: %v", err)
+	}
+
+	accounts, err := store.Load()
+	if err != nil {
+		t.Fatalf("loading accounts: %v", err)
+	}
+	if len(accounts) != 1 || !accounts[0].Disabled {
+		t.Fatalf("expected the disabled account to stay disabled, got %+v", accounts)
+	}
+	if !strings.Contains(buf.String(), "Disabled") {
+		t.Errorf("expected disabled status in output, got %s", buf.String())
+	}
+}

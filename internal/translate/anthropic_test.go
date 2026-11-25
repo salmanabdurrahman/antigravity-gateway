@@ -590,3 +590,334 @@ func TestAnthropicSystemScrubAndInlineFallback(t *testing.T) {
 		t.Errorf("expected original user text preserved last, got %q", lastText)
 	}
 }
+
+// collectAnthropicEvents builds an Anthropic stream translator that records every emitted SSE event
+// string, mirroring how the gateway serializes events onto the wire.
+func collectAnthropicEvents(t *testing.T, model string) (*AnthropicStreamTranslator, *[]string) {
+	t.Helper()
+	var events []string
+	translator := NewAnthropicStreamTranslator(model, func(eventType string, data any) {
+		b, err := FormatAnthropicSSEEvent(eventType, data)
+		if err != nil {
+			t.Errorf("formatting anthropic sse event: %v", err)
+			return
+		}
+		events = append(events, string(b))
+	})
+	return translator, &events
+}
+
+// TestAnthropicStreamUsageNotDoubleCounted verifies repeated cumulative usageMetadata frames never
+// inflate output_tokens with duplicated thinking or candidate token counts.
+func TestAnthropicStreamUsageNotDoubleCounted(t *testing.T) {
+	translator, events := collectAnthropicEvents(t, "claude-sonnet-4-6")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{map[string]any{
+					"thought": true, "text": "thinking...", "thoughtSignature": "sig_1",
+				}}},
+			}},
+			"usageMetadata": map[string]any{
+				"promptTokenCount":     float64(20),
+				"candidatesTokenCount": float64(2),
+				"thoughtsTokenCount":   float64(30),
+			},
+		},
+	})
+	// A second frame repeats the same cumulative thinking count and omits candidatesTokenCount.
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content":      map[string]any{"parts": []any{map[string]any{"text": "answer"}}},
+				"finishReason": "STOP",
+			}},
+			"usageMetadata": map[string]any{
+				"promptTokenCount":   float64(20),
+				"thoughtsTokenCount": float64(30),
+			},
+		},
+	})
+	translator.Finish()
+
+	resp := translator.Response()
+	if resp.Usage.OutputTokens != 32 {
+		t.Errorf("expected output_tokens 32 (2 candidates + 30 thinking), got %d", resp.Usage.OutputTokens)
+	}
+
+	joined := strings.Join(*events, "")
+	if !strings.Contains(joined, `"output_tokens":32`) {
+		t.Errorf("expected final message_delta usage to report 32 output tokens, got:\n%s", joined)
+	}
+}
+
+// TestAnthropicToolResultImagesBecomeInlineData verifies images embedded inside an Anthropic
+// tool_result block are forwarded as inlineData parts instead of being dropped.
+func TestAnthropicToolResultImagesBecomeInlineData(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 1024,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "screenshot please"},
+			{Role: "assistant", Content: []any{
+				map[string]any{
+					"type": "tool_use", "id": "toolu_1", "name": "capture", "input": map[string]any{},
+				},
+			}},
+			{Role: "user", Content: []any{
+				map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_1",
+					"content": []any{
+						map[string]any{"type": "text", "text": "captured"},
+						map[string]any{
+							"type": "image",
+							"source": map[string]any{
+								"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo=",
+							},
+						},
+					},
+				},
+			}},
+		},
+	}
+
+	geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.CatalogModel{ID: "claude-sonnet-4-6", MaxOutputTokens: 64000}})
+	if err != nil {
+		t.Fatalf("BuildAnthropicRequest failed: %v", err)
+	}
+
+	var sawInline, sawResponse bool
+	for _, content := range geminiReq.Contents {
+		for _, part := range content.Parts {
+			if part.InlineData != nil && part.InlineData.MimeType == "image/png" && part.InlineData.Data == "iVBORw0KGgo=" {
+				sawInline = true
+			}
+			if part.FunctionResponse != nil {
+				sawResponse = true
+			}
+		}
+	}
+	if !sawResponse {
+		t.Error("expected tool_result to produce a functionResponse part")
+	}
+	if !sawInline {
+		t.Error("expected tool_result image to produce an inlineData part")
+	}
+}
+
+// TestAnthropicStreamPreservesEmptyTextSignature verifies a signature attached to an empty text part
+// is captured instead of being dropped before the signature field is read.
+func TestAnthropicStreamPreservesEmptyTextSignature(t *testing.T) {
+	translator, events := collectAnthropicEvents(t, "claude-sonnet-4-6")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{
+					map[string]any{"thought": true, "text": "reasoning"},
+					map[string]any{"text": "", "thoughtSignature": "sig_empty_text"},
+				}},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+	translator.Finish()
+
+	resp := translator.Response()
+	if len(resp.Content) == 0 || resp.Content[0].Type != "thinking" {
+		t.Fatalf("expected a leading thinking block, got %+v", resp.Content)
+	}
+	if resp.Content[0].Signature != "sig_empty_text" {
+		t.Errorf("expected signature captured from empty text part, got %q", resp.Content[0].Signature)
+	}
+	if joined := strings.Join(*events, ""); !strings.Contains(joined, "sig_empty_text") {
+		t.Errorf("expected signature_delta carrying the captured signature, got:\n%s", joined)
+	}
+}
+
+// TestAnthropicStreamDistinctThinkingSignatures verifies consecutive thinking parts with different
+// signatures open separate blocks instead of merging and overwriting the earlier signature.
+func TestAnthropicStreamDistinctThinkingSignatures(t *testing.T) {
+	translator, _ := collectAnthropicEvents(t, "claude-sonnet-4-6")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{
+					map[string]any{"thought": true, "text": "first", "thoughtSignature": "sig_first"},
+					map[string]any{"thought": true, "text": "second", "thoughtSignature": "sig_second"},
+				}},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+	translator.Finish()
+
+	resp := translator.Response()
+	if len(resp.Content) != 2 {
+		t.Fatalf("expected two distinct thinking blocks, got %d: %+v", len(resp.Content), resp.Content)
+	}
+	if resp.Content[0].Signature != "sig_first" || resp.Content[1].Signature != "sig_second" {
+		t.Errorf("expected distinct signatures preserved, got %q and %q", resp.Content[0].Signature, resp.Content[1].Signature)
+	}
+}
+
+// TestAnthropicStopReasonMapping verifies safety, tool, and length finish reasons map to the
+// Anthropic stop_reason vocabulary instead of defaulting to end_turn.
+func TestAnthropicStopReasonMapping(t *testing.T) {
+	cases := []struct {
+		finishReason string
+		want         string
+	}{
+		{"STOP", "end_turn"},
+		{"MAX_TOKENS", "max_tokens"},
+		{"TOOL_USE", "tool_use"},
+		{"SAFETY", "refusal"},
+		{"RECITATION", "refusal"},
+		{"BLOCKLIST", "refusal"},
+		{"PROHIBITED_CONTENT", "refusal"},
+		{"SPII", "refusal"},
+	}
+
+	for _, tc := range cases {
+		googleResp := map[string]any{
+			"response": map[string]any{
+				"candidates": []any{map[string]any{
+					"finishReason": tc.finishReason,
+					"content":      map[string]any{"parts": []any{map[string]any{"text": "partial"}}},
+				}},
+			},
+		}
+		resp, err := ConvertGoogleToAnthropicResponse(googleResp, "claude-sonnet-4-6")
+		if err != nil {
+			t.Fatalf("ConvertGoogleToAnthropicResponse(%s) failed: %v", tc.finishReason, err)
+		}
+		if resp.StopReason != tc.want {
+			t.Errorf("finishReason %s: expected stop_reason %q, got %q", tc.finishReason, tc.want, resp.StopReason)
+		}
+	}
+
+	// Streaming must also surface TOOL_USE rather than folding it into end_turn.
+	translator, _ := collectAnthropicEvents(t, "claude-sonnet-4-6")
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content":      map[string]any{"parts": []any{map[string]any{"text": "need a tool"}}},
+				"finishReason": "TOOL_USE",
+			}},
+		},
+	})
+	translator.Finish()
+	if stop := translator.Response().StopReason; stop != "tool_use" {
+		t.Errorf("expected streaming stop_reason tool_use, got %q", stop)
+	}
+}
+
+// TestAnthropicToolNameSanitization verifies function declarations and replayed tool turns share the
+// same [a-zA-Z_] prefixed name normalization, and that empty call IDs are never replaced with "call".
+func TestAnthropicToolNameSanitization(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 512,
+		Tools: []AnthropicTool{
+			{Name: "9lives.tool-name", InputSchema: map[string]any{"type": "object"}},
+		},
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "run it"},
+			{Role: "assistant", Content: []any{
+				map[string]any{
+					"type": "tool_use", "id": "toolu_9", "name": "9lives.tool-name", "input": map[string]any{},
+				},
+			}},
+			{Role: "user", Content: []any{
+				map[string]any{
+					"type": "tool_result", "tool_use_id": "toolu_9", "content": "ok",
+				},
+			}},
+		},
+	}
+
+	geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.CatalogModel{ID: "claude-sonnet-4-6", MaxOutputTokens: 64000}})
+	if err != nil {
+		t.Fatalf("BuildAnthropicRequest failed: %v", err)
+	}
+
+	decls, ok := geminiReq.Tools[0].(map[string]any)["functionDeclarations"].([]map[string]any)
+	if !ok || len(decls) != 1 {
+		t.Fatalf("expected one function declaration, got %#v", geminiReq.Tools)
+	}
+	declName, _ := decls[0]["name"].(string)
+	if declName != "_9lives_tool_name" {
+		t.Errorf("expected sanitized declaration name _9lives_tool_name, got %q", declName)
+	}
+
+	var callName, responseName string
+	for _, content := range geminiReq.Contents {
+		for _, part := range content.Parts {
+			if part.FunctionCall != nil {
+				callName = part.FunctionCall.Name
+			}
+			if part.FunctionResponse != nil {
+				responseName = part.FunctionResponse.Name
+			}
+		}
+	}
+	if callName != declName || responseName != declName {
+		t.Errorf("expected declaration/call/response names to match (%q), got call %q and response %q", declName, callName, responseName)
+	}
+
+	if got := CleanToolCallID(""); got != "" {
+		t.Errorf("expected empty tool call ID to stay empty, got %q", got)
+	}
+}
+
+// TestAnthropicStreamContinuationToken verifies long-decode continuation tokens are captured from the
+// upstream candidate and can be cleared before the next hop.
+func TestAnthropicStreamContinuationToken(t *testing.T) {
+	translator, _ := collectAnthropicEvents(t, "claude-sonnet-4-6")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content":           map[string]any{"parts": []any{map[string]any{"text": "partial"}}},
+				"finishReason":      "CONTINUATION",
+				"continuationToken": "token-abc",
+			}},
+		},
+	})
+
+	if token := translator.ContinuationToken(); token != "token-abc" {
+		t.Fatalf("expected continuation token captured, got %q", token)
+	}
+	// A CONTINUATION hop must not be treated as a terminal stop reason.
+	translator.Finish()
+	if stop := translator.Response().StopReason; stop == "continuation" {
+		t.Errorf("expected CONTINUATION to be excluded from terminal stop reasons, got %q", stop)
+	}
+
+	translator.ClearContinuationToken()
+	if token := translator.ContinuationToken(); token != "" {
+		t.Errorf("expected cleared continuation token, got %q", token)
+	}
+}
+
+// TestBuildAnthropicRequestClampsMaxTokens verifies an explicit max_tokens above the catalog output
+// ceiling is clamped to the ceiling the upstream model actually accepts.
+func TestBuildAnthropicRequestClampsMaxTokens(t *testing.T) {
+	req := &AnthropicRequest{
+		Model:     "claude-sonnet-4-6",
+		MaxTokens: 500000,
+		Messages:  []AnthropicMessage{{Role: "user", Content: "hi"}},
+	}
+
+	geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.CatalogModel{ID: "claude-sonnet-4-6", MaxOutputTokens: 64000}})
+	if err != nil {
+		t.Fatalf("BuildAnthropicRequest failed: %v", err)
+	}
+
+	if got, _ := geminiReq.GenerationConfig["maxOutputTokens"].(int); got != 64000 {
+		t.Errorf("expected maxOutputTokens clamped to 64000, got %v", geminiReq.GenerationConfig["maxOutputTokens"])
+	}
+}

@@ -115,12 +115,12 @@ func init() {
 func resolveGatewayEndpoint(cfg *config.Config) (string, string) {
 	baseURL := setupURL
 	if baseURL == "" {
-		host := cmp.Or(cfg.Host, config.DefaultHost)
+		host := config.LoopbackHost(cfg.Host)
 		port := cfg.Port
 		if port <= 0 {
 			port = config.DefaultPort
 		}
-		baseURL = fmt.Sprintf("http://%s:%d", host, port)
+		baseURL = config.BaseURL(host, port)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
@@ -137,7 +137,9 @@ func loadAvailableModels(ctx context.Context, cfg *config.Config, baseURL string
 		if apiKey != "" {
 			probeReq.Header.Set("Authorization", "Bearer "+apiKey)
 		}
-		httpClient := &http.Client{Timeout: 3 * time.Second}
+		// Probe clients never follow redirects so the local Authorization/x-api-key headers can never be
+		// forwarded to a cross-origin location.
+		httpClient := client.NewNoRedirectClient(3 * time.Second)
 		resp, probeErr := httpClient.Do(probeReq)
 		if probeErr == nil {
 			defer resp.Body.Close()

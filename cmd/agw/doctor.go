@@ -150,15 +150,17 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 func checkPorts(ctx context.Context, cfg *config.Config) []CheckItem {
 	var items []CheckItem
 
-	// Check Gateway Port (default 51400)
+	// Check Gateway Port (default 51400). The configured host is loopback-clamped and formatted with
+	// IPv6-safe brackets so a "::1" configuration probes the interface the daemon actually binds.
 	port := cfg.Port
 	if port <= 0 {
 		port = config.DefaultPort
 	}
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	host := config.LoopbackHost(cfg.Host)
+	addr := config.ListenAddress(host, port)
 
 	// Probe if AGW is already running
-	healthURL := fmt.Sprintf("http://%s/health", addr)
+	healthURL := config.URL(host, port, "/health")
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 	httpClient := &http.Client{Timeout: 1 * time.Second}
 	resp, err := httpClient.Do(req)

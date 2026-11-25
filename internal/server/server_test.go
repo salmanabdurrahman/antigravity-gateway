@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -441,5 +442,103 @@ func TestServerConfigSnapshotCopyOnWrite(t *testing.T) {
 	}
 	if got := srv.config().ModelMapping["alias"]; got != "backend" {
 		t.Errorf("expected model mapping to survive updates, got %q", got)
+	}
+}
+
+// TestServerIPv6LoopbackBinding verifies a "::1" configuration produces a bracketed listen address
+// and that the daemon can actually bind and answer /health over IPv6 loopback.
+func TestServerIPv6LoopbackBinding(t *testing.T) {
+	probe, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable on this host: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	_ = probe.Close()
+
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		Host:     "::1",
+		Port:     port,
+		APIKey:   "test-key",
+		Strategy: "sticky",
+	}
+
+	store := auth.NewStore(filepath.Join(tempDir, "accounts.json"))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pool, err := rotator.NewPool(store, cfg, time.Now)
+	if err != nil {
+		t.Fatalf("failed creating pool: %v", err)
+	}
+	rot := rotator.NewRotator(pool, cfg, logger, time.Now)
+	cat := catalog.NewModelCatalog(cfg, rot, filepath.Join(tempDir, "models-cache.json"), logger)
+
+	srv, err := NewServer(Options{Config: cfg, Rotator: rot, Catalog: cat, Logger: logger})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	wantAddr := fmt.Sprintf("[::1]:%d", port)
+	if got := srv.Addr(); got != wantAddr {
+		t.Fatalf("expected bracketed IPv6 listen address %q, got %q", wantAddr, got)
+	}
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- srv.Start()
+	}()
+
+	healthURL := config.URL("::1", port, "/health")
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	var health *HealthResponse
+	for {
+		if ctx.Err() != nil {
+			t.Fatalf("timed out waiting for IPv6 /health probe: %v", ctx.Err())
+		}
+		probed, probeErr := CheckHealth(ctx, healthURL)
+		if probeErr == nil {
+			health = probed
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !health.OK || health.Name != ServerName {
+		t.Errorf("unexpected IPv6 health response: %+v", health)
+	}
+
+	// WebUI Host/Origin guards must accept bracketed IPv6 loopback authorities.
+	handler := srv.buildHandler()
+	uiReq := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	uiReq.Host = wantAddr
+	uiRec := httptest.NewRecorder()
+	handler.ServeHTTP(uiRec, uiReq)
+	if uiRec.Code != http.StatusOK {
+		t.Errorf("expected /ui to accept IPv6 loopback host, got %d: %s", uiRec.Code, uiRec.Body.String())
+	}
+
+	strategyReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"sticky"}`))
+	strategyReq.Host = wantAddr
+	strategyReq.Header.Set("Content-Type", "application/json")
+	strategyReq.Header.Set("Origin", "http://"+wantAddr)
+	strategyRec := httptest.NewRecorder()
+	handler.ServeHTTP(strategyRec, strategyReq)
+	if strategyRec.Code != http.StatusOK {
+		t.Errorf("expected strategy mutation to accept IPv6 loopback origin, got %d: %s", strategyRec.Code, strategyRec.Body.String())
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(t.Context()), 2*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("srv.Shutdown failed: %v", err)
+	}
+
+	select {
+	case err := <-serverErrCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("unexpected server exit error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for server to exit after shutdown")
 	}
 }

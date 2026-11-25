@@ -193,6 +193,12 @@ Query live upstream quota remaining (Gemini, Claude, and reset time) per account
 agw accounts --check
 ```
 
+`--check` never re-enables accounts: a disabled account whose credentials still work is reported as disabled with a hint. Clearing that state requires the explicit opt-in flag, which is only accepted together with `--check`. The only state the inspection still records is a revoked refresh token, which is marked disabled so later requests skip it until you log in again:
+
+```bash
+agw accounts --check --re-enable
+```
+
 #### Remove an Account
 
 Remove credentials for an account from the local store:
@@ -242,10 +248,11 @@ agw start --strategy hybrid
 
 #### Start Gateway in Background (Detached)
 
-Fork and launch the daemon in the background. The process ID is recorded in `~/.agw/agw.pid` and logs are written to `~/.agw/agw.log`:
+Fork and launch the daemon in the background. The process ID is recorded in `~/.agw/agw.pid` and logs are written to `~/.agw/agw.log`. Any launch override supplied on the command line (`--strategy`, `--port`, `--config`) is forwarded to the detached child, so a custom configuration path is honored in the background exactly as it is in the foreground:
 
 ```bash
 agw start --detach
+agw start --detach --config /etc/agw/config.json
 ```
 
 #### Stop Gateway Daemon
@@ -270,8 +277,10 @@ Optional flags:
 
 - `--check`: Query GitHub Releases and display update availability without downloading or installing
 - `--version <v>`: Pin or downgrade to a specific version (e.g. `agw update --version 0.1.0`)
-- `--force`: Force download and reinstallation even when already on the latest version
+- `--force`: Force download and reinstallation even when already on the latest version, or continue replacing the binary when the running daemon reports it could not be stopped
 - `--no-restart`: Skip automatically restarting a running background daemon after binary replacement
+
+A running daemon is stopped before the executable is replaced, and the restart preserves the configuration path the daemon was launched with. If the stop request is refused or the daemon keeps answering `/health`, the upgrade aborts instead of swapping the binary underneath a live process; `--force` overrides that guard. Release metadata, archives, and checksum files must be served over HTTPS (plain HTTP is accepted only for loopback), and HTTPS-to-HTTP redirect downgrades are rejected.
 
 Alias `agw upgrade` is also supported.
 
@@ -283,7 +292,7 @@ Launch your default browser to open the embedded zero-dependency dashboard hoste
 agw ui
 ```
 
-Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of `config.json`, leaving every other stored setting untouched.
+Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of the configuration file the daemon was started with, leaving every other stored setting untouched. That file is the one supplied through `--config` when present, otherwise `~/.agw/config.json`.
 
 The dashboard and its JSON endpoints are documented in the [Web Dashboard Contract](docs/webui.md): read endpoints stay unauthenticated on loopback, strategy mutation is same-origin restricted, and no token material is ever serialized.
 
@@ -462,6 +471,10 @@ When rate limits occur:
 - HTTP 403 bodies that indicate a permanent terms-of-service suspension (`has been disabled`, `violation of terms of service`, `VALIDATION_REQUIRED`) disable the account persistently with the upstream reason instead of looping it back through 30-minute cooldowns. Transient 403s still cool down and fail over.
 
 Account subscription tiers select the endpoint order: personal (free/Plus/Pro) accounts try `daily-cloudcode-pa.googleapis.com` first, while business and enterprise accounts try `cloudcode-pa.googleapis.com` first. A custom `endpoints` array in `config.json` keeps its configured order; the standard default pair is the only list that gets tier-optimized.
+
+Long Gemini 4 outputs are chained transparently: when upstream stops a candidate with `finishReason: CONTINUATION` and a `continuationToken`, `agw` re-sends the identical request payload with only the token added, for a bounded number of hops, and merges every segment into one client response. Per-model output ceilings are also respected, so `max_tokens`/`max_completion_tokens` requests above the model limit are clamped instead of failing upstream validation.
+
+`host` accepts IPv4 and IPv6 loopback addresses; non-loopback values are coerced back to `127.0.0.1`. IPv6 literals are bracketed everywhere the daemon binds or builds a URL, so `host: "::1"` yields `[::1]:51400`.
 
 ## Development & Verification
 

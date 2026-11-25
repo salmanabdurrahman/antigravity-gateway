@@ -75,12 +75,12 @@ Request body (maximum 8 KB):
 
 Accepted values: `sticky`, `round-robin`, `hybrid`. Anything else returns `400` with the standard API error envelope and leaves the active strategy untouched.
 
-Success returns `200 {"ok":true}`. The daemon applies the strategy in memory immediately and persists only the `strategy` field of `config.json`; a persistence failure is logged but never fails the request, because the in-memory strategy is already active.
+Success returns `200 {"ok":true}`. The daemon applies the strategy in memory immediately and persists only the `strategy` field of the configuration file it was started with (`--config` when supplied, otherwise `~/.agw/config.json`); a persistence failure is logged but never fails the request, because the in-memory strategy is already active.
 
 ## 3. Loopback Constraints
 
 - The listener refuses non-loopback hosts: any configured `host` that is not `127.0.0.1`, `localhost`, or a loopback IP is coerced back to `127.0.0.1`.
-- WebUI endpoints (`/ui`, `/ui/api/status`, `/ui/api/strategy`) validate that incoming HTTP `Host` headers represent a valid loopback interface (`127.0.0.1`, `localhost`, `[::1]`), defending against DNS rebinding attacks. Requests bearing cross-site `Sec-Fetch-Site` headers are rejected with HTTP 403 Forbidden.
+- WebUI endpoints (`/ui`, `/ui/api/status`, `/ui/api/strategy`) validate that incoming HTTP `Host` headers represent a valid loopback interface (`127.0.0.1`, `localhost`, `[::1]`), defending against DNS rebinding attacks. Bracketed IPv6 authorities such as `[::1]:51400` are accepted, so a daemon bound to the IPv6 loopback keeps the dashboard usable. Requests bearing cross-site `Sec-Fetch-Site` headers are rejected with HTTP 403 Forbidden.
 - Dashboard requests are unauthenticated, therefore **never expose the port through a tunnel, reverse proxy, or SSH `-R` forward**. If remote access is required, keep the daemon loopback-bound and use an authenticated SSH local forward to your own machine.
 
 ## 4. Same-Origin Mutation Rule

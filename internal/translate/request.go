@@ -25,19 +25,40 @@ const SkipSignature = "skip_thought_signature_validator"
 
 var (
 	cleanIDRegex      = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	cleanNameRegex    = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 	geminiMajorRegex  = regexp.MustCompile(`^gemini-(\d+)`)
 	dataURLRegex      = regexp.MustCompile(`^data:([^;,]+);base64,(.+)$`)
 	schemaRejectRegex = regexp.MustCompile(`(?i)parameters_?json_?schema`)
 )
 
 // CleanToolCallID normalizes tool call identifiers to match [A-Za-z0-9_-]{1,64} required by Google endpoints.
+// An empty identifier yields an empty string so callers can omit the field entirely instead of
+// emitting a bogus synthetic ID that would not match the paired tool response.
 func CleanToolCallID(id string) string {
 	cleaned := cleanIDRegex.ReplaceAllString(id, "_")
 	if len(cleaned) > 64 {
 		cleaned = cleaned[:64]
 	}
+	return cleaned
+}
+
+// CleanToolName normalizes a tool function name into the [a-zA-Z_][a-zA-Z0-9_]{0,63} shape that
+// Google Cloud Code Assist accepts for function declarations.
+//
+// Protocol Quirk: upstream rejects function names that start with a digit or contain dots, dashes,
+// or other separators commonly emitted by third-party MCP servers. The exact same normalization is
+// applied to declarations and to every replayed tool call or tool response turn, otherwise the model
+// is asked to invoke a name that no longer exists in the declaration list.
+func CleanToolName(name string) string {
+	cleaned := cleanNameRegex.ReplaceAllString(name, "_")
 	if cleaned == "" {
-		return "call"
+		return ""
+	}
+	if first := cleaned[0]; first >= '0' && first <= '9' {
+		cleaned = "_" + cleaned
+	}
+	if len(cleaned) > 64 {
+		cleaned = cleaned[:64]
 	}
 	return cleaned
 }
@@ -229,6 +250,14 @@ type GeminiRequest struct {
 
 	// SessionID is the optional session identifier for conversation continuity.
 	SessionID string `json:"sessionId,omitempty"`
+
+	// ContinuationToken resumes a long-decode generation that upstream truncated mid-stream.
+	//
+	// Protocol Quirk: Gemini 4 long decode stops a candidate with finishReason "CONTINUATION" plus an
+	// opaque continuationToken. The follow-up hop must resend the original payload unchanged
+	// (contents, systemInstruction, tools, maxOutputTokens) with this token set at the top level;
+	// appending the partial model text instead invalidates the continuation.
+	ContinuationToken string `json:"continuationToken,omitempty"`
 }
 
 // AgentEnvelope wraps the GeminiRequest with companion project metadata required by Google endpoints.
@@ -364,7 +393,7 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 			}
 		case "assistant":
 			for _, tc := range msg.ToolCalls {
-				callNames[tc.ID] = tc.Function.Name
+				callNames[tc.ID] = CleanToolName(tc.Function.Name)
 			}
 			parts := buildModelParts(msg, model)
 			pushContent(&contents, "model", parts)
@@ -375,7 +404,7 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 			if name == "" {
 				name = callNames[id]
 			}
-			if name == "" {
+			if name = CleanToolName(name); name == "" {
 				name = "tool"
 			}
 			respPart := FunctionResponse{
@@ -385,7 +414,13 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 			if withID && id != "" {
 				respPart.ID = CleanToolCallID(id)
 			}
-			pushContent(&contents, "user", []Part{{FunctionResponse: &respPart}})
+			// Tool messages can carry image blocks next to their text output; forward them as
+			// inlineData parts so multimodal tool loops keep their visual context.
+			parts := []Part{{FunctionResponse: &respPart}}
+			for _, inline := range extractInlineImages(msg.Content) {
+				parts = append(parts, Part{InlineData: inline})
+			}
+			pushContent(&contents, "user", parts)
 		default:
 			parts := buildUserParts(msg.Content)
 			pushContent(&contents, "user", parts)
@@ -625,6 +660,54 @@ func buildUserParts(content any) []Part {
 	}
 }
 
+// extractInlineImages collects every image block inside a tool result payload as inline data.
+//
+// Protocol Quirk: tool results reach the gateway in two shapes. Anthropic bundles typed `image`
+// blocks (with a base64 `source`) next to `text` blocks, while OpenAI tool messages expose
+// `image_url` blocks whose URL may be a data: URL. Both must become inlineData parts, otherwise
+// multimodal MCP and browser tools are silently blinded. Non-data URLs are skipped because Google
+// Cloud Code Assist cannot fetch remote images.
+func extractInlineImages(content any) []*InlineData {
+	items, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+
+	var images []*InlineData
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch itemType, _ := m["type"].(string); itemType {
+		case "image":
+			src, ok := m["source"].(map[string]any)
+			if !ok {
+				continue
+			}
+			mediaType, _ := src["media_type"].(string)
+			data, _ := src["data"].(string)
+			if mediaType != "" && data != "" {
+				images = append(images, &InlineData{MimeType: mediaType, Data: data})
+			}
+		case "image_url":
+			var urlStr string
+			if rawURL, ok := m["image_url"].(string); ok {
+				urlStr = rawURL
+			} else if imgMap, ok := m["image_url"].(map[string]any); ok {
+				urlStr, _ = imgMap["url"].(string)
+			}
+			if !strings.HasPrefix(urlStr, "data:") {
+				continue
+			}
+			if inline := parseDataURL(urlStr); inline != nil {
+				images = append(images, inline)
+			}
+		}
+	}
+	return images
+}
+
 // parseDataURL extracts MIME type and raw base64 data from a data: URL string.
 func parseDataURL(urlStr string) *InlineData {
 	matches := dataURLRegex.FindStringSubmatch(urlStr)
@@ -651,7 +734,7 @@ func buildModelParts(msg ChatMessage, model string) []Part {
 			argsMap = make(map[string]any)
 		}
 		fc := &FunctionCallPart{
-			Name: tc.Function.Name,
+			Name: CleanToolName(tc.Function.Name),
 			Args: argsMap,
 		}
 		if withID {
@@ -784,7 +867,7 @@ func convertTools(tools []any, model string, legacy bool) []map[string]any {
 			continue
 		}
 		name, _ := fn["name"].(string)
-		if name == "" {
+		if name = CleanToolName(name); name == "" {
 			continue
 		}
 
@@ -849,12 +932,17 @@ func forcesTool(choice any) bool {
 }
 
 // adjustFixedBudget bounds requested reasoning budgets within model minimums and maximum output limits.
+// When the catalog has no output ceiling for the model, the generic Gemini ceiling is assumed so the
+// budget is never collapsed to zero (which would disable reasoning) or to a one-token output limit.
 func adjustFixedBudget(info catalog.CatalogModel, budget int, maxOut *int) (*int, *int) {
 	if strings.Contains(strings.ToLower(info.ID), "2.5") && budget > Gemini25MaxThinkingBudget {
 		budget = Gemini25MaxThinkingBudget
 	}
 
-	limit := max(1, info.MaxOutputTokens)
+	limit := info.MaxOutputTokens
+	if limit <= 0 {
+		limit = MaxGeminiOutputTokens
+	}
 	minBudget := 0
 	if info.MinThinkingBudget != nil {
 		minBudget = *info.MinThinkingBudget

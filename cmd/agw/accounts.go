@@ -18,6 +18,10 @@ var (
 	// checkAccountsQuota toggles live upstream quota inspection when listing accounts.
 	checkAccountsQuota bool
 
+	// checkAccountsReenable opts in to clearing the disabled flag for accounts whose refresh token
+	// still exchanges successfully during a live --check inspection.
+	checkAccountsReenable bool
+
 	// accountsCmd lists configured Google Antigravity accounts and their statuses.
 	accountsCmd = &cobra.Command{
 		Use:   "accounts",
@@ -32,11 +36,16 @@ Never reveals access or refresh tokens.`,
 
 func init() {
 	accountsCmd.Flags().BoolVar(&checkAccountsQuota, "check", false, "Query live quota remaining per account")
+	accountsCmd.Flags().BoolVar(&checkAccountsReenable, "re-enable", false, "Re-enable disabled accounts whose credentials still work (requires --check)")
 	rootCmd.AddCommand(accountsCmd)
 }
 
 // runAccounts reads configured accounts from disk and renders a formatted status table.
 func runAccounts(cmd *cobra.Command, args []string) error {
+	if checkAccountsReenable && !checkAccountsQuota {
+		return errors.New("--re-enable requires --check: it only clears the disabled flag for accounts verified during a live quota inspection")
+	}
+
 	accPath, err := config.AccountsFilePath()
 	if err != nil {
 		return fmt.Errorf("resolving accounts file path: %w", err)
@@ -122,8 +131,16 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 				}
 			} else {
 				if acc.Disabled {
-					_ = accountStore.SetDisabled(acc.Email, false, "")
-					status = "Active"
+					// A live inspection must not silently mutate stored account state: re-enabling a
+					// disabled or ToS-flagged account requires the explicit --re-enable opt-in.
+					if checkAccountsReenable {
+						if reEnableErr := accountStore.SetDisabled(acc.Email, false, ""); reEnableErr != nil {
+							return fmt.Errorf("re-enabling account %s: %w", acc.Email, reEnableErr)
+						}
+						status = "Active"
+					} else {
+						status = "Disabled (credentials valid; rerun with --re-enable to activate)"
+					}
 				}
 
 				snap, fetchErr := catalog.FetchCatalogForTier(ctx, cfg, nil, tokenRes.AccessToken, acc.ProjectID, acc.Tier)

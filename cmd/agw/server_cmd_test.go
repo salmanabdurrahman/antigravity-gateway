@@ -374,3 +374,24 @@ func TestEndToEndStartDetectsOrphanDaemon(t *testing.T) {
 		t.Errorf("expected restored pid file to contain %d, got %d", pid, restoredPID)
 	}
 }
+
+// TestDetachArgsForwardConfig verifies the detached child receives every launch override, including a
+// custom --config path, so it never silently falls back to the default configuration file.
+func TestDetachArgsForwardConfig(t *testing.T) {
+	args := detachArgs("round-robin", 51999, "/tmp/custom-config.json")
+	want := []string{"--strategy", "round-robin", "--port", "51999", "--config", "/tmp/custom-config.json"}
+
+	if len(args) != len(want) {
+		t.Fatalf("detachArgs length = %d, want %d (%v)", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("detachArgs[%d] = %q, want %q (full: %v)", i, args[i], want[i], args)
+		}
+	}
+
+	// Defaults must never emit empty flag values.
+	if got := detachArgs("", 0, ""); len(got) != 0 {
+		t.Errorf("expected no forwarded flags for defaults, got %v", got)
+	}
+}

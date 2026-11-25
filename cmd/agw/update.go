@@ -2,7 +2,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -54,6 +53,35 @@ func init() {
 	updateCmd.Flags().BoolVar(&updateForce, "force", false, "Force download and reinstall even if already up to date")
 	updateCmd.Flags().BoolVar(&updateNoRestart, "no-restart", false, "Do not restart running background daemon after update")
 	rootCmd.AddCommand(updateCmd)
+}
+
+// daemonHealth probes the local gateway /health endpoint and reports the daemon PID together with
+// whether a gateway daemon is actually answering. The health identity probe is authoritative: a
+// foreign listener on the same port is never reported as a gateway daemon.
+func daemonHealth(ctx context.Context, cfg *config.Config) (int, bool) {
+	if cfg == nil {
+		return 0, false
+	}
+	host := config.LoopbackHost(cfg.Host)
+	port := cfg.Port
+	if port <= 0 {
+		port = config.DefaultPort
+	}
+
+	healthCtx, cancel := context.WithTimeout(ctx, server.DefaultHealthTimeout)
+	health, err := server.CheckHealth(healthCtx, config.URL(host, port, "/health"))
+	cancel()
+	if err != nil || health == nil || !health.OK || health.Name != server.ServerName {
+		return 0, false
+	}
+
+	pid := 0
+	if pidFile, pidErr := config.PIDFilePath(); pidErr == nil {
+		// A missing or unreadable PID file only degrades the reported PID; the health probe already
+		// proved a gateway daemon is serving the loopback port.
+		pid, _ = server.ReadPID(pidFile)
+	}
+	return pid, true
 }
 
 // runUpdate executes the update command flow: release query, verification, atomic replacement, and daemon restart.
@@ -117,30 +145,28 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolving symlink for current executable: %w", err)
 	}
 
-	// Check if daemon is currently running so we can coordinate restart
+	// Check if daemon is currently running so we can stop it before the swap and restart it afterwards.
+	// The probe runs even with --no-restart: the binary still must not be replaced under a live process.
 	cfg, cfgErr := loadConfig()
 	daemonWasRunning := false
 	var runningDaemonPID int
-	if cfgErr == nil && cfg != nil && !updateNoRestart {
-		host := cmp.Or(cfg.Host, config.DefaultHost)
-		port := cmp.Or(cfg.Port, config.DefaultPort)
-		healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
-		healthCtx, cancel := context.WithTimeout(ctx, server.DefaultHealthTimeout)
-		health, healthErr := server.CheckHealth(healthCtx, healthURL)
-		cancel()
-		if healthErr == nil && health != nil && health.OK && health.Name == server.ServerName {
-			daemonWasRunning = true
-			if pidFile, err := config.PIDFilePath(); err == nil {
-				runningDaemonPID, _ = server.ReadPID(pidFile)
-			}
-		}
+	if cfgErr == nil && cfg != nil {
+		runningDaemonPID, daemonWasRunning = daemonHealth(ctx, cfg)
 	}
 
-	// Stop running daemon before replacing executable
+	// Stop running daemon before replacing executable. A daemon that keeps running while its binary
+	// is swapped can serve a mixture of old and new code and will silently re-create the PID file, so
+	// replacement is aborted unless --force is supplied.
 	if daemonWasRunning {
 		cmd.Printf("--> Stopping active daemon (PID: %d) before binary replacement...\n", runningDaemonPID)
 		if _, stopErr := server.StopDetached(cfg); stopErr != nil {
-			cmd.PrintErrf("Warning: graceful daemon stop returned: %v\n", stopErr)
+			if !updateForce {
+				return fmt.Errorf("stopping the running daemon before binary replacement: %w (rerun with --force to replace the binary anyway)", stopErr)
+			}
+			cmd.PrintErrf("Warning: graceful daemon stop returned: %v; continuing because --force was supplied\n", stopErr)
+		}
+		if pid, stillRunning := daemonHealth(ctx, cfg); stillRunning && !updateForce {
+			return fmt.Errorf("daemon (PID: %d) is still answering /health after the stop request; refusing to replace the running binary (rerun with --force to override)", pid)
 		}
 	}
 
@@ -150,16 +176,27 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 	cmd.Printf("✓ Successfully updated Antigravity Gateway to v%s!\n", rel.TargetVersion)
 
-	// Restart daemon if it was running previously
+	// Restart daemon if it was running previously, forwarding the same --config path so the new
+	// process reads the identical configuration the operator launched it with. With --no-restart the
+	// daemon is left stopped and the operator is told how to bring it back.
 	if daemonWasRunning {
-		cmd.Println("--> Restarting Antigravity Gateway daemon in background...")
-		newPID, logFile, startErr := server.StartDetached(cfg, nil)
-		if startErr != nil {
-			cmd.PrintErrf("Warning: failed restarting daemon automatically: %v\n", startErr)
-			cmd.Println("Start the daemon manually with: agw start -d")
+		if updateNoRestart {
+			cmd.Println("--> Daemon stopped for the binary replacement; --no-restart was supplied, so it was not restarted.")
+			cmd.Println("    Start it again with: agw start -d")
 		} else {
-			cmd.Printf("✓ Antigravity Gateway daemon restarted successfully (PID: %d).\n", newPID)
-			cmd.Printf("  Logs appended to: %s\n", logFile)
+			cmd.Println("--> Restarting Antigravity Gateway daemon in background...")
+			var restartArgs []string
+			if cfgFile != "" {
+				restartArgs = append(restartArgs, "--config", cfgFile)
+			}
+			newPID, logFile, startErr := server.StartDetached(cfg, restartArgs)
+			if startErr != nil {
+				cmd.PrintErrf("Warning: failed restarting daemon automatically: %v\n", startErr)
+				cmd.Println("Start the daemon manually with: agw start -d")
+			} else {
+				cmd.Printf("✓ Antigravity Gateway daemon restarted successfully (PID: %d).\n", newPID)
+				cmd.Printf("  Logs appended to: %s\n", logFile)
+			}
 		}
 	}
 

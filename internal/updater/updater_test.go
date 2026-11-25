@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -277,5 +278,122 @@ func TestApplyBinaryAtomicUpgrade(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 		t.Errorf("expected 0755 permissions, got %o", info.Mode().Perm())
+	}
+}
+
+// TestExtractBinaryFromArchiveRejectsNonRegularEntries verifies directory and symlink entries named
+// agw are rejected instead of being extracted as empty or foreign bytes.
+func TestExtractBinaryFromArchiveRejectsNonRegularEntries(t *testing.T) {
+	t.Run("tar symlink", func(t *testing.T) {
+		var tarGzBuf bytes.Buffer
+		gw := gzip.NewWriter(&tarGzBuf)
+		tw := tar.NewWriter(gw)
+		_ = tw.WriteHeader(&tar.Header{Name: "agw", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd", Mode: 0o755})
+		_ = tw.Close()
+		_ = gw.Close()
+
+		if _, err := ExtractBinaryFromArchive(tarGzBuf.Bytes(), false); !errors.Is(err, ErrUnsafeArchiveEntry) {
+			t.Fatalf("expected ErrUnsafeArchiveEntry for tar symlink, got %v", err)
+		}
+	})
+
+	t.Run("tar directory", func(t *testing.T) {
+		var tarGzBuf bytes.Buffer
+		gw := gzip.NewWriter(&tarGzBuf)
+		tw := tar.NewWriter(gw)
+		_ = tw.WriteHeader(&tar.Header{Name: "agw", Typeflag: tar.TypeDir, Mode: 0o755})
+		_ = tw.Close()
+		_ = gw.Close()
+
+		if _, err := ExtractBinaryFromArchive(tarGzBuf.Bytes(), false); !errors.Is(err, ErrUnsafeArchiveEntry) {
+			t.Fatalf("expected ErrUnsafeArchiveEntry for tar directory, got %v", err)
+		}
+	})
+
+	t.Run("zip directory", func(t *testing.T) {
+		var zipBuf bytes.Buffer
+		zw := zip.NewWriter(&zipBuf)
+		if _, err := zw.Create("agw/"); err != nil {
+			t.Fatalf("creating zip directory entry: %v", err)
+		}
+		if _, err := zw.Create("agw"); err != nil {
+			t.Fatalf("creating zip file entry: %v", err)
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("closing zip writer: %v", err)
+		}
+
+		// The directory entry named "agw" must be rejected rather than skipped silently.
+		if _, err := ExtractBinaryFromArchive(zipBuf.Bytes(), true); !errors.Is(err, ErrUnsafeArchiveEntry) {
+			t.Fatalf("expected ErrUnsafeArchiveEntry for zip directory, got %v", err)
+		}
+	})
+}
+
+// TestDownloadAndVerifyRejectsOversizeArchive verifies a payload larger than the accepted archive
+// ceiling fails loudly instead of being silently truncated into a corrupt archive.
+func TestDownloadAndVerifyRejectsOversizeArchive(t *testing.T) {
+	ctx := t.Context()
+
+	oversize := bytes.Repeat([]byte("A"), maxArchiveSizeBytes+16)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/SHA256SUMS"):
+			_, _ = w.Write([]byte("deadbeef  agw_test.tar.gz\n"))
+		default:
+			_, _ = w.Write(oversize)
+		}
+	}))
+	defer ts.Close()
+
+	release := &ReleaseInfo{
+		ArchiveName:  "agw_test.tar.gz",
+		ArchiveURL:   ts.URL + "/agw_test.tar.gz",
+		ChecksumsURL: ts.URL + "/SHA256SUMS",
+	}
+
+	if _, err := DownloadAndVerify(ctx, release, ts.Client()); !errors.Is(err, ErrArchiveTooLarge) {
+		t.Fatalf("expected ErrArchiveTooLarge, got %v", err)
+	}
+}
+
+// TestCheckUpdateRejectsInsecureURLs verifies release endpoints and asset URLs must use HTTPS
+// unless they point at loopback, so the GitHub token can never be sent over plain HTTP.
+func TestCheckUpdateRejectsInsecureURLs(t *testing.T) {
+	ctx := t.Context()
+
+	if _, err := CheckUpdate(ctx, "http://example.com/releases/latest", "0.1.1", "", nil); !errors.Is(err, ErrInsecureURL) {
+		t.Fatalf("expected ErrInsecureURL for plain HTTP release endpoint, got %v", err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitHubRelease{
+			TagName: "v0.2.0",
+			Assets: []ReleaseAsset{{
+				Name:               FormatArchiveName("0.2.0", runtime.GOOS, runtime.GOARCH),
+				BrowserDownloadURL: "http://example.com/download/agw.tar.gz",
+			}},
+		})
+	}))
+	defer ts.Close()
+
+	if _, err := CheckUpdate(ctx, ts.URL, "0.1.1", "", ts.Client()); !errors.Is(err, ErrInsecureURL) {
+		t.Fatalf("expected ErrInsecureURL for plain HTTP asset URL, got %v", err)
+	}
+}
+
+// TestCheckUpdateRejectsRedirectDowngrade verifies an HTTPS release endpoint that redirects to plain
+// HTTP is refused before the authorization header can be forwarded.
+func TestCheckUpdateRejectsRedirectDowngrade(t *testing.T) {
+	ctx := t.Context()
+
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://example.com/releases/latest", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	if _, err := CheckUpdate(ctx, ts.URL, "0.1.1", "", ts.Client()); !errors.Is(err, ErrInsecureURL) {
+		t.Fatalf("expected ErrInsecureURL for HTTPS to HTTP redirect downgrade, got %v", err)
 	}
 }

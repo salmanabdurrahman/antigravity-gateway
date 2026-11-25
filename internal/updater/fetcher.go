@@ -15,7 +15,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +40,10 @@ const (
 
 	// maxChecksumSizeBytes bounds downloaded SHA256SUMS files to 1 MB.
 	maxChecksumSizeBytes = 1024 * 1024
+
+	// maxBinarySizeBytes bounds the extracted executable so a decompression bomb inside an otherwise
+	// small archive cannot exhaust process memory.
+	maxBinarySizeBytes = 128 * 1024 * 1024
 )
 
 var (
@@ -49,6 +55,16 @@ var (
 
 	// ErrBinaryNotFoundInArchive indicates that the agw executable was missing from the release archive.
 	ErrBinaryNotFoundInArchive = errors.New("agw executable not found inside release archive")
+
+	// ErrUnsafeArchiveEntry indicates that the archive entry named agw is not a regular file or grows
+	// beyond the extraction ceiling, so extracting it would corrupt or exhaust the replacement binary.
+	ErrUnsafeArchiveEntry = errors.New("release archive contains an unsafe agw entry")
+
+	// ErrArchiveTooLarge indicates that the downloaded release archive exceeded the accepted size.
+	ErrArchiveTooLarge = errors.New("release archive exceeds the maximum accepted size")
+
+	// ErrInsecureURL indicates that a release URL would be fetched over an insecure transport.
+	ErrInsecureURL = errors.New("refusing to fetch release artifacts over an insecure URL")
 
 	// ErrUnsupportedPlatform indicates that the current OS or architecture has no compiled release assets.
 	ErrUnsupportedPlatform = errors.New("unsupported operating system or CPU architecture")
@@ -114,6 +130,56 @@ type ReleaseInfo struct {
 	UpdateAvailable bool
 }
 
+// isHTTPSOrLoopback reports whether rawURL is safe to fetch: HTTPS always, and plain HTTP only for
+// loopback hosts so local mirrors and httptest servers keep working without weakening transport
+// security for real downloads.
+func isHTTPSOrLoopback(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch parsed.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := parsed.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
+	}
+}
+
+// guardRedirects returns a copy of client whose redirect policy refuses any hop that would downgrade
+// the transport or leave HTTPS for a non-loopback host.
+//
+// Protocol Quirk: the release API is queried with "Authorization: Bearer $GITHUB_TOKEN", and Go only
+// strips that header on cross-host redirects. A redirect chain ending on plain HTTP would therefore
+// leak the token, so every redirect target is validated before it is followed.
+func guardRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		return nil
+	}
+	guarded := *client
+	previous := client.CheckRedirect
+	guarded.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !isHTTPSOrLoopback(req.URL.String()) {
+			return fmt.Errorf("%w: redirect to %s", ErrInsecureURL, req.URL.Redacted())
+		}
+		if previous != nil {
+			return previous(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &guarded
+}
+
 // CheckUpdate queries the GitHub Releases API and evaluates if an update is available for the current host.
 func CheckUpdate(ctx context.Context, repo, currentVersion, requestedVersion string, httpClient *http.Client) (*ReleaseInfo, error) {
 	if repo == "" {
@@ -122,6 +188,7 @@ func CheckUpdate(ctx context.Context, repo, currentVersion, requestedVersion str
 	if httpClient == nil {
 		httpClient = config.DefaultHTTPClient(DefaultFetchTimeout)
 	}
+	httpClient = guardRedirects(httpClient)
 
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	if strings.HasPrefix(repo, "http://") || strings.HasPrefix(repo, "https://") {
@@ -129,6 +196,9 @@ func CheckUpdate(ctx context.Context, repo, currentVersion, requestedVersion str
 	} else if requestedVersion != "" {
 		clean := strings.TrimPrefix(requestedVersion, "v")
 		apiURL = fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/v%s", repo, clean)
+	}
+	if !isHTTPSOrLoopback(apiURL) {
+		return nil, fmt.Errorf("%w: release endpoint %s must use HTTPS", ErrInsecureURL, apiURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
@@ -181,6 +251,14 @@ func CheckUpdate(ctx context.Context, repo, currentVersion, requestedVersion str
 	}
 	if checksumsURL == "" {
 		checksumsURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/SHA256SUMS", repo, ghRelease.TagName)
+	}
+
+	// Assets come from the release JSON and must not be able to downgrade the transport used for the
+	// checksum and archive downloads.
+	for _, assetURL := range []string{archiveURL, checksumsURL} {
+		if !isHTTPSOrLoopback(assetURL) {
+			return nil, fmt.Errorf("%w: release asset %s must use HTTPS", ErrInsecureURL, assetURL)
+		}
 	}
 
 	isNewer := CompareSemver(cleanTarget, cleanCurrent) > 0
@@ -241,6 +319,13 @@ func DownloadAndVerify(ctx context.Context, release *ReleaseInfo, httpClient *ht
 	if httpClient == nil {
 		httpClient = config.DefaultHTTPClient(DefaultFetchTimeout)
 	}
+	httpClient = guardRedirects(httpClient)
+
+	for _, targetURL := range []string{release.ChecksumsURL, release.ArchiveURL} {
+		if !isHTTPSOrLoopback(targetURL) {
+			return nil, fmt.Errorf("%w: %s must use HTTPS", ErrInsecureURL, targetURL)
+		}
+	}
 
 	// Step 1: Download SHA256SUMS
 	checksumReq, err := http.NewRequestWithContext(ctx, http.MethodGet, release.ChecksumsURL, nil)
@@ -282,9 +367,14 @@ func DownloadAndVerify(ctx context.Context, release *ReleaseInfo, httpClient *ht
 		return nil, fmt.Errorf("downloading archive failed (HTTP %d)", archiveResp.StatusCode)
 	}
 
-	archiveBytes, err := io.ReadAll(io.LimitReader(archiveResp.Body, maxArchiveSizeBytes))
+	archiveBytes, err := io.ReadAll(io.LimitReader(archiveResp.Body, maxArchiveSizeBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading archive payload: %w", err)
+	}
+	// Read one byte past the limit so oversized payloads fail loudly instead of being silently
+	// truncated into a corrupt archive that only fails later during extraction.
+	if int64(len(archiveBytes)) > maxArchiveSizeBytes {
+		return nil, fmt.Errorf("%w: expected at most %d bytes", ErrArchiveTooLarge, maxArchiveSizeBytes)
 	}
 
 	// Step 3: Verify Cryptographic Digest
@@ -321,7 +411,23 @@ func ParseChecksumForArchive(checksumsContent, archiveName string) (string, erro
 	return "", fmt.Errorf("archive %q not found in checksums file", archiveName)
 }
 
+// readCappedBinary reads an extracted executable while enforcing an explicit size ceiling so a
+// decompression bomb inside an otherwise small archive cannot exhaust process memory.
+func readCappedBinary(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBinarySizeBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading extracted executable: %w", err)
+	}
+	if len(data) > maxBinarySizeBytes {
+		return nil, fmt.Errorf("%w: extracted executable exceeds %d bytes", ErrUnsafeArchiveEntry, maxBinarySizeBytes)
+	}
+	return data, nil
+}
+
 // ExtractBinaryFromArchive extracts the compiled executable ("agw" or "agw.exe") from a tar.gz or zip buffer.
+//
+// Only regular files are accepted: a directory or symlink entry named agw would otherwise be extracted
+// as empty (or foreign) bytes and corrupt the installed executable during ApplyBinary.
 func ExtractBinaryFromArchive(archiveBytes []byte, isZip bool) ([]byte, error) {
 	if isZip {
 		zipReader, err := zip.NewReader(bytes.NewReader(archiveBytes), int64(len(archiveBytes)))
@@ -331,14 +437,18 @@ func ExtractBinaryFromArchive(archiveBytes []byte, isZip bool) ([]byte, error) {
 
 		for _, file := range zipReader.File {
 			baseName := filepath.Base(file.Name)
-			if baseName == "agw.exe" || baseName == "agw" {
-				rc, err := file.Open()
-				if err != nil {
-					return nil, fmt.Errorf("opening file inside zip: %w", err)
-				}
-				defer rc.Close()
-				return io.ReadAll(rc)
+			if baseName != "agw.exe" && baseName != "agw" {
+				continue
 			}
+			if !file.Mode().IsRegular() {
+				return nil, fmt.Errorf("%w: zip entry %q has mode %s", ErrUnsafeArchiveEntry, file.Name, file.Mode())
+			}
+			rc, err := file.Open()
+			if err != nil {
+				return nil, fmt.Errorf("opening file inside zip: %w", err)
+			}
+			defer rc.Close()
+			return readCappedBinary(rc)
 		}
 		return nil, ErrBinaryNotFoundInArchive
 	}
@@ -361,9 +471,15 @@ func ExtractBinaryFromArchive(archiveBytes []byte, isZip bool) ([]byte, error) {
 		}
 
 		baseName := filepath.Base(header.Name)
-		if baseName == "agw" || baseName == "agw.exe" {
-			return io.ReadAll(tarReader)
+		if baseName != "agw" && baseName != "agw.exe" {
+			continue
 		}
+		// Symlink, hardlink, and directory entries named agw must never be extracted: TypeReg covers the
+		// modern regular-file marker and TypeRegA the historical NUL/"0" variant emitted by older tar tools.
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return nil, fmt.Errorf("%w: tar entry %q has typeflag %q", ErrUnsafeArchiveEntry, header.Name, header.Typeflag)
+		}
+		return readCappedBinary(tarReader)
 	}
 
 	return nil, ErrBinaryNotFoundInArchive

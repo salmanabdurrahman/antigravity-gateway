@@ -159,7 +159,7 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 | :----------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------- |
 | `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages                                                     |
 | `docs/`                  | Architectural specifications & contracts          | OAuth strategy, binary distribution, web dashboard, and installation contracts                                    |
-| `internal/config/`       | Config, paths, upstream headers                   | Handles `~/.agw` path resolution and env overrides                                                                |
+| `internal/config/`       | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                           |
 | `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                   |
 | `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                                                        |
 | `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                |

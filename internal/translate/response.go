@@ -36,6 +36,11 @@ func MapFinishReason(reason string, hasToolCalls bool) string {
 	if reason == "MAX_TOKENS" {
 		return "length"
 	}
+	if reason == "CONTINUATION" {
+		// Long decode stopped at the per-request output boundary. When the router cannot chain
+		// another hop this is reported as a length stop rather than an unknown reason.
+		return "length"
+	}
 	if slices.Contains(blockedReasons, reason) {
 		return "content_filter"
 	}
@@ -237,6 +242,9 @@ type ResponseTranslator struct {
 	// sawOutput tracks whether any content was emitted.
 	sawOutput bool
 
+	// continuationToken holds the long-decode continuation token of the current hop, if any.
+	continuationToken string
+
 	// onDelta receives incremental translated deltas.
 	onDelta func(Delta)
 }
@@ -270,6 +278,9 @@ func (t *ResponseTranslator) Push(event map[string]any) {
 
 	if candidates, ok := response["candidates"].([]any); ok && len(candidates) > 0 {
 		if cand, ok := candidates[0].(map[string]any); ok {
+			if token, ok := cand["continuationToken"].(string); ok && token != "" {
+				t.continuationToken = token
+			}
 			if content, ok := cand["content"].(map[string]any); ok {
 				if parts, ok := content["parts"].([]any); ok {
 					for _, p := range parts {
@@ -415,6 +426,17 @@ func (t *ResponseTranslator) Usage() *Usage {
 // SawOutput reports whether any model text, thought, or tool call parts were encountered.
 func (t *ResponseTranslator) SawOutput() bool {
 	return t.sawOutput
+}
+
+// ContinuationToken returns the long-decode continuation token captured from the current hop.
+func (t *ResponseTranslator) ContinuationToken() string {
+	return t.continuationToken
+}
+
+// ClearContinuationToken discards the token captured so far, so the next hop's upstream response is
+// what decides whether another continuation is required.
+func (t *ResponseTranslator) ClearContinuationToken() {
+	t.continuationToken = ""
 }
 
 // Completion returns a full OpenAI ChatCompletion response representation for non-streaming requests.
