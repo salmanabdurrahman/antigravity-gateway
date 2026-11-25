@@ -81,6 +81,26 @@ func TestClampThinkingBudgetHardCapDisablesTinyCeiling(t *testing.T) {
 	}
 }
 
+// TestClampThinkingBudgetAppliesGptOSSFloor verifies a sub-floor numeric budget for gpt-oss collapses to
+// zero so callers omit the thinking configuration rather than trigger an invalid effort tier upstream.
+func TestClampThinkingBudgetAppliesGptOSSFloor(t *testing.T) {
+	budget, maxOut := ClampThinkingBudget("gpt-oss-120b-medium", 8192, 1024, 32768, false, true)
+	if maxOut != 1024 {
+		t.Errorf("expected the explicit maxOut 1024 preserved, got %d", maxOut)
+	}
+	if budget != 0 {
+		t.Errorf("expected reasoning disabled below the gpt-oss floor, got %d", budget)
+	}
+
+	budget, maxOut = ClampThinkingBudget("gpt-oss-120b-medium", 8192, 4096, 32768, false, true)
+	if maxOut != 4096 {
+		t.Errorf("expected the explicit maxOut 4096 preserved, got %d", maxOut)
+	}
+	if budget != 2048 {
+		t.Errorf("expected budget halved to 2048, got %d", budget)
+	}
+}
+
 // TestInjectInterruptedToolResponses verifies synthetic tool responses are injected
 // when a user interrupts a pending model tool call.
 func TestInjectInterruptedToolResponses(t *testing.T) {

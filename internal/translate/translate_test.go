@@ -1119,6 +1119,44 @@ func TestBuildRequestTightCapDisablesClaudeThinking(t *testing.T) {
 	}
 }
 
+// TestAdjustFixedBudgetAppliesGptOSSFloor verifies gpt-oss caps below its 1024-token numeric budget floor
+// disable reasoning instead of sending a budget upstream maps to an invalid effort tier.
+func TestAdjustFixedBudgetAppliesGptOSSFloor(t *testing.T) {
+	info := catalog.CatalogModel{ID: "gpt-oss-120b-medium", MaxOutputTokens: 32768}
+
+	smallCap := 1024
+	budget, adjusted := adjustFixedBudget(info, 8192, &smallCap)
+	if adjusted == nil || *adjusted != 1024 {
+		t.Fatalf("expected the explicit maxOutputTokens 1024 preserved, got %v", adjusted)
+	}
+	if budget != nil {
+		t.Fatalf("expected reasoning disabled below the gpt-oss floor, got %v", *budget)
+	}
+
+	fittingCap := 2048
+	budget, adjusted = adjustFixedBudget(info, 8192, &fittingCap)
+	if adjusted == nil || *adjusted != 2048 {
+		t.Fatalf("expected the explicit maxOutputTokens 2048 preserved, got %v", adjusted)
+	}
+	if budget == nil || *budget != 1024 {
+		t.Fatalf("expected budget clamped to the gpt-oss floor 1024, got %v", budget)
+	}
+}
+
+// TestAdjustFixedBudgetGptOSSWithoutCapPreservesBudget verifies the gpt-oss floor does not disturb the
+// no-cap path, where the catalog reasoning budget and its headroom are kept as before.
+func TestAdjustFixedBudgetGptOSSWithoutCapPreservesBudget(t *testing.T) {
+	info := catalog.CatalogModel{ID: "gpt-oss-120b-medium", MaxOutputTokens: 32768}
+
+	budget, adjusted := adjustFixedBudget(info, 8192, nil)
+	if budget == nil || *budget != 8192 {
+		t.Fatalf("expected the catalog gpt-oss budget 8192 preserved, got %v", budget)
+	}
+	if adjusted == nil || *adjusted != 8192+thinkingHeadroomTokens {
+		t.Fatalf("expected maxOutputTokens %d, got %v", 8192+thinkingHeadroomTokens, adjusted)
+	}
+}
+
 // TestBuildRequestToolChoiceNoneOmitsTools verifies tool_choice "none" removes declarations entirely,
 // because upstream can still call a declared tool even with functionCallingConfig mode NONE.
 func TestBuildRequestToolChoiceNoneOmitsTools(t *testing.T) {

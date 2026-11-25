@@ -25,10 +25,22 @@ const MaxGeminiOutputTokens = 65536
 // still emit its final answer after finishing the chain of thought.
 const thinkingHeadroomTokens = 8192
 
-// minClaudeThinkingBudget is the smallest numeric thinking budget upstream accepts for Claude models.
-// Cloud Code rejects smaller values with "budget_tokens: Input should be greater than or equal to 1024",
-// so a tighter client output cap disables reasoning instead of sending an invalid budget.
-const minClaudeThinkingBudget = 1024
+// minNumericThinkingBudget is the smallest numeric thinking budget upstream accepts for Claude models and
+// for gpt-oss models. Cloud Code rejects smaller Claude values with "budget_tokens: Input should be
+// greater than or equal to 1024", and it maps a sub-1024 gpt-oss budget to the invalid
+// `reasoning_effort: "minimal"` tier, so a tighter client output cap disables reasoning instead of
+// sending an invalid budget.
+const minNumericThinkingBudget = 1024
+
+// numericThinkingFloor returns the smallest numeric reasoning budget the model family accepts upstream.
+// The catalog minimum wins when it is already higher; Gemini families that use an adaptive or numeric
+// budget rely on the catalog value (and adaptive models never send a numeric budget at all).
+func numericThinkingFloor(model string, isClaude bool) int {
+	if isClaude || strings.HasPrefix(strings.ToLower(model), "gpt-oss") {
+		return minNumericThinkingBudget
+	}
+	return 0
+}
 
 // claudeVersionRegex extracts the major/minor generation number from Claude model identifiers,
 // covering both family-first (claude-sonnet-4-6) and version-first (claude-4-6-sonnet) spellings.
@@ -142,8 +154,8 @@ func ClampThinkingBudget(model string, requestedBudget, maxOutputTokens, modelMa
 		budget = adjustedMaxTokens / 2
 	}
 
-	if isClaude && budget < minClaudeThinkingBudget {
-		// Claude enforces a 1024-token floor, so a tighter ceiling disables reasoning entirely.
+	if floor := numericThinkingFloor(model, isClaude); budget > 0 && budget < floor {
+		// The family rejects sub-floor budgets, so a tighter ceiling disables reasoning entirely.
 		budget = 0
 	}
 

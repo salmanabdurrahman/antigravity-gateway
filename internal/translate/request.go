@@ -985,10 +985,10 @@ func adjustFixedBudget(info catalog.CatalogModel, budget int, maxOut *int) (*int
 	if info.MinThinkingBudget != nil {
 		minBudget = *info.MinThinkingBudget
 	}
-	// Claude rejects budgets below its protocol floor, so an explicit cap tighter than the floor has to
-	// disable reasoning rather than send an invalid envelope.
-	if config.IsClaude(info.ID) && minBudget < minClaudeThinkingBudget {
-		minBudget = minClaudeThinkingBudget
+	// Families with a protocol budget floor (Claude, gpt-oss) reject smaller budgets, so an explicit cap
+	// tighter than the floor has to disable reasoning rather than send an invalid envelope.
+	if floor := numericThinkingFloor(info.ID, config.IsClaude(info.ID)); minBudget < floor {
+		minBudget = floor
 	}
 	b := min(max(minBudget, budget), limit-1)
 	if b < minBudget {
