@@ -24,7 +24,7 @@ func TestDefaultHeaders(t *testing.T) {
 	cfg := DefaultConfig()
 	headers := BuildUpstreamHeaders(cfg, "test-access-token", "gemini-2.5-pro")
 
-	expectedUA := fmt.Sprintf("antigravity/ide/2.11.0 (aidev_client; os_type=%s; arch=%s)", runtime.GOOS, runtime.GOARCH)
+	expectedUA := fmt.Sprintf("antigravity/hub/2.33.0 (aidev_client; os_type=%s; arch=%s; cl=1023160026)", runtime.GOOS, runtime.GOARCH)
 	if headers["User-Agent"] != expectedUA {
 		t.Errorf("User-Agent = %q, expected %q", headers["User-Agent"], expectedUA)
 	}
@@ -88,6 +88,55 @@ func TestEnvironmentOverrides(t *testing.T) {
 	}
 	if headers["Client-Metadata"] != `{"custom":true}` {
 		t.Errorf("Client-Metadata = %q, expected override", headers["Client-Metadata"])
+	}
+}
+
+// TestAntigravityVersionOverrides verifies that a Hub version override keeps its matching
+// Piper changelist token, that an unknown version falls back to the baseline changelist, and that
+// AGW_ANTIGRAVITY_CHANGELIST always wins.
+func TestAntigravityVersionOverrides(t *testing.T) {
+	t.Setenv(EnvAntigravityChangelist, "")
+
+	tests := []struct {
+		name            string
+		version         string
+		changelist      string
+		expectedCL      string
+		expectedVersion string
+	}{
+		{
+			name:            "known version resolves its changelist",
+			version:         "2.34.0",
+			expectedCL:      "1026637980",
+			expectedVersion: "2.34.0",
+		},
+		{
+			name:            "unknown version falls back to baseline changelist",
+			version:         "9.9.9",
+			expectedCL:      DefaultAntigravityChangelist,
+			expectedVersion: "9.9.9",
+		},
+		{
+			name:            "explicit changelist override wins",
+			version:         "2.34.0",
+			changelist:      "9999999999",
+			expectedCL:      "9999999999",
+			expectedVersion: "2.34.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvAntigravityVersion, tt.version)
+			t.Setenv(EnvAntigravityChangelist, tt.changelist)
+
+			got := DefaultUserAgent()
+			expected := fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)",
+				tt.expectedVersion, runtime.GOOS, runtime.GOARCH, tt.expectedCL)
+			if got != expected {
+				t.Errorf("DefaultUserAgent() = %q, expected %q", got, expected)
+			}
+		})
 	}
 }
 

@@ -54,6 +54,16 @@ type AnthropicRequest struct {
 
 	// Metadata holds arbitrary client metadata such as user tracking IDs.
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// OutputConfig configures output steering such as the reasoning effort tier for
+	// Claude 5+ adaptive thinking requests.
+	OutputConfig *AnthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+// AnthropicOutputConfig carries Anthropic output steering parameters.
+type AnthropicOutputConfig struct {
+	// Effort selects the reasoning effort tier ("low", "medium", "high", "xhigh", or "max").
+	Effort string `json:"effort,omitempty"`
 }
 
 // AnthropicMessage represents a single message in Anthropic's conversation history.
@@ -79,7 +89,7 @@ type AnthropicTool struct {
 
 // AnthropicThinking configures thinking tokens and reasoning modes.
 type AnthropicThinking struct {
-	// Type specifies thinking mode ("enabled" or "disabled").
+	// Type specifies thinking mode ("enabled", "adaptive", or "disabled").
 	Type string `json:"type"`
 
 	// BudgetTokens specifies the maximum reasoning tokens allocated.
@@ -255,7 +265,10 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	// Thinking configuration
 	thinkingRequested := false
 	if req.Thinking != nil {
-		if req.Thinking.Type == "enabled" {
+		// Protocol Quirk: modern Claude Code and Agent SDK clients send `"type": "adaptive"`.
+		// Treating only "enabled" as thinking silently disabled reasoning for those clients.
+		switch strings.ToLower(req.Thinking.Type) {
+		case "enabled", "adaptive":
 			thinkingRequested = true
 		}
 	} else if info.Thinking {
@@ -266,25 +279,41 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 		thinkingRequested = false
 	}
 	if thinkingRequested {
-		budget := 0
-		if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
-			budget = req.Thinking.BudgetTokens
-		} else if info.ThinkingBudget != nil {
-			budget = *info.ThinkingBudget
-		}
-
-		clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, claude)
-		maxOut = adjMaxOut
-
-		if claude {
-			genConfig["thinkingConfig"] = map[string]any{
-				"include_thoughts": true,
-				"thinking_budget":  clampedBudget,
+		if claude && ClaudeUsesThinkingLevel(model) {
+			// Protocol Quirk: Claude 5+ routes reasoning effort as the categorical
+			// thinkingLevel enum with includeThoughts, replacing numeric thinking_budget.
+			level := ""
+			if req.OutputConfig != nil {
+				level = ThinkingLevelForEffort(req.OutputConfig.Effort)
 			}
-		} else {
+			if level == "" {
+				level = "HIGH"
+			}
 			genConfig["thinkingConfig"] = map[string]any{
 				"includeThoughts": true,
-				"thinkingBudget":  clampedBudget,
+				"thinkingLevel":   level,
+			}
+		} else {
+			budget := 0
+			if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+				budget = req.Thinking.BudgetTokens
+			} else if info.ThinkingBudget != nil {
+				budget = *info.ThinkingBudget
+			}
+
+			clampedBudget, adjMaxOut := ClampThinkingBudget(model, budget, maxOut, claude)
+			maxOut = adjMaxOut
+
+			if claude {
+				genConfig["thinkingConfig"] = map[string]any{
+					"include_thoughts": true,
+					"thinking_budget":  clampedBudget,
+				}
+			} else {
+				genConfig["thinkingConfig"] = map[string]any{
+					"includeThoughts": true,
+					"thinkingBudget":  clampedBudget,
+				}
 			}
 		}
 	}
@@ -328,11 +357,15 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 
 	var sysInstruction *SystemInstruction
 	if len(systemTexts) > 0 {
-		parts := make([]Part, len(systemTexts))
-		for i, txt := range systemTexts {
-			parts[i] = Part{Text: txt}
+		if opts.InlineSystem {
+			contents = inlineSystemText(contents, strings.Join(systemTexts, "\n\n"))
+		} else {
+			parts := make([]Part, len(systemTexts))
+			for i, txt := range systemTexts {
+				parts[i] = Part{Text: txt}
+			}
+			sysInstruction = &SystemInstruction{Parts: parts}
 		}
-		sysInstruction = &SystemInstruction{Parts: parts}
 	}
 
 	return &GeminiRequest{
@@ -345,11 +378,12 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	}, nil
 }
 
-// extractAnthropicSystem collects plain text from string or structured system blocks.
+// extractAnthropicSystem collects plain text from string or structured system blocks,
+// scrubbing billing pseudo-headers and third-party agent identity fingerprints.
 func extractAnthropicSystem(sys any, out *[]string) {
 	switch v := sys.(type) {
 	case string:
-		stripped := StripBillingHeader(v)
+		stripped := ScrubAgentMarkers(v)
 		if stripped != "" {
 			*out = append(*out, stripped)
 		}
@@ -357,7 +391,7 @@ func extractAnthropicSystem(sys any, out *[]string) {
 		for _, item := range v {
 			if m, ok := item.(map[string]any); ok {
 				if txt, ok := m["text"].(string); ok {
-					stripped := StripBillingHeader(txt)
+					stripped := ScrubAgentMarkers(txt)
 					if stripped != "" {
 						*out = append(*out, stripped)
 					}

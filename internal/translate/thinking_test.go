@@ -133,3 +133,45 @@ func TestInjectInterruptedToolResponses_MultipleCallsSameName(t *testing.T) {
 		t.Error("expected synthetic cancellation response for call_2")
 	}
 }
+
+// TestThinkingLevelForEffort verifies effort labels map onto uppercase Cloud Code Assist
+// thinkingLevel enum values, including XHIGH and MAX, while unknown labels are ignored.
+func TestThinkingLevelForEffort(t *testing.T) {
+	tests := map[string]string{
+		"minimal":    "MINIMAL",
+		"low":        "LOW",
+		"MEDIUM":     "MEDIUM",
+		"high":       "HIGH",
+		"xhigh":      "XHIGH",
+		"extra_high": "XHIGH",
+		"max":        "MAX",
+		"":           "",
+		"unbounded":  "",
+	}
+
+	for effort, expected := range tests {
+		if got := ThinkingLevelForEffort(effort); got != expected {
+			t.Errorf("ThinkingLevelForEffort(%q) = %q; want %q", effort, got, expected)
+		}
+	}
+}
+
+// TestClaudeUsesThinkingLevel verifies generation detection for both family-first and
+// version-first Claude identifiers without misclassifying Claude 4.x as level-capable.
+func TestClaudeUsesThinkingLevel(t *testing.T) {
+	tests := map[string]bool{
+		"claude-sonnet-5-5":          true,
+		"claude-opus-5-5-thinking":   true,
+		"claude-5-5-sonnet":          true,
+		"claude-sonnet-4-6":          false,
+		"claude-opus-4-6-thinking":   false,
+		"claude-3-7-sonnet-20250219": false,
+		"gpt-oss-120b":               false,
+	}
+
+	for model, expected := range tests {
+		if got := ClaudeUsesThinkingLevel(model); got != expected {
+			t.Errorf("ClaudeUsesThinkingLevel(%q) = %v; want %v", model, got, expected)
+		}
+	}
+}

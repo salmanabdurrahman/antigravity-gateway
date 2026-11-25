@@ -15,8 +15,13 @@ import (
 type FailureKind string
 
 const (
-	// FailureRateLimit indicates HTTP 429 or quota exhaustion (RESOURCE_EXHAUSTED).
+	// FailureRateLimit indicates HTTP 429 or quota exhaustion (RESOURCE_EXHAUSTED) carrying
+	// explicit quota metadata (details[], retryDelay, quota reset time, or Retry-After).
 	FailureRateLimit FailureKind = "rate_limit"
+	// FailurePromptRejection indicates a bare HTTP 429 / RESOURCE_EXHAUSTED rejection without
+	// any quota metadata. Upstream returns this shape when it fingerprints prompt content
+	// instead of exhausting account quota, so it must never trigger pooled account cooldowns.
+	FailurePromptRejection FailureKind = "prompt_rejection"
 	// FailureAuth indicates HTTP 401 unauthenticated or expired token.
 	FailureAuth FailureKind = "auth"
 	// FailureForbidden indicates HTTP 403 access denied or project not allowed.
@@ -45,8 +50,27 @@ var (
 )
 
 // Classify inspects an HTTP status code and response body to categorize the upstream error.
+// Retry-After headers are not visible to this helper; use ClassifyWithHeaders when the response
+// headers are available so bare prompt rejections are distinguished from quota exhaustion.
 func Classify(status int, body string) FailureKind {
+	return ClassifyWithHeaders(status, body, nil)
+}
+
+// ClassifyWithHeaders inspects an HTTP status code, response body, and headers to categorize
+// the upstream error.
+//
+// Protocol Quirk: Cloud Code Assist answers a prompt it fingerprints with a bare HTTP 429
+// RESOURCE_EXHAUSTED body (message only, no details[]) even while account quota is full.
+// Treating that as quota exhaustion cools every healthy account in the pool, so a 429 without
+// quota metadata is classified as a request-scoped prompt rejection instead.
+func ClassifyWithHeaders(status int, body string, headers http.Header) FailureKind {
 	if status == http.StatusTooManyRequests || reResourceExhausted.MatchString(body) {
+		// Only the documented RESOURCE_EXHAUSTED fingerprint is ambiguous: Cloud Code returns
+		// that status for content-filtered prompts even while quota remains. Generic 429s still
+		// follow quota cooldown and failover semantics.
+		if reResourceExhausted.MatchString(body) && isBarePromptRejection(body, headers) {
+			return FailurePromptRejection
+		}
 		return FailureRateLimit
 	}
 	if status == http.StatusUnauthorized {
@@ -65,6 +89,38 @@ func Classify(status int, body string) FailureKind {
 		return FailureServer
 	}
 	return FailureClient
+}
+
+// isBarePromptRejection reports whether a 429 / RESOURCE_EXHAUSTED response lacks every quota
+// signal: Retry-After header, error details[] array, retry delay, and quota reset timestamps.
+func isBarePromptRejection(body string, headers http.Header) bool {
+	if headers != nil && strings.TrimSpace(headers.Get("Retry-After")) != "" {
+		return false
+	}
+
+	lower := strings.ToLower(body)
+	for _, marker := range []string{
+		"\"details\"",
+		"retrydelay",
+		"quotaresetdelay",
+		"quotaresettimestamp",
+		"quotaresettime",
+		"reset_time",
+		"reset after",
+		"retry in",
+	} {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+
+	// Absolute reset timestamps are covered by the markers above; this final probe rejects any
+	// remaining textual delay shape before falling back to a prompt rejection.
+	if _, ok := ParseRetryDelay(body, headers, time.Now()); ok {
+		return false
+	}
+
+	return true
 }
 
 // ParseRetryDelay extracts backoff duration from HTTP headers (Retry-After) or Google's error body.

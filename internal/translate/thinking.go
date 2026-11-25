@@ -3,7 +3,9 @@
 package translate
 
 import (
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +20,53 @@ const DefaultGeminiThinkingBudget = 16000
 
 // MaxGeminiOutputTokens defines the global generation ceiling for Gemini endpoints.
 const MaxGeminiOutputTokens = 65536
+
+// claudeVersionRegex extracts the major/minor generation number from Claude model identifiers,
+// covering both family-first (claude-sonnet-4-6) and version-first (claude-4-6-sonnet) spellings.
+var claudeVersionRegex = regexp.MustCompile(`(?i)^claude-(?:[a-z]+-)*(\d+)(?:[.-](\d+))?`)
+
+// ClaudeUsesThinkingLevel reports whether a Claude model expects the categorical
+// `thinkingLevel` field instead of the legacy numeric `thinking_budget` field.
+//
+// Protocol Quirk: Claude 5 and later generations expose reasoning effort as an enum
+// (`LOW`/`MEDIUM`/`HIGH`/`MAX`) and reject numeric thinking budgets, while Claude 4.x
+// still requires `thinking_budget`.
+func ClaudeUsesThinkingLevel(model string) bool {
+	match := claudeVersionRegex.FindStringSubmatch(strings.ToLower(model))
+	if len(match) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	return major >= 5
+}
+
+// ThinkingLevelForEffort maps an OpenAI `reasoning_effort` or Anthropic
+// `output_config.effort` label to the Cloud Code Assist `thinkingLevel` enum value.
+// It returns an empty string when the effort label is absent or unrecognized.
+//
+// Protocol Quirk: Cloud Code Assist serializes `thinkingLevel` as an uppercase protojson
+// enum string. Lowercase or unknown values are silently ignored upstream.
+func ThinkingLevelForEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "minimal":
+		return "MINIMAL"
+	case "low":
+		return "LOW"
+	case "medium":
+		return "MEDIUM"
+	case "high":
+		return "HIGH"
+	case "xhigh", "extra_high", "extra-high":
+		return "XHIGH"
+	case "max":
+		return "MAX"
+	default:
+		return ""
+	}
+}
 
 // ClampThinkingBudget enforces model-specific reasoning token boundaries and ensures
 // that maxOutputTokens strictly exceeds the thinking budget as mandated by Google Cloud Code.

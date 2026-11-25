@@ -468,3 +468,125 @@ func TestAnthropicStreamTranslatorFinishEmitsMessageStartWhenEmpty(t *testing.T)
 		t.Errorf("expected third event to be message_stop, got %s", eventTypes[2])
 	}
 }
+
+// TestAnthropicAdaptiveThinkingEnablesThinking verifies that the modern
+// {"thinking":{"type":"adaptive"}} payload enables reasoning instead of silently disabling it
+// for legacy Claude generations that still use a numeric thinking budget.
+func TestAnthropicAdaptiveThinkingEnablesThinking(t *testing.T) {
+	info := catalog.FamilyDefaults("claude-sonnet-4-6")
+	req := &AnthropicRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []AnthropicMessage{{Role: "user", Content: "Hello world"}},
+		Thinking: &AnthropicThinking{Type: "adaptive"},
+	}
+
+	env, err := BuildAnthropicEnvelope(req, BuildOptions{Info: info, ProjectID: "test-project"})
+	if err != nil {
+		t.Fatalf("BuildAnthropicEnvelope failed: %v", err)
+	}
+
+	tc, ok := env.Request.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig for adaptive thinking, got %v", env.Request.GenerationConfig["thinkingConfig"])
+	}
+	if tc["include_thoughts"] != true {
+		t.Errorf("expected include_thoughts true, got %v", tc["include_thoughts"])
+	}
+	if _, ok := tc["thinking_budget"]; !ok {
+		t.Errorf("expected legacy Claude thinking_budget, got %v", tc)
+	}
+}
+
+// TestAnthropicClaudeFiveThinkingLevel verifies Claude 5+ requests emit the categorical
+// thinkingLevel enum with includeThoughts and omit the legacy numeric thinking_budget field.
+func TestAnthropicClaudeFiveThinkingLevel(t *testing.T) {
+	info := catalog.FamilyDefaults("claude-sonnet-5-5")
+
+	tests := []struct {
+		name     string
+		effort   string
+		expected string
+	}{
+		{name: "max effort", effort: "max", expected: "MAX"},
+		{name: "xhigh effort", effort: "xhigh", expected: "XHIGH"},
+		{name: "medium effort", effort: "medium", expected: "MEDIUM"},
+		{name: "default effort", effort: "", expected: "HIGH"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &AnthropicRequest{
+				Model:    "claude-sonnet-5-5",
+				Messages: []AnthropicMessage{{Role: "user", Content: "Plan the refactor"}},
+				Thinking: &AnthropicThinking{Type: "adaptive"},
+			}
+			if tt.effort != "" {
+				req.OutputConfig = &AnthropicOutputConfig{Effort: tt.effort}
+			}
+
+			env, err := BuildAnthropicEnvelope(req, BuildOptions{Info: info, ProjectID: "test-project"})
+			if err != nil {
+				t.Fatalf("BuildAnthropicEnvelope failed: %v", err)
+			}
+
+			tc, ok := env.Request.GenerationConfig["thinkingConfig"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected thinkingConfig, got %v", env.Request.GenerationConfig["thinkingConfig"])
+			}
+			if tc["includeThoughts"] != true {
+				t.Errorf("expected includeThoughts true, got %v", tc["includeThoughts"])
+			}
+			if tc["thinkingLevel"] != tt.expected {
+				t.Errorf("thinkingLevel = %v; want %q", tc["thinkingLevel"], tt.expected)
+			}
+			if _, exists := tc["thinking_budget"]; exists {
+				t.Errorf("expected no legacy thinking_budget for Claude 5, got %v", tc)
+			}
+		})
+	}
+}
+
+// TestAnthropicSystemScrubAndInlineFallback verifies system instruction scrubbing and the
+// prompt-rejection fallback that moves system text into the first user turn.
+func TestAnthropicSystemScrubAndInlineFallback(t *testing.T) {
+	info := catalog.FamilyDefaults("gemini-2.5-flash")
+	system := "You are Claude Code, Anthropic's official CLI for Claude.\nKeep responses short."
+	req := &AnthropicRequest{
+		Model:    "gemini-2.5-flash",
+		System:   system,
+		Messages: []AnthropicMessage{{Role: "user", Content: "Hello"}},
+	}
+
+	env, err := BuildAnthropicEnvelope(req, BuildOptions{Info: info, ProjectID: "test-project"})
+	if err != nil {
+		t.Fatalf("BuildAnthropicEnvelope failed: %v", err)
+	}
+	if env.Request.SystemInstruction == nil {
+		t.Fatal("expected systemInstruction for the standard build")
+	}
+	sysText := env.Request.SystemInstruction.Parts[0].Text
+	if strings.Contains(sysText, "Claude Code") || strings.Contains(sysText, "Anthropic") {
+		t.Errorf("expected third-party agent identity scrubbed, got %q", sysText)
+	}
+	if !strings.Contains(sysText, "You are a coding assistant.") || !strings.Contains(sysText, "Keep responses short.") {
+		t.Errorf("expected neutral identity plus preserved instructions, got %q", sysText)
+	}
+
+	env, err = BuildAnthropicEnvelope(req, BuildOptions{Info: info, ProjectID: "test-project", InlineSystem: true})
+	if err != nil {
+		t.Fatalf("BuildAnthropicEnvelope inline failed: %v", err)
+	}
+	if env.Request.SystemInstruction != nil {
+		t.Errorf("expected no systemInstruction on inline fallback, got %+v", env.Request.SystemInstruction)
+	}
+	if len(env.Request.Contents) == 0 || len(env.Request.Contents[0].Parts) < 2 {
+		t.Fatalf("expected system text prepended to the first user turn, got %+v", env.Request.Contents)
+	}
+	firstPart := env.Request.Contents[0].Parts[0].Text
+	if !strings.Contains(firstPart, "Keep responses short.") {
+		t.Errorf("expected system text in the first user part, got %q", firstPart)
+	}
+	if lastText := env.Request.Contents[0].Parts[len(env.Request.Contents[0].Parts)-1].Text; lastText != "Hello" {
+		t.Errorf("expected original user text preserved last, got %q", lastText)
+	}
+}

@@ -119,6 +119,62 @@ func isBillingHeaderLine(line string) bool {
 	return true
 }
 
+// neutralAgentIdentityLine replaces third-party agent identity lines with a neutral
+// instruction so the system prompt keeps an identity sentence upstream.
+const neutralAgentIdentityLine = "You are a coding assistant."
+
+// thirdPartyAgentIdentityPrefixes lists lowercase line prefixes identifying caller agent
+// fingerprints that Cloud Code Assist rejects with a content-scoped 429 RESOURCE_EXHAUSTED.
+var thirdPartyAgentIdentityPrefixes = []string{
+	"you are claude code",
+	"you are a claude agent",
+	"you are hermes",
+	"you are cline",
+	"you are opencode",
+	"you are openclaw",
+}
+
+// ScrubAgentMarkers strips Claude Code billing pseudo-headers and replaces third-party agent
+// identity lines with a neutral identity sentence.
+//
+// Protocol Quirk: Antigravity rejects system instructions that fingerprint competing agent
+// products (Claude Code, Anthropic, Hermes, Cline, OpenCode, OpenClaw) with a bare
+// 429 RESOURCE_EXHAUSTED even when account quota is full. Rewriting just the identity line keeps
+// the rest of the caller's system prompt intact while avoiding the content-scoped rejection.
+func ScrubAgentMarkers(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isBillingHeaderLine(line) {
+			continue
+		}
+		if isThirdPartyAgentIdentityLine(line) {
+			out = append(out, neutralAgentIdentityLine)
+			continue
+		}
+		out = append(out, line)
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// isThirdPartyAgentIdentityLine reports whether a single line is a known third-party agent
+// identity sentence. Matching is restricted to the beginning of the trimmed line so ordinary
+// prose that merely mentions a product name is left untouched.
+func isThirdPartyAgentIdentityLine(line string) bool {
+	trimmed := strings.ToLower(strings.TrimLeft(line, " \t\r"))
+	for _, prefix := range thirdPartyAgentIdentityPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // CleanCacheControlMessages deep-cleans cache_control keys from a slice of message maps.
 func CleanCacheControlMessages(messages []any) []any {
 	if len(messages) == 0 {

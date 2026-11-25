@@ -12,8 +12,13 @@ import (
 )
 
 const (
-	// DefaultAntigravityVersion specifies the spoofed Antigravity IDE version string.
-	DefaultAntigravityVersion = "2.11.0"
+	// DefaultAntigravityVersion specifies the Antigravity Hub release baseline advertised upstream.
+	// Cloud Code Assist gates newer models behind a minimum Hub build, so this baseline must stay
+	// at or above the gate until the operator overrides it explicitly.
+	DefaultAntigravityVersion = "2.33.0"
+
+	// DefaultAntigravityChangelist pairs the Hub baseline with its Piper changelist (`cl`) token.
+	DefaultAntigravityChangelist = "1023160026"
 
 	// DefaultAPIClientValue represents the default X-Goog-Api-Client header value.
 	DefaultAPIClientValue = "google-cloud-sdk vscode_cloudshelleditor/0.1"
@@ -43,9 +48,23 @@ const (
 	// EnvAntigravityVersion is the environment variable overriding the Antigravity IDE version.
 	EnvAntigravityVersion = "AGW_ANTIGRAVITY_VERSION"
 
-	// EnvAltAntigravityVersion is the legacy environment variable for Antigravity IDE version.
+	// EnvAltAntigravityVersion is the legacy environment variable for the Antigravity Hub version.
 	EnvAltAntigravityVersion = "PGA_ANTIGRAVITY_VERSION"
+
+	// EnvAntigravityChangelist overrides the Hub Piper changelist (`cl`) token independently
+	// from the version, for operators that pin an unmapped Hub build.
+	EnvAntigravityChangelist = "AGW_ANTIGRAVITY_CHANGELIST"
 )
+
+// antigravityChangelists maps known Antigravity Hub releases to their Piper changelist token.
+// Protocol Quirk: Cloud Code Assist fingerprints the `cl` value together with the Hub version,
+// so a version override without its matching changelist can be rejected as an unknown build.
+var antigravityChangelists = map[string]string{
+	"2.29.0": "1013060670",
+	"2.33.0": "1023160026",
+	"2.34.0": "1026637980",
+	"2.35.1": "1029194470",
+}
 
 // DefaultPlatform returns the normalized Google platform name corresponding to the local host OS.
 func DefaultPlatform() string {
@@ -63,14 +82,35 @@ func DefaultPlatform() string {
 
 var (
 	staticDefaultUserAgentOnce = sync.OnceValue(func() string {
-		return fmt.Sprintf("antigravity/ide/%s (aidev_client; os_type=%s; arch=%s)", DefaultAntigravityVersion, runtime.GOOS, runtime.GOARCH)
+		return userAgentForVersion(DefaultAntigravityVersion)
 	})
 	staticDefaultClientMetadataOnce = sync.OnceValue(func() string {
 		return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, DefaultPlatform())
 	})
 )
 
-// DefaultUserAgent formats the standard Antigravity IDE User-Agent string matching the host architecture.
+// ResolveAntigravityChangelist returns the Piper changelist token paired with a Hub version.
+// Unknown versions fall back to the baseline changelist, and AGW_ANTIGRAVITY_CHANGELIST always wins.
+func ResolveAntigravityChangelist(version string) string {
+	if override := strings.TrimSpace(os.Getenv(EnvAntigravityChangelist)); override != "" {
+		return override
+	}
+	if cl, ok := antigravityChangelists[version]; ok {
+		return cl
+	}
+	return DefaultAntigravityChangelist
+}
+
+// userAgentForVersion builds the modern Antigravity Hub User-Agent fingerprint.
+// Protocol Quirk: Cloud Code Assist expects `antigravity/hub/<version>` with the `cl` changelist
+// token. The older `antigravity/ide/<version>` prefix is rejected by the current minimum
+// client version gate.
+func userAgentForVersion(version string) string {
+	cl := ResolveAntigravityChangelist(version)
+	return fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)", version, runtime.GOOS, runtime.GOARCH, cl)
+}
+
+// DefaultUserAgent formats the standard Antigravity Hub User-Agent string matching the host architecture.
 func DefaultUserAgent() string {
 	v1 := os.Getenv(EnvAntigravityVersion)
 	v2 := os.Getenv(EnvAltAntigravityVersion)
@@ -78,7 +118,7 @@ func DefaultUserAgent() string {
 		return staticDefaultUserAgentOnce()
 	}
 	version := cmp.Or(v1, v2, DefaultAntigravityVersion)
-	return fmt.Sprintf("antigravity/ide/%s (aidev_client; os_type=%s; arch=%s)", version, runtime.GOOS, runtime.GOARCH)
+	return userAgentForVersion(version)
 }
 
 // DefaultAPIClient returns the standard Google Cloud SDK API client header value.

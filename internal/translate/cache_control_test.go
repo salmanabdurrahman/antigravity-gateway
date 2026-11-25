@@ -4,6 +4,7 @@ package translate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -132,5 +133,45 @@ func TestCleanCacheControlFastPathNoAlloc(t *testing.T) {
 	cleanedMap := cleaned.(map[string]any)
 	if reflect.ValueOf(cleanedMap).Pointer() != reflect.ValueOf(input).Pointer() {
 		t.Error("expected CleanCacheControl to return original map reference on fast-path")
+	}
+}
+
+// TestScrubAgentMarkers verifies billing pseudo-headers are dropped and third-party agent
+// identity lines are replaced with a neutral identity without touching ordinary prose.
+func TestScrubAgentMarkers(t *testing.T) {
+	input := strings.Join([]string{
+		"x-anthropic-billing-header: cc_version=2.1.274; cc_entrypoint=cli",
+		"You are Claude Code, Anthropic's official CLI for Claude.",
+		"  You are Hermes Agent, built by Nous Research.",
+		"You are OpenClaw and answer concisely.",
+		"Prose that mentions Claude Code but is not an identity line.",
+	}, "\n")
+
+	got := ScrubAgentMarkers(input)
+
+	for _, leaked := range []string{
+		"x-anthropic-billing-header",
+		"You are Claude Code",
+		"Anthropic's official CLI",
+		"You are Hermes Agent",
+		"You are OpenClaw",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("expected %q scrubbed, got %q", leaked, got)
+		}
+	}
+
+	if count := strings.Count(got, neutralAgentIdentityLine); count != 3 {
+		t.Errorf("expected 3 neutral identity lines, got %d in %q", count, got)
+	}
+	if !strings.Contains(got, "Prose that mentions Claude Code but is not an identity line.") {
+		t.Errorf("expected ordinary prose preserved, got %q", got)
+	}
+}
+
+// TestScrubAgentMarkersEmptyInput verifies the empty-text fast path.
+func TestScrubAgentMarkersEmptyInput(t *testing.T) {
+	if got := ScrubAgentMarkers(""); got != "" {
+		t.Errorf("ScrubAgentMarkers(\"\") = %q; want empty string", got)
 	}
 }

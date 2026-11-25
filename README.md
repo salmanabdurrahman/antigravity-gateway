@@ -11,7 +11,7 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 - **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
 - **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally with configurable strategies (`sticky`, `round-robin`, or `hybrid` with health scores, token bucket burst throttling, and proactive quota protection).
-- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header sanitization.
+- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), categorical thinking levels, thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header plus third-party agent identity sanitization.
 - **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
 - **Zero Runtime Dependencies**: Compiled into a single self-contained binary built on Go 1.24+ standard library and Cobra CLI.
@@ -410,7 +410,10 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 - `AGW_USER_AGENT` (legacy fallback: `PGA_USER_AGENT`): Custom User-Agent header override.
 - `AGW_API_CLIENT` (legacy fallback: `PGA_API_CLIENT`): Custom `X-Goog-Api-Client` header override.
 - `AGW_CLIENT_METADATA` (legacy fallback: `PGA_CLIENT_METADATA`): Custom `Client-Metadata` JSON header override.
-- `AGW_ANTIGRAVITY_VERSION` (legacy fallback: `PGA_ANTIGRAVITY_VERSION`): Version string used in default User-Agent construction (default: `2.11.0`).
+- `AGW_ANTIGRAVITY_VERSION` (legacy fallback: `PGA_ANTIGRAVITY_VERSION`): Antigravity Hub version advertised in the default User-Agent (default: `2.33.0`).
+- `AGW_ANTIGRAVITY_CHANGELIST`: Piper changelist (`cl`) token paired with the Hub version in the default User-Agent. Known Hub releases resolve their own changelist automatically; set this to pin an unmapped build (default: `1023160026`).
+
+Default upstream requests identify as `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<changelist>)`. Override the whole header with `AGW_USER_AGENT` when proxying a different client identity.
 - `PI_AGENT_DIR`: Custom Pi Coding Agent configuration directory (default: `~/.pi/agent`).
 - `OPENCODE_CONFIG`: Custom OpenCode configuration file path (default: `~/.config/opencode/opencode.json`).
 
@@ -438,6 +441,7 @@ You can define custom model aliases in `~/.agw/config.json` via the `model_mappi
 When rate limits occur:
 
 - Upstream `resetTime` (RFC3339) or `retryDelay` is parsed to calculate exact cooldown duration (defaults to 60s).
+- A bare `429 RESOURCE_EXHAUSTED` without `details[]`, retry metadata, or `Retry-After` is treated as a request-scoped prompt rejection: healthy accounts are never cooled, third-party agent identity lines are scrubbed from system instructions, and the request is retried once with the system instruction moved into the first user turn before the HTTP 400 is surfaced.
 - **Per-Model Cooldown Isolation**: An account rate-limited on `gemini-3.8-flash` remains fully available to serve other non-cooling models (e.g. `claude-sonnet-4-6` or `gpt-oss-120b`).
 - The account is put on cooldown for that model and requests immediately fail over to the next available account.
 - If all accounts are cooling and the wait duration is $\le 20$s, `agw` absorbs the wait transparently before serving the request.

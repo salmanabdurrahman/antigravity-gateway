@@ -167,6 +167,91 @@ func TestRotatorStickyAndFailover429(t *testing.T) {
 	_ = resOther.Response.Body.Close()
 }
 
+// TestRotatorBareResourceExhaustedDoesNotCoolAccount verifies that a bare RESOURCE_EXHAUSTED
+// response is surfaced as a request-scoped prompt rejection without cooling or rotating the
+// healthy account pool.
+func TestRotatorBareResourceExhaustedDoesNotCoolAccount(t *testing.T) {
+	ctx := t.Context()
+	var upstreamCalls atomic.Int64
+
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-access-token",
+				"expires_in":   3600,
+				"token_type":   "Bearer",
+			})
+			return
+		}
+
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    429,
+				"status":  "RESOURCE_EXHAUSTED",
+				"message": "Resource has been exhausted (e.g. check quota).",
+			},
+		})
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategySticky),
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+
+	pool, err := rotator.NewPool(nil, cfg, time.Now)
+	if err != nil {
+		t.Fatalf("new pool failed: %v", err)
+	}
+	pool.SetAccounts([]*auth.Account{newTestAccount("a@example.com")})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+
+	builder := func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"project": s.Account().ProjectID}, nil
+	}
+
+	_, err = r.Generate(ctx, "gemini-pro", builder)
+	if err == nil {
+		t.Fatal("expected prompt rejection error, got nil")
+	}
+
+	var rotErr *rotator.RotatorError
+	if !errors.As(err, &rotErr) {
+		t.Fatalf("expected *RotatorError, got %T: %v", err, err)
+	}
+	if !rotErr.PromptRejected {
+		t.Errorf("expected PromptRejected=true, got false: %v", rotErr)
+	}
+	if rotErr.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected HTTP 400 for prompt rejection, got %d", rotErr.StatusCode)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Errorf("expected the rejection to surface without rotation (1 upstream call), got %d", got)
+	}
+
+	states := pool.States()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 pool state, got %d", len(states))
+	}
+	if until := states[0].CoolingUntil("gemini-pro"); !until.IsZero() {
+		t.Errorf("expected no cooldown for prompt rejection, got until %v", until)
+	}
+
+	// The next request must reach upstream again instead of waiting for a cooldown to expire.
+	if _, err := r.Generate(ctx, "gemini-pro", builder); err == nil {
+		t.Fatal("expected repeated prompt rejection, got nil")
+	}
+	if got := upstreamCalls.Load(); got != 2 {
+		t.Errorf("expected a second upstream attempt, got %d calls", got)
+	}
+}
+
 // TestRotatorShortWaitAbsorption verifies that short cooldown waits (<= 20s) are absorbed via sleep and retried on the same account.
 func TestRotatorShortWaitAbsorption(t *testing.T) {
 	ctx := t.Context()

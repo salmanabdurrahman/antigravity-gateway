@@ -363,11 +363,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("chatcmpl-%s", hex.EncodeToString(randID))
 	created := time.Now().Unix()
 
-	for attempt := range EmptyStreamRetries + 1 {
+	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
+	// the system instruction moved into the first user turn. The extra loop iteration keeps the
+	// retry independent from the empty-stream retry budget.
+	promptFallback := false
+	for attempt := range EmptyStreamRetries + 2 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
 			SessionID:     sessionID,
+			InlineSystem:  promptFallback,
 		}
 
 		geminiReq, reqErr := translate.BuildRequest(&chatReq, opts)
@@ -382,6 +387,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			var rotErr *rotator.RotatorError
 			if errors.As(err, &rotErr) {
+				if rotErr.PromptRejected && !promptFallback {
+					promptFallback = true
+					s.logger.Warn("upstream rejected prompt; retrying with system instructions moved into the first user turn", "model", upstream)
+					continue
+				}
 				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
 				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
 					s.legacySchemas.Store(true)
@@ -618,11 +628,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		r.Header.Get("X-Session-Id"),
 	)
 
-	for attempt := range EmptyStreamRetries + 1 {
+	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
+	// the system instruction moved into the first user turn before the error is surfaced.
+	promptFallback := false
+	for attempt := range EmptyStreamRetries + 2 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
 			SessionID:     sessionID,
+			InlineSystem:  promptFallback,
 		}
 
 		geminiReq, reqErr := translate.BuildAnthropicRequest(&anthReq, opts)
@@ -637,6 +651,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			var rotErr *rotator.RotatorError
 			if errors.As(err, &rotErr) {
+				if rotErr.PromptRejected && !promptFallback {
+					promptFallback = true
+					s.logger.Warn("upstream rejected prompt; retrying with system instructions moved into the first user turn", "model", upstream)
+					continue
+				}
 				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
 				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
 					s.legacySchemas.Store(true)

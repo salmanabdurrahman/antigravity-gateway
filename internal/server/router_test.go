@@ -870,3 +870,156 @@ func TestUIEndpoints(t *testing.T) {
 		t.Fatalf("expected 403 for DNS rebinding attempt, got %d", recRebind.Code)
 	}
 }
+
+// TestChatCompletionsPromptRejectionFallback verifies a bare RESOURCE_EXHAUSTED rejection is
+// retried once with system instructions moved into the first user turn, without cooling the
+// healthy account.
+func TestChatCompletionsPromptRejectionFallback(t *testing.T) {
+	var attempts atomic.Int64
+	var firstHadSystem atomic.Bool
+	var retryHadSystem atomic.Bool
+	var retrySystemText atomic.Value
+	retrySystemText.Store("")
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if !strings.Contains(r.URL.Path, "streamGenerateContent") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		var payload struct {
+			Request struct {
+				Contents []struct {
+					Parts []struct {
+						Text string `json:"text"`
+					} `json:"parts"`
+				} `json:"contents"`
+				SystemInstruction map[string]any `json:"systemInstruction"`
+			} `json:"request"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("failed decoding upstream envelope: %v", err)
+		}
+
+		if attempts.Add(1) == 1 {
+			firstHadSystem.Store(payload.Request.SystemInstruction != nil)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}`))
+			return
+		}
+
+		retryHadSystem.Store(payload.Request.SystemInstruction != nil)
+		if len(payload.Request.Contents) > 0 && len(payload.Request.Contents[0].Parts) > 0 {
+			retrySystemText.Store(payload.Request.Contents[0].Parts[0].Text)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Recovered."}]},"finishReason":"STOP"}]}}` + "\n\n"))
+	})
+
+	handler := harness.server.buildHandler()
+	payload := `{
+		"model": "gemini-2.5-flash",
+		"messages": [
+			{"role": "system", "content": "You are Claude Code, Anthropic's official CLI for Claude."},
+			{"role": "user", "content": "Hi"}
+		],
+		"stream": false
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after prompt fallback retry, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if attempts.Load() != 2 {
+		t.Errorf("expected exactly 2 upstream attempts, got %d", attempts.Load())
+	}
+	if !firstHadSystem.Load() {
+		t.Errorf("expected the first attempt to keep systemInstruction")
+	}
+	if retryHadSystem.Load() {
+		t.Errorf("expected the retry to omit systemInstruction")
+	}
+	gotSystem, _ := retrySystemText.Load().(string)
+	if !strings.Contains(gotSystem, "You are a coding assistant.") || strings.Contains(gotSystem, "Claude Code") {
+		t.Errorf("expected scrubbed system text in the first user turn, got %q", gotSystem)
+	}
+
+	states := harness.rotator.Pool().States()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 account state, got %d", len(states))
+	}
+	if until := states[0].CoolingUntil("gemini-2.5-flash"); !until.IsZero() {
+		t.Errorf("expected no cooldown after prompt rejection fallback, got %v", until)
+	}
+}
+
+// TestChatCompletionsEnvelopeRequestTypeShape verifies outbound envelopes emit requestType
+// "agent" only for tool-enabled turns and omit it for plain chat completions.
+func TestChatCompletionsEnvelopeRequestTypeShape(t *testing.T) {
+	envelopes := make(chan map[string]any, 4)
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "mock-token",
+				"expires_in":   3600,
+			})
+			return
+		}
+		if !strings.Contains(r.URL.Path, "streamGenerateContent") {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		var envelope map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Errorf("failed decoding envelope: %v", err)
+		}
+		envelopes <- envelope
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Ok."}]},"finishReason":"STOP"}]}}` + "\n\n"))
+	})
+
+	handler := harness.server.buildHandler()
+	payloads := []string{
+		`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Hi"}]}`,
+		`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
+	}
+
+	for _, payload := range payloads {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+		req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	plain := <-envelopes
+	if _, exists := plain["requestType"]; exists {
+		t.Errorf("expected plain chat envelope to omit requestType, got %v", plain["requestType"])
+	}
+
+	agentic := <-envelopes
+	if got := agentic["requestType"]; got != "agent" {
+		t.Errorf("expected tool-enabled envelope requestType 'agent', got %v", got)
+	}
+}

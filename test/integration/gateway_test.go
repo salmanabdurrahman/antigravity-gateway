@@ -31,12 +31,17 @@ import (
 // 1. Account A encounters an upstream HTTP 429 rate limit with RetryInfo resetTime.
 // 2. Gateway transparently selects Account B without interrupting client connection.
 // 3. Client receives HTTP 200 and a continuous, unbroken SSE stream.
+// 4. The upstream wire request carries the Hub User-Agent fingerprint and omits requestType
+// on plain chat completions.
 func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
 	var accountACalls atomic.Int64
 	var accountBCalls atomic.Int64
+	var upstreamUserAgent atomic.Value
+	var upstreamHadRequestType atomic.Bool
+	upstreamUserAgent.Store("")
 
 	// 1. Spawn Mock Google Cloud Code Assist Server
 	mockGoogle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,12 +63,12 @@ func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 		// Handle streamGenerateContent
 		if strings.Contains(r.URL.Path, "streamGenerateContent") {
 			bodyBytes, _ := io.ReadAll(r.Body)
-			var payload struct {
-				Project string `json:"project"`
-			}
+			var payload map[string]any
 			_ = json.Unmarshal(bodyBytes, &payload)
+			project, _ := payload["project"].(string)
+			_, hasRequestType := payload["requestType"]
 
-			if payload.Project == "proj-a" {
+			if project == "proj-a" {
 				accountACalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -83,8 +88,10 @@ func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 				return
 			}
 
-			if payload.Project == "proj-b" {
+			if project == "proj-b" {
 				accountBCalls.Add(1)
+				upstreamUserAgent.Store(r.Header.Get("User-Agent"))
+				upstreamHadRequestType.Store(hasRequestType)
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("Cache-Control", "no-cache")
 				w.WriteHeader(http.StatusOK)
@@ -111,7 +118,7 @@ func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 				return
 			}
 
-			http.Error(w, "Unknown project: "+payload.Project, http.StatusBadRequest)
+			http.Error(w, "Unknown project: "+project, http.StatusBadRequest)
 			return
 		}
 
@@ -281,6 +288,15 @@ func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 	// Verify Account B handled failover
 	if accountBCalls.Load() != 1 {
 		t.Errorf("expected 1 call to Account B, got %d", accountBCalls.Load())
+	}
+
+	// Verify the upstream wire fingerprint: modern Hub User-Agent with a changelist token, and
+	// no requestType on a plain chat completion.
+	if ua, _ := upstreamUserAgent.Load().(string); !strings.HasPrefix(ua, "antigravity/hub/") || !strings.Contains(ua, "cl=") {
+		t.Errorf("expected modern Hub User-Agent with changelist, got %q", ua)
+	}
+	if upstreamHadRequestType.Load() {
+		t.Errorf("expected plain chat envelope to omit requestType")
 	}
 
 	// Verify Account A is now marked cooling

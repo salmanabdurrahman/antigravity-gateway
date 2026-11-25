@@ -28,6 +28,11 @@ type RotatorError struct {
 
 	// ErrorMessage is the contextual error message detailing the failure reason.
 	ErrorMessage string
+
+	// PromptRejected reports a request-scoped prompt rejection (bare RESOURCE_EXHAUSTED) rather
+	// than account quota exhaustion. Callers may retry once with the system instruction moved
+	// into the first user turn before surfacing the error.
+	PromptRejected bool
 }
 
 // Error formats the RotatorError into a descriptive error string.
@@ -359,10 +364,21 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 		_ = resp.Body.Close()
 		errBody := string(errBodyBytes)
 
-		kind := Classify(resp.StatusCode, errBody)
+		kind := ClassifyWithHeaders(resp.StatusCode, errBody, resp.Header)
 		errMsg := ExtractErrorMessage(errBody)
 
 		switch kind {
+		case FailurePromptRejection:
+			// Request-scoped rejection: the prompt triggered upstream content filtering, so the
+			// account stays healthy and must not receive a pooled cooldown.
+			s.TokenBucket().Refund()
+			r.logger.Warn("Prompt rejected by upstream without quota metadata", "account", s.Email(), "model", model)
+			return nil, &RotatorError{
+				StatusCode:     http.StatusBadRequest,
+				ErrorMessage:   fmt.Sprintf("Google rejected the prompt: %s", errMsg),
+				PromptRejected: true,
+			}
+
 		case FailureRateLimit:
 			r.picker.HealthTracker().RecordRateLimit(s.Email())
 			s.rateLimits.Add(1)

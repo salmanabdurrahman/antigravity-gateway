@@ -242,8 +242,10 @@ type AgentEnvelope struct {
 	// Request contains the inner Gemini request payload.
 	Request *GeminiRequest `json:"request"`
 
-	// RequestType specifies the envelope mode, typically "agent".
-	RequestType string `json:"requestType"`
+	// RequestType specifies the envelope mode. It is "agent" only for tool-enabled or
+	// session-scoped agentic turns and omitted for plain chat completions so upstream applies
+	// standard quota bucketing instead of stricter agentic limits.
+	RequestType string `json:"requestType,omitempty"`
 
 	// UserAgent designates the client environment identifier (e.g. "antigravity").
 	UserAgent string `json:"userAgent"`
@@ -265,6 +267,11 @@ type BuildOptions struct {
 
 	// ProjectID is the Google Cloud companion project identifier.
 	ProjectID string
+
+	// InlineSystem moves system instructions into the first user turn instead of the envelope's
+	// systemInstruction field. It is used for the single prompt-rejection retry before the
+	// gateway surfaces the upstream error.
+	InlineSystem bool
 }
 
 // ErrInvalidRequest indicates a malformed OpenAI Chat completions payload.
@@ -298,6 +305,9 @@ func IsSchemaRejection(statusCode int, body string) bool {
 }
 
 // WrapEnvelope packages an already translated GeminiRequest with companion project metadata and a fresh RequestID.
+//
+// Protocol Quirk: `requestType: "agent"` subjects a request to stricter agentic quota bucketing,
+// so it is emitted only for tool-enabled or session-scoped turns and omitted for plain chat.
 func WrapEnvelope(geminiReq *GeminiRequest, upstreamModelID, projectID string) *AgentEnvelope {
 	uuidBytes := make([]byte, 16)
 	_, _ = rand.Read(uuidBytes)
@@ -306,11 +316,16 @@ func WrapEnvelope(geminiReq *GeminiRequest, upstreamModelID, projectID string) *
 	requestID := fmt.Sprintf("agent-%08x-%04x-%04x-%04x-%012x",
 		uuidBytes[0:4], uuidBytes[4:6], uuidBytes[6:8], uuidBytes[8:10], uuidBytes[10:16])
 
+	requestType := ""
+	if geminiReq != nil && (len(geminiReq.Tools) > 0 || geminiReq.SessionID != "") {
+		requestType = "agent"
+	}
+
 	return &AgentEnvelope{
 		Project:     projectID,
 		Model:       upstreamModelID,
 		Request:     geminiReq,
-		RequestType: "agent",
+		RequestType: requestType,
 		UserAgent:   "antigravity",
 		RequestID:   requestID,
 	}
@@ -421,7 +436,15 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 		}
 
 		if claude {
-			if budget == -1 {
+			if ClaudeUsesThinkingLevel(model) {
+				// Protocol Quirk: Claude 5+ expects a categorical thinkingLevel plus
+				// includeThoughts; the legacy numeric thinking_budget field is rejected.
+				level := ThinkingLevelForEffort(req.ReasoningEffort)
+				if level == "" {
+					level = "HIGH"
+				}
+				genConfig["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingLevel": level}
+			} else if budget == -1 {
 				genConfig["thinkingConfig"] = map[string]any{"include_thoughts": true}
 			} else {
 				adjBudget, adjMaxOut := adjustFixedBudget(info, budget, maxOut)
@@ -433,19 +456,16 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 				genConfig["thinkingConfig"] = tc
 			}
 		} else {
-			var effortLevel string
-			if strings.HasSuffix(strings.ToLower(model), "-tiered") && req.ReasoningEffort != "" {
-				switch strings.ToLower(req.ReasoningEffort) {
-				case "minimal", "low":
-					effortLevel = "LOW"
-				case "medium":
-					effortLevel = "MEDIUM"
-				case "high", "xhigh":
-					effortLevel = "HIGH"
-				}
+			// Gemini 3+ and tiered routing variants accept a categorical thinkingLevel,
+			// including the deepest XHIGH effort requested by Gemini 4 clients.
+			effortLevel := ""
+			if geminiSupportsThinkingLevel(model) {
+				effortLevel = ThinkingLevelForEffort(req.ReasoningEffort)
 			}
 
-			if effortLevel != "" && budget == -1 {
+			// Gemini 4 reasoning is expressed as effort variants, so an explicit
+			// reasoning_effort must win over a catalog-supplied numeric budget.
+			if effortLevel != "" && (budget == -1 || geminiPrefersThinkingLevel(model)) {
 				genConfig["thinkingConfig"] = map[string]any{"includeThoughts": true, "thinkingLevel": effortLevel}
 			} else if budget == -1 {
 				genConfig["thinkingConfig"] = map[string]any{"includeThoughts": true}
@@ -478,9 +498,14 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 		GenerationConfig: genConfig,
 	}
 
-	if len(systemTexts) > 0 {
-		result.SystemInstruction = &SystemInstruction{
-			Parts: []Part{{Text: strings.Join(systemTexts, "\n\n")}},
+	systemText := ScrubAgentMarkers(strings.Join(systemTexts, "\n\n"))
+	if systemText != "" {
+		if opts.InlineSystem {
+			result.Contents = inlineSystemText(contents, systemText)
+		} else {
+			result.SystemInstruction = &SystemInstruction{
+				Parts: []Part{{Text: systemText}},
+			}
 		}
 	}
 
@@ -497,6 +522,43 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 	}
 
 	return result, nil
+}
+
+// geminiSupportsThinkingLevel reports whether a Gemini family model accepts the categorical
+// `thinkingLevel` field. Gemini 3 and newer expose native reasoning levels, and `-tiered`
+// routing variants forward the same contract.
+func geminiSupportsThinkingLevel(model string) bool {
+	if major := GeminiMajor(model); major != nil && *major >= 3 {
+		return true
+	}
+	return strings.HasSuffix(strings.ToLower(model), "-tiered")
+}
+
+// geminiPrefersThinkingLevel reports whether a Gemini generation models reasoning as named effort
+// variants rather than a token budget. Gemini 4 exposes XHIGH/MAX tiers that a numeric budget
+// cannot express.
+func geminiPrefersThinkingLevel(model string) bool {
+	major := GeminiMajor(model)
+	return major != nil && *major >= 4
+}
+
+// inlineSystemText merges system instruction text into the first user turn. Existing plain user
+// text is preserved after the system text; turns that lead with tool responses get a separate
+// leading user turn so function responses stay adjacent to their model call.
+func inlineSystemText(contents []Content, text string) []Content {
+	if text == "" {
+		return contents
+	}
+
+	out := slices.Clone(contents)
+	if len(out) > 0 && out[0].Role == "user" && !slices.ContainsFunc(out[0].Parts, func(p Part) bool {
+		return p.FunctionResponse != nil
+	}) {
+		out[0].Parts = append([]Part{{Text: text}}, out[0].Parts...)
+		return out
+	}
+
+	return append([]Content{{Role: "user", Parts: []Part{{Text: text}}}}, out...)
 }
 
 // extractText flattens string or complex array message content into a concatenated plain text string.

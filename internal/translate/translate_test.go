@@ -471,11 +471,88 @@ func TestBuildEnvelope(t *testing.T) {
 	if env.Model != "gemini-pro-agent" {
 		t.Errorf("expected model mapped to upstream gemini-pro-agent, got: %s", env.Model)
 	}
-	if env.RequestType != "agent" || env.UserAgent != "antigravity" {
-		t.Errorf("unexpected envelope headers: %+v", env)
+	if env.UserAgent != "antigravity" || env.RequestType != "" {
+		t.Errorf("expected plain chat envelope without requestType, got: %s / %s", env.UserAgent, env.RequestType)
 	}
 	if !strings.HasPrefix(env.RequestID, "agent-") {
 		t.Errorf("expected requestId starting with agent-, got: %s", env.RequestID)
+	}
+
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("failed marshaling envelope: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("failed unmarshaling envelope JSON: %v", err)
+	}
+	if _, exists := payload["requestType"]; exists {
+		t.Errorf("expected requestType omitted for plain chat, got: %v", payload["requestType"])
+	}
+	if payload["userAgent"] != "antigravity" {
+		t.Errorf("expected userAgent 'antigravity', got: %v", payload["userAgent"])
+	}
+}
+
+// TestBuildEnvelopeAgenticRequestType verifies that tool-enabled and session-scoped turns keep
+// requestType "agent" so upstream agentic semantics are preserved.
+func TestBuildEnvelopeAgenticRequestType(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     *ChatRequest
+		opts    BuildOptions
+		wantTyp string
+	}{
+		{
+			name: "tool enabled chat",
+			req: &ChatRequest{
+				Model:    "gemini-2.5-flash",
+				Messages: []ChatMessage{{Role: "user", Content: "Hello"}},
+				Tools: []any{
+					map[string]any{
+						"type": "function",
+						"function": map[string]any{
+							"name": "lookup",
+						},
+					},
+				},
+			},
+			wantTyp: "agent",
+		},
+		{
+			name: "session scoped chat",
+			req: &ChatRequest{
+				Model:    "gemini-2.5-flash",
+				Messages: []ChatMessage{{Role: "user", Content: "Hello"}},
+			},
+			opts:    BuildOptions{SessionID: "session-abc"},
+			wantTyp: "agent",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.opts.Info = catalog.FamilyDefaults(tt.req.Model)
+			env, err := BuildEnvelope(tt.req, tt.opts)
+			if err != nil {
+				t.Fatalf("BuildEnvelope failed: %v", err)
+			}
+			if env.RequestType != tt.wantTyp {
+				t.Errorf("RequestType = %q; want %q", env.RequestType, tt.wantTyp)
+			}
+
+			raw, err := json.Marshal(env)
+			if err != nil {
+				t.Fatalf("failed marshaling envelope: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatalf("failed unmarshaling envelope JSON: %v", err)
+			}
+			if payload["requestType"] != tt.wantTyp {
+				t.Errorf("envelope requestType = %v; want %q", payload["requestType"], tt.wantTyp)
+			}
+		})
 	}
 }
 
@@ -621,7 +698,151 @@ func TestWrapEnvelope(t *testing.T) {
 	if !strings.HasPrefix(env.RequestID, "agent-") {
 		t.Errorf("expected RequestID prefix 'agent-', got %s", env.RequestID)
 	}
-	if env.UserAgent != "antigravity" || env.RequestType != "agent" {
+	if env.UserAgent != "antigravity" || env.RequestType != "" {
 		t.Errorf("unexpected UserAgent or RequestType: %s / %s", env.UserAgent, env.RequestType)
+	}
+
+	agenticReq := &GeminiRequest{
+		Contents:  []Content{{Role: "user", Parts: []Part{{Text: "Hello world"}}}},
+		SessionID: "session-abc",
+	}
+	if got := WrapEnvelope(agenticReq, "gemini-pro-agent", "project-12345").RequestType; got != "agent" {
+		t.Errorf("expected session-scoped envelope requestType 'agent', got %q", got)
+	}
+}
+
+// TestGeminiFourXHighThinkingLevel verifies Gemini 4 models accept the deepest XHIGH
+// thinking level without requiring a -tiered model suffix.
+func TestGeminiFourXHighThinkingLevel(t *testing.T) {
+	req := &ChatRequest{
+		Model:           "gemini-4-neon",
+		Messages:        []ChatMessage{{Role: "user", Content: "Solve this"}},
+		ReasoningEffort: "xhigh",
+	}
+
+	info := catalog.FamilyDefaults(req.Model)
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: info})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	tc, ok := geminiReq.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+	if tc["thinkingLevel"] != "XHIGH" {
+		t.Errorf("thinkingLevel = %v; want XHIGH", tc["thinkingLevel"])
+	}
+	if tc["includeThoughts"] != true {
+		t.Errorf("expected includeThoughts true, got %v", tc["includeThoughts"])
+	}
+}
+
+// TestClaudeFiveChatThinkingLevel verifies the OpenAI-compatible path maps Claude 5+ reasoning
+// effort to thinkingLevel while legacy Claude 4.x keeps numeric thinking_budget compatibility.
+func TestClaudeFiveChatThinkingLevel(t *testing.T) {
+	req := &ChatRequest{
+		Model:           "claude-sonnet-5-5",
+		Messages:        []ChatMessage{{Role: "user", Content: "Plan"}},
+		ReasoningEffort: "max",
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.FamilyDefaults(req.Model)})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	tc, ok := geminiReq.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+	if tc["thinkingLevel"] != "MAX" || tc["includeThoughts"] != true {
+		t.Errorf("unexpected Claude 5 thinkingConfig: %v", tc)
+	}
+	if _, exists := tc["thinking_budget"]; exists {
+		t.Errorf("expected no legacy thinking_budget for Claude 5, got %v", tc)
+	}
+
+	legacyReq := &ChatRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []ChatMessage{{Role: "user", Content: "Plan"}},
+	}
+	legacyGemini, err := BuildRequest(legacyReq, BuildOptions{Info: catalog.FamilyDefaults(legacyReq.Model)})
+	if err != nil {
+		t.Fatalf("BuildRequest legacy failed: %v", err)
+	}
+	legacyTC, ok := legacyGemini.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected legacy thinkingConfig, got %v", legacyGemini.GenerationConfig["thinkingConfig"])
+	}
+	if _, exists := legacyTC["thinking_budget"]; !exists {
+		t.Errorf("expected legacy thinking_budget for Claude 4.x, got %v", legacyTC)
+	}
+}
+
+// TestBuildRequestInlineSystemFallback verifies the prompt-rejection fallback moves scrubbed
+// system instructions into the first user turn.
+func TestBuildRequestInlineSystemFallback(t *testing.T) {
+	req := &ChatRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []ChatMessage{
+			{Role: "system", Content: "You are OpenCode.\nAnswer concisely."},
+			{Role: "user", Content: "Hi"},
+		},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{
+		Info:         catalog.FamilyDefaults(req.Model),
+		InlineSystem: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	if geminiReq.SystemInstruction != nil {
+		t.Errorf("expected no systemInstruction on inline fallback, got %+v", geminiReq.SystemInstruction)
+	}
+	if len(geminiReq.Contents) == 0 || len(geminiReq.Contents[0].Parts) < 2 {
+		t.Fatalf("expected system text prepended to the first user turn, got %+v", geminiReq.Contents)
+	}
+	firstPart := geminiReq.Contents[0].Parts[0].Text
+	if !strings.Contains(firstPart, "You are a coding assistant.") || !strings.Contains(firstPart, "Answer concisely.") {
+		t.Errorf("unexpected inlined system text: %q", firstPart)
+	}
+	if lastText := geminiReq.Contents[0].Parts[len(geminiReq.Contents[0].Parts)-1].Text; lastText != "Hi" {
+		t.Errorf("expected original user text preserved last, got %q", lastText)
+	}
+}
+
+// TestGeminiFourEffortOverridesNumericBudget verifies Gemini 4 effort variants win over a
+// catalog-supplied numeric thinking budget so XHIGH is never downgraded to a budget path.
+func TestGeminiFourEffortOverridesNumericBudget(t *testing.T) {
+	budget := 12000
+	info := catalog.CatalogModel{
+		ID:              "gemini-4-carbon-high",
+		Thinking:        true,
+		ThinkingBudget:  &budget,
+		MaxOutputTokens: 65536,
+	}
+	req := &ChatRequest{
+		Model:           "gemini-4-carbon-high",
+		Messages:        []ChatMessage{{Role: "user", Content: "Solve this"}},
+		ReasoningEffort: "xhigh",
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: info})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	tc, ok := geminiReq.GenerationConfig["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinkingConfig, got %v", geminiReq.GenerationConfig["thinkingConfig"])
+	}
+	if tc["thinkingLevel"] != "XHIGH" {
+		t.Errorf("thinkingLevel = %v; want XHIGH", tc["thinkingLevel"])
+	}
+	if _, exists := tc["thinkingBudget"]; exists {
+		t.Errorf("expected effort level to replace numeric thinkingBudget, got %v", tc)
 	}
 }
