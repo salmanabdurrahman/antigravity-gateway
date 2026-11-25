@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,11 +19,39 @@ import (
 // falls back.
 const PreferIPv4Env = "AGW_PREFER_IPV4"
 
+var (
+	// sharedDefaultTransport reuses a single HTTP/2 connection pool when IPv4-first dialing is disabled.
+	sharedDefaultTransport = sync.OnceValue(func() *http.Transport {
+		return newTransportForMode(false)
+	})
+
+	// sharedIPv4Transport reuses a single HTTP/2 connection pool when AGW_PREFER_IPV4 is enabled.
+	sharedIPv4Transport = sync.OnceValue(func() *http.Transport {
+		return newTransportForMode(true)
+	})
+)
+
 // NewTransport constructs an optimized *http.Transport configured for multiplexed,
 // low-latency communication with Google Cloud Code Assist and Google OAuth endpoints.
 // It sets high per-host connection pools to avoid connection churn, enables HTTP/2,
 // bounds response header latency, and honors standard proxy environment variables.
 func NewTransport() *http.Transport {
+	return newTransportForMode(preferIPv4())
+}
+
+// sharedTransport returns the process-wide pooled *http.Transport matching the current
+// AGW_PREFER_IPV4 setting so short-lived clients reuse TLS and HTTP/2 connections instead of
+// allocating fresh idle connection pools on every call. Keeping it unexported prevents external
+// callers from mutating the shared pool configuration.
+func sharedTransport() *http.Transport {
+	if preferIPv4() {
+		return sharedIPv4Transport()
+	}
+	return sharedDefaultTransport()
+}
+
+// newTransportForMode builds a configured *http.Transport with either Happy Eyeballs or IPv4-first dialing.
+func newTransportForMode(ipv4First bool) *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -30,7 +59,7 @@ func NewTransport() *http.Transport {
 
 	return &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           newDialContext(dialer),
+		DialContext:           newDialContext(dialer, ipv4First),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   32,
@@ -44,9 +73,9 @@ func NewTransport() *http.Transport {
 // newDialContext returns the transport dialing function. The default keeps the standard Happy Eyeballs
 // dialer untouched; AGW_PREFER_IPV4 switches to an explicit IPv4-first ordering that still falls back
 // to IPv6 addresses when the IPv4 path fails.
-func newDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func newDialContext(dialer *net.Dialer, ipv4First bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	base := dialer.DialContext
-	if !preferIPv4() {
+	if !ipv4First {
 		return base
 	}
 
@@ -98,10 +127,11 @@ func ipFamilyRank(ip net.IP) int {
 	return 1
 }
 
-// DefaultHTTPClient returns an *http.Client configured with NewTransport and the provided timeout.
+// DefaultHTTPClient returns an *http.Client sharing the pooled gateway transport with the
+// provided request timeout.
 func DefaultHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Transport: NewTransport(),
+		Transport: sharedTransport(),
 		Timeout:   timeout,
 	}
 }

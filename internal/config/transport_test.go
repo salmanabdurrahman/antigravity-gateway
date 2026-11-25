@@ -101,3 +101,20 @@ func TestPreferIPv4EnvParsing(t *testing.T) {
 		})
 	}
 }
+
+// TestDefaultHTTPClientReusesSharedTransport verifies that consecutive DefaultHTTPClient calls
+// share the same underlying *http.Transport instead of allocating separate connection pools.
+func TestDefaultHTTPClientReusesSharedTransport(t *testing.T) {
+	t.Setenv(PreferIPv4Env, "0")
+	c1 := DefaultHTTPClient(5 * time.Second)
+	c2 := DefaultHTTPClient(15 * time.Second)
+	if c1.Transport != c2.Transport {
+		t.Fatalf("expected DefaultHTTPClient calls to share Transport, got %p vs %p", c1.Transport, c2.Transport)
+	}
+
+	t.Setenv(PreferIPv4Env, "1")
+	c3 := DefaultHTTPClient(10 * time.Second)
+	if c3.Transport == c1.Transport {
+		t.Fatalf("expected AGW_PREFER_IPV4=1 to use the IPv4-first shared transport")
+	}
+}

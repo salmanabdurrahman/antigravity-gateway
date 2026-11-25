@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
 )
 
 // TestDefaultClaudeSettingsPath verifies resolution of settings.json respecting CLAUDE_CONFIG_DIR.
@@ -189,5 +191,108 @@ func TestSetupClaude_CorruptedJSONFailsSafely(t *testing.T) {
 	}
 	if string(content) != string(corrupted) {
 		t.Error("corrupted settings file was modified despite error")
+	}
+}
+
+// TestSetupClaude_DynamicModelResolutionAndExperimentalMCPOptOut verifies that SetupClaude
+// resolves Sonnet, Opus, and Haiku models from the catalog when provided and respects
+// DisableExperimentalMCP.
+func TestSetupClaude_DynamicModelResolutionAndExperimentalMCPOptOut(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+
+	res, err := SetupClaude(t.Context(), ClaudeSetupOptions{
+		SettingsPath: settingsPath,
+		GatewayURL:   "http://127.0.0.1:51400",
+		APIKey:       "test-key",
+		Models: []catalog.CatalogModel{
+			{ID: "gemini-4-hydrogen-high"},
+			{ID: "claude-sonnet-4-6"},
+			{ID: "claude-opus-4-6-thinking"},
+			{ID: "claude-haiku-4-5"},
+		},
+		DisableExperimentalMCP: true,
+		NoVerify:               true,
+		DryRun:                 true,
+	})
+	if err != nil {
+		t.Fatalf("SetupClaude failed: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(res.WrittenJSON), &parsed); err != nil {
+		t.Fatalf("parsing dry-run JSON: %v", err)
+	}
+	envMap, _ := parsed["env"].(map[string]any)
+	if envMap["ANTHROPIC_MODEL"] != "claude-sonnet-4-6" {
+		t.Errorf("ANTHROPIC_MODEL = %v; want claude-sonnet-4-6", envMap["ANTHROPIC_MODEL"])
+	}
+	if envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
+		t.Errorf("ANTHROPIC_DEFAULT_OPUS_MODEL = %v; want claude-opus-4-6-thinking", envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "claude-haiku-4-5" {
+		t.Errorf("ANTHROPIC_DEFAULT_HAIKU_MODEL = %v; want claude-haiku-4-5", envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	}
+	if _, exists := envMap["ENABLE_EXPERIMENTAL_MCP_CLI"]; exists {
+		t.Errorf("expected ENABLE_EXPERIMENTAL_MCP_CLI omitted when DisableExperimentalMCP=true")
+	}
+}
+
+// TestSetupClaude_DisableExperimentalMCPRemovesExistingAndRanksVersions verifies that re-running
+// SetupClaude with DisableExperimentalMCP=true removes a previously written flag, and that
+// resolveClaudeModel ranks numeric versions and effort suffixes properly.
+func TestSetupClaude_DisableExperimentalMCPRemovesExistingAndRanksVersions(t *testing.T) {
+	tmpDir := t.TempDir()
+	settingsPath := filepath.Join(tmpDir, "settings.json")
+
+	initial := map[string]any{
+		"env": map[string]any{
+			"ENABLE_EXPERIMENTAL_MCP_CLI": "true",
+		},
+	}
+	raw, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatalf("marshaling initial settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, raw, 0o600); err != nil {
+		t.Fatalf("writing initial settings: %v", err)
+	}
+
+	res, err := SetupClaude(t.Context(), ClaudeSetupOptions{
+		SettingsPath: settingsPath,
+		GatewayURL:   "http://127.0.0.1:51400",
+		APIKey:       "test-key",
+		Models: []catalog.CatalogModel{
+			{ID: "claude-sonnet-5-5-high"},
+			{ID: "claude-sonnet-6-0-low"},
+			{ID: "claude-sonnet-6-0-high"},
+			{ID: "claude-opus-4-6"},
+			{ID: "claude-opus-4-10-medium"},
+			{ID: "claude-opus-4-10-high"},
+		},
+		DisableExperimentalMCP: true,
+		NoVerify:               true,
+		DryRun:                 false,
+	})
+	if err != nil {
+		t.Fatalf("SetupClaude failed: %v", err)
+	}
+
+	var persisted map[string]any
+	if err := json.Unmarshal([]byte(res.WrittenJSON), &persisted); err != nil {
+		t.Fatalf("parsing written JSON: %v", err)
+	}
+	envMap, _ := persisted["env"].(map[string]any)
+	if _, exists := envMap["ENABLE_EXPERIMENTAL_MCP_CLI"]; exists {
+		t.Errorf("expected ENABLE_EXPERIMENTAL_MCP_CLI removed from existing settings.json")
+	}
+	if envMap["ANTHROPIC_MODEL"] != "claude-sonnet-6-0-high" {
+		t.Errorf("ANTHROPIC_MODEL = %v; want claude-sonnet-6-0-high", envMap["ANTHROPIC_MODEL"])
+	}
+	if envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-10-high" {
+		t.Errorf("ANTHROPIC_DEFAULT_OPUS_MODEL = %v; want claude-opus-4-10-high", envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "claude-sonnet-6-0-high" {
+		t.Errorf("expected missing haiku tier to fall back to primary sonnet model, got %v", envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
 }

@@ -30,11 +30,11 @@ var doctorCmd = &cobra.Command{
 	Short: "Run diagnostics on ports, permissions, accounts, and network connectivity",
 	Long: `Doctor performs a comprehensive diagnostic check of the local Antigravity Gateway environment.
 It inspects:
-  - Local port availability (51400 for daemon, 51121 for OAuth PKCE callback)
+  - Local port availability (gateway daemon port and OAuth PKCE callback port from config)
   - POSIX filesystem permissions on ~/.agw (0700) and credential files (0600)
   - Configured Google accounts and token validity
   - Upstream network reachability to Google OAuth and Cloud Code Assist endpoints
-  - Integration status in Pi Coding Agent and OpenCode configurations`,
+  - Integration status in Pi Coding Agent, OpenCode, and Claude Code configurations`,
 	Example: `  agw doctor
   agw --config /etc/agw/config.json doctor`,
 	RunE: runDoctor,
@@ -158,11 +158,19 @@ func checkPorts(ctx context.Context, cfg *config.Config) []CheckItem {
 
 	// Check Gateway Port (default 51400). The configured host is loopback-clamped and formatted with
 	// IPv6-safe brackets so a "::1" configuration probes the interface the daemon actually binds.
-	port := cfg.Port
-	if port <= 0 {
-		port = config.DefaultPort
+	port := config.DefaultPort
+	hostRaw := config.DefaultHost
+	redirectURI := config.DefaultRedirectURI
+	if cfg != nil {
+		if cfg.Port > 0 {
+			port = cfg.Port
+		}
+		if cfg.Host != "" {
+			hostRaw = cfg.Host
+		}
+		redirectURI = cmp.Or(cfg.RedirectURI, config.DefaultRedirectURI)
 	}
-	host := config.LoopbackHost(cfg.Host)
+	host := config.LoopbackHost(hostRaw)
 	addr := config.ListenAddress(host, port)
 
 	// Probe if AGW is already running
@@ -216,21 +224,37 @@ func checkPorts(ctx context.Context, cfg *config.Config) []CheckItem {
 		}
 	}
 
-	// Check OAuth callback port (51121)
-	oauthAddr := "127.0.0.1:51121"
+	// Check OAuth callback port resolved from configured RedirectURI (default 127.0.0.1:51121).
+	if cfg != nil && cfg.RedirectURI != "" {
+		if parsed, parseErr := url.Parse(cfg.RedirectURI); parseErr != nil || parsed.Scheme == "" || parsed.Host == "" {
+			items = append(items, CheckItem{
+				Category: "Network Ports",
+				Name:     "OAuth Redirect URI",
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("Malformed redirect_uri %q; falling back to default callback listener", cfg.RedirectURI),
+				Hint:     "Set a valid loopback redirect_uri such as http://127.0.0.1:51121/oauth-callback in config.json",
+			})
+		}
+	}
+	oauthAddr, _ := auth.ResolveCallbackEndpoint(redirectURI)
+	_, oauthPort, splitErr := net.SplitHostPort(oauthAddr)
+	if splitErr != nil || oauthPort == "" {
+		oauthPort = "51121"
+	}
+
 	lnOAuth, bindErr := net.Listen("tcp", oauthAddr)
 	if bindErr == nil {
 		_ = lnOAuth.Close()
 		items = append(items, CheckItem{
 			Category: "Network Ports",
-			Name:     "OAuth Callback Port (51121)",
+			Name:     fmt.Sprintf("OAuth Callback Port (%s)", oauthPort),
 			Status:   StatusOK,
 			Message:  "Available to bind",
 		})
 	} else {
 		items = append(items, CheckItem{
 			Category: "Network Ports",
-			Name:     "OAuth Callback Port (51121)",
+			Name:     fmt.Sprintf("OAuth Callback Port (%s)", oauthPort),
 			Status:   StatusWarn,
 			Message:  fmt.Sprintf("Port is occupied: %v", bindErr),
 			Hint:     "Ensure no other OAuth listener is active when running 'agw login'",

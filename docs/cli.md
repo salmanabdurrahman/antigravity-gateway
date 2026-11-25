@@ -241,10 +241,11 @@ Registers the `antigravity` provider through `@opencode/ai/providers/openai-comp
 
 Configures Claude Code CLI to talk to the Anthropic Messages endpoint (`/v1/messages`) by updating `~/.claude/settings.json`.
 
-| Flag                | Purpose                                                                              |
-| :------------------ | :----------------------------------------------------------------------------------- |
-| `--model <id>`      | Primary `ANTHROPIC_MODEL` configured for the CLI (default `claude-sonnet-5-5-high`). |
-| `--settings <path>` | Settings file (default `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR`).           |
+| Flag                 | Purpose                                                                                                           |
+| :------------------- | :---------------------------------------------------------------------------------------------------------------- |
+| `--model <id>`       | Primary `ANTHROPIC_MODEL` configured for the CLI (auto-resolved from catalog, fallback `claude-sonnet-5-5-high`). |
+| `--settings <path>`  | Settings file (default `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR`).                                        |
+| `--experimental-mcp` | Set `ENABLE_EXPERIMENTAL_MCP_CLI=true` in Claude settings (default `true`).                                       |
 
 An `--api-key` value that does not match `agw_` plus 64 hexadecimal characters fails before any client file is written. To keep an intentionally custom key, edit `api_key` in `config.json` and the client files directly; `agw doctor` reports when a stored key no longer matches the generated format.
 
@@ -256,7 +257,7 @@ agw doctor
 
 Runs an end-to-end environment audit:
 
-1. **Network ports**: gateway port (`51400`) and OAuth callback port (`51121`).
+1. **Network ports**: gateway port (`51400` or configured `port`) and OAuth callback port resolved from `redirect_uri` (default `51121`).
 2. **Filesystem permissions**: `0700` directory and `0600` credential files, plus API-key format validation.
 3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions.
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.

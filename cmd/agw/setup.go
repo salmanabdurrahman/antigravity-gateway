@@ -49,6 +49,9 @@ var (
 	// setupClaudeModel specifies the model configured for Claude Code CLI.
 	setupClaudeModel string
 
+	// setupClaudeExperimentalMCP toggles injecting ENABLE_EXPERIMENTAL_MCP_CLI into Claude settings.
+	setupClaudeExperimentalMCP bool
+
 	// setupCmd registers gateway settings into local AI coding agent configurations.
 	setupCmd = &cobra.Command{
 		Use:   "setup",
@@ -117,7 +120,8 @@ func init() {
 	setupOpenCodeCmd.Flags().StringVar(&setupOpenCodePath, "config-file", "", "OpenCode configuration file (default ~/.config/opencode/opencode.json)")
 
 	setupClaudeCmd.Flags().StringVar(&setupClaudeSettingsPath, "settings", "", "Claude settings file (default ~/.claude/settings.json)")
-	setupClaudeCmd.Flags().StringVar(&setupClaudeModel, "model", client.DefaultClaudeModel, "Default model configured for Claude CLI")
+	setupClaudeCmd.Flags().StringVar(&setupClaudeModel, "model", "", "Default model configured for Claude CLI (auto-resolved from catalog, fallback: "+client.DefaultClaudeModel+")")
+	setupClaudeCmd.Flags().BoolVar(&setupClaudeExperimentalMCP, "experimental-mcp", true, "Set ENABLE_EXPERIMENTAL_MCP_CLI=true in Claude settings")
 
 	setupCmd.AddCommand(setupPiCmd)
 	setupCmd.AddCommand(setupOpenCodeCmd)
@@ -365,13 +369,20 @@ func runSetupClaude(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	models, err := loadAvailableModels(ctx, cfg, baseURL, apiKey)
+	if err != nil {
+		return fmt.Errorf("loading available models: %w", err)
+	}
+
 	opts := client.ClaudeSetupOptions{
-		SettingsPath: settingsPath,
-		GatewayURL:   baseURL,
-		APIKey:       apiKey,
-		Model:        setupClaudeModel,
-		NoVerify:     setupNoVerify,
-		DryRun:       setupDryRun,
+		SettingsPath:           settingsPath,
+		GatewayURL:             baseURL,
+		APIKey:                 apiKey,
+		Model:                  setupClaudeModel,
+		Models:                 models,
+		DisableExperimentalMCP: !setupClaudeExperimentalMCP,
+		NoVerify:               setupNoVerify,
+		DryRun:                 setupDryRun,
 	}
 
 	res, err := client.SetupClaude(ctx, opts)

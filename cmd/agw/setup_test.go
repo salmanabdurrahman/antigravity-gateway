@@ -239,3 +239,73 @@ func TestSetupDryRunRedactsSecrets(t *testing.T) {
 		t.Errorf("expected redacted gateway key indicator in dry-run output, got: %s", out)
 	}
 }
+
+// TestSetupClaudeCommandDynamicModelAndExperimentalMCPOptOut verifies that agw setup claude
+// resolves Claude models from /v1/models when --model is omitted and honors --experimental-mcp=false.
+func TestSetupClaudeCommandDynamicModelAndExperimentalMCPOptOut(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	claudeSettings := filepath.Join(tempHome, "claude", "settings.json")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data": []map[string]any{
+					{"id": "claude-sonnet-4-6", "context_window": 1000000},
+					{"id": "claude-opus-4-6-thinking", "context_window": 1000000},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	prevURL, prevKey, prevNoVerify, prevDryRun := setupURL, setupAPIKey, setupNoVerify, setupDryRun
+	prevSettings, prevModel, prevExpMCP := setupClaudeSettingsPath, setupClaudeModel, setupClaudeExperimentalMCP
+	t.Cleanup(func() {
+		setupURL, setupAPIKey, setupNoVerify, setupDryRun = prevURL, prevKey, prevNoVerify, prevDryRun
+		setupClaudeSettingsPath, setupClaudeModel, setupClaudeExperimentalMCP = prevSettings, prevModel, prevExpMCP
+		setupClaudeCmd.SetContext(nil)
+	})
+
+	setupURL = srv.URL
+	setupAPIKey = validTestAPIKey
+	setupNoVerify = true
+	setupDryRun = false
+	setupClaudeSettingsPath = claudeSettings
+	setupClaudeModel = ""
+	setupClaudeExperimentalMCP = false
+
+	buf := new(bytes.Buffer)
+	setupClaudeCmd.SetOut(buf)
+	setupClaudeCmd.SetErr(buf)
+	setupClaudeCmd.SetContext(t.Context())
+
+	if err := setupClaudeCmd.RunE(setupClaudeCmd, []string{}); err != nil {
+		t.Fatalf("setupClaudeCmd failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(claudeSettings)
+	if err != nil {
+		t.Fatalf("reading settings.json: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("parsing settings.json: %v", err)
+	}
+	envMap, _ := parsed["env"].(map[string]any)
+	if envMap["ANTHROPIC_MODEL"] != "claude-sonnet-4-6" {
+		t.Errorf("ANTHROPIC_MODEL = %v; want claude-sonnet-4-6", envMap["ANTHROPIC_MODEL"])
+	}
+	if envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-4-6-thinking" {
+		t.Errorf("ANTHROPIC_DEFAULT_OPUS_MODEL = %v; want claude-opus-4-6-thinking", envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if _, exists := envMap["ENABLE_EXPERIMENTAL_MCP_CLI"]; exists {
+		t.Errorf("expected ENABLE_EXPERIMENTAL_MCP_CLI omitted when --experimental-mcp=false")
+	}
+}

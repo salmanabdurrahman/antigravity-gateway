@@ -10,12 +10,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
 )
 
-// DefaultClaudeModel specifies the primary model configured for Claude Code CLI.
+// DefaultClaudeModel specifies the fallback primary model configured for Claude Code CLI when
+// no matching Claude Sonnet model is found in the available catalog.
 const DefaultClaudeModel = "claude-sonnet-5-5-high"
+
+// DefaultClaudeOpusModel specifies the fallback Opus model configured for Claude Code CLI when
+// no matching Claude Opus model is found in the available catalog.
+const DefaultClaudeOpusModel = "claude-opus-5-5-high"
 
 // ClaudeSetupOptions encapsulates parameters for configuring Claude Code CLI (~/.claude/settings.json).
 type ClaudeSetupOptions struct {
@@ -28,8 +37,16 @@ type ClaudeSetupOptions struct {
 	// APIKey is the Bearer key required to authenticate against the gateway.
 	APIKey string
 
-	// Model specifies the default ANTHROPIC_MODEL configured in settings.json.
+	// Model specifies the primary ANTHROPIC_MODEL configured in settings.json. When empty, the
+	// best matching Claude Sonnet model from Models is selected (falling back to DefaultClaudeModel).
 	Model string
+
+	// Models provides the available catalog models used to resolve default Claude Sonnet, Opus,
+	// and Haiku identifiers dynamically without hardcoding unavailable IDs.
+	Models []catalog.CatalogModel
+
+	// DisableExperimentalMCP omits ENABLE_EXPERIMENTAL_MCP_CLI from the generated settings env map.
+	DisableExperimentalMCP bool
 
 	// NoVerify when true skips the post-setup live completion test probe.
 	NoVerify bool
@@ -83,7 +100,12 @@ func SetupClaude(ctx context.Context, opts ClaudeSetupOptions) (*ClaudeSetupResu
 	}
 
 	apiKey := cmp.Or(opts.APIKey, "test")
-	model := cmp.Or(opts.Model, DefaultClaudeModel)
+	model := opts.Model
+	if model == "" {
+		model = resolveClaudeModel(opts.Models, "sonnet", DefaultClaudeModel)
+	}
+	opusModel := resolveClaudeModel(opts.Models, "opus", DefaultClaudeOpusModel)
+	haikuModel := resolveClaudeModel(opts.Models, "haiku", model)
 
 	settingsMap := make(map[string]any)
 	if existingBytes, err := os.ReadFile(settingsPath); err == nil && len(existingBytes) > 0 {
@@ -102,11 +124,15 @@ func SetupClaude(ctx context.Context, opts ClaudeSetupOptions) (*ClaudeSetupResu
 	envMap["ANTHROPIC_BASE_URL"] = gatewayURL
 	envMap["ANTHROPIC_AUTH_TOKEN"] = apiKey
 	envMap["ANTHROPIC_MODEL"] = model
-	envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "claude-opus-5-5-high"
+	envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] = opusModel
 	envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-	envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
+	envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haikuModel
 	envMap["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-	envMap["ENABLE_EXPERIMENTAL_MCP_CLI"] = "true"
+	if opts.DisableExperimentalMCP {
+		delete(envMap, "ENABLE_EXPERIMENTAL_MCP_CLI")
+	} else {
+		envMap["ENABLE_EXPERIMENTAL_MCP_CLI"] = "true"
+	}
 
 	settingsMap["env"] = envMap
 
@@ -140,4 +166,76 @@ func SetupClaude(ctx context.Context, opts ClaudeSetupOptions) (*ClaudeSetupResu
 	}
 
 	return res, nil
+}
+
+// resolveClaudeModel selects the highest-ranked matching Claude model identifier for tier
+// ("sonnet", "opus", or "haiku") from available catalog models using numeric version comparison and
+// effort ranking (high > medium > base > low), falling back to preferredFallback when no catalog
+// model matches tier.
+func resolveClaudeModel(models []catalog.CatalogModel, tier string, preferredFallback string) string {
+	if len(models) == 0 {
+		return preferredFallback
+	}
+
+	var matches []string
+	for _, m := range models {
+		lower := strings.ToLower(m.ID)
+		if strings.Contains(lower, "claude") && strings.Contains(lower, tier) {
+			matches = append(matches, m.ID)
+		}
+	}
+	if len(matches) == 0 {
+		return preferredFallback
+	}
+	slices.SortFunc(matches, compareClaudeModelRank)
+	return matches[len(matches)-1]
+}
+
+// compareClaudeModelRank orders two Claude model identifiers ascending by numeric version
+// components, then effort tier (low < base < medium < high), then lexical tie-break.
+func compareClaudeModelRank(a, b string) int {
+	va := parseClaudeVersionTuple(a)
+	vb := parseClaudeVersionTuple(b)
+	for i := range max(len(va), len(vb)) {
+		var na, nb int
+		if i < len(va) {
+			na = va[i]
+		}
+		if i < len(vb) {
+			nb = vb[i]
+		}
+		if c := cmp.Compare(na, nb); c != 0 {
+			return c
+		}
+	}
+	if c := cmp.Compare(claudeEffortRank(a), claudeEffortRank(b)); c != 0 {
+		return c
+	}
+	return strings.Compare(strings.ToLower(a), strings.ToLower(b))
+}
+
+// parseClaudeVersionTuple extracts numeric version tokens from a Claude model identifier.
+func parseClaudeVersionTuple(id string) []int {
+	var nums []int
+	for part := range strings.SplitSeq(strings.ToLower(id), "-") {
+		if n, err := strconv.Atoi(part); err == nil {
+			nums = append(nums, n)
+		}
+	}
+	return nums
+}
+
+// claudeEffortRank assigns an ordering score to effort suffixes so higher-capability variants win.
+func claudeEffortRank(id string) int {
+	lower := strings.ToLower(id)
+	switch {
+	case strings.Contains(lower, "-high"):
+		return 4
+	case strings.Contains(lower, "-medium"):
+		return 3
+	case strings.Contains(lower, "-low"):
+		return 1
+	default:
+		return 2
+	}
 }

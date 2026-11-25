@@ -283,3 +283,30 @@ func TestConnectivityAddressFamiliesAndProxy(t *testing.T) {
 		t.Error("expected HTTPS proxy configuration to be reported")
 	}
 }
+
+// TestDoctorCustomRedirectURIPort verifies that checkPorts resolves the OAuth callback port from
+// cfg.RedirectURI instead of assuming port 51121.
+func TestDoctorCustomRedirectURIPort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("binding ephemeral callback port: %v", err)
+	}
+	defer ln.Close()
+
+	callbackPort := ln.Addr().(*net.TCPAddr).Port
+	cfg := config.DefaultConfig()
+	cfg.Port = getFreePort(t)
+	cfg.RedirectURI = "http://127.0.0.1:" + strings.TrimSpace(ln.Addr().String()[len("127.0.0.1:"):]) + "/oauth-callback"
+
+	items := checkPorts(t.Context(), cfg)
+	wantName := "OAuth Callback Port (" + strings.TrimSpace(ln.Addr().String()[len("127.0.0.1:"):]) + ")"
+	foundCustom := false
+	for _, item := range items {
+		if item.Name == wantName && item.Status == StatusWarn {
+			foundCustom = true
+		}
+	}
+	if !foundCustom {
+		t.Errorf("expected %q warning for occupied custom callback port %d, got: %+v", wantName, callbackPort, items)
+	}
+}
