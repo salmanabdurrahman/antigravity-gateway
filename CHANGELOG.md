@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disambiguated global `--config` flag across subcommands and renamed local OpenCode setup flag to `--config-file`.
 - Corrected OpenCode API key inspection in `agw doctor` to check provider settings rather than options.
 - Isolated unit tests from host browser launches and live internet TCP dialing.
+- Added ephemeral `/health` probe mock server to foreground collision tests, eliminating runner timeout deadlocks.
 
 ### Security
 

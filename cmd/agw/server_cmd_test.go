@@ -4,11 +4,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,9 +195,30 @@ func TestStartForegroundAlreadyRunning(t *testing.T) {
 		startPort = 0
 	}()
 
+	// Spawn a real mock /health server on an ephemeral port
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(server.HealthResponse{
+			OK:      true,
+			Name:    server.ServerName,
+			Version: config.Version,
+		})
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	mockPort, _ := strconv.Atoi(u.Port())
+
+	cfg := config.DefaultConfig()
+	cfg.Port = mockPort
+	cfgPath, _ := config.ConfigFilePath()
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config failed: %v", err)
+	}
+
 	pidFile := filepath.Join(tempDir, "agw.pid")
-	// Simulate an active process
-	activePID := 1 // init/launchd always exists
+	// Simulate an active process matching init/launchd
+	activePID := 1
 	if err := server.WritePID(pidFile, activePID); err != nil {
 		t.Fatalf("writing fake active pid failed: %v", err)
 	}
