@@ -977,3 +977,45 @@ func TestAdjustFixedBudgetZeroCeilingFallback(t *testing.T) {
 		t.Fatalf("expected maxOutputTokens %d, got %v", 4096+8192, maxOut)
 	}
 }
+
+// TestBuildModelPartsCallBeforeTextPreservesSignature verifies that a text thoughtSignature is not
+// dropped when a recipe lists a tool call step before the text step that owns the signature.
+func TestBuildModelPartsCallBeforeTextPreservesSignature(t *testing.T) {
+	details := []ReasoningDetail{RecipeDetail(Recipe{
+		Model: "gemini-3.8-pro",
+		Steps: []RecipeStep{
+			{Type: "call", ID: "call_1", Sig: "sig-call"},
+			{Type: "text", Sig: "sig-text"},
+		},
+	})}
+
+	msg := ChatMessage{
+		Role:             "assistant",
+		Content:          "done",
+		ReasoningDetails: details,
+		ToolCalls: []ChatToolCall{
+			{ID: "call_1", Type: "function", Function: ChatFunctionCall{Name: "edit", Arguments: `{}`}},
+		},
+	}
+
+	parts := buildModelParts(msg, "gemini-3.8-pro")
+	if len(parts) < 2 {
+		t.Fatalf("expected text and function call parts, got %d part(s)", len(parts))
+	}
+
+	text := parts[0]
+	if text.FunctionCall != nil || text.Text != "done" {
+		t.Fatalf("expected text part first, got %+v", text)
+	}
+	if text.ThoughtSignature != "sig-text" {
+		t.Errorf("expected text signature sig-text preserved, got %q", text.ThoughtSignature)
+	}
+
+	call := parts[1]
+	if call.FunctionCall == nil || call.FunctionCall.Name != "edit" {
+		t.Fatalf("expected edit function call part, got %+v", call)
+	}
+	if call.ThoughtSignature != "sig-call" {
+		t.Errorf("expected call signature sig-call preserved, got %q", call.ThoughtSignature)
+	}
+}

@@ -111,8 +111,10 @@ func init() {
 	rootCmd.AddCommand(setupCmd)
 }
 
-// resolveGatewayEndpoint determines the target gateway URL and API key from flags, running daemon, or config file.
-func resolveGatewayEndpoint(cfg *config.Config) (string, string) {
+// resolveGatewayEndpoint determines the target gateway URL and API key from flags, running daemon, or
+// config file. An explicitly supplied --api-key is validated up front so a malformed key fails the
+// command instead of being written into every client configuration.
+func resolveGatewayEndpoint(cfg *config.Config) (string, string, error) {
 	baseURL := setupURL
 	if baseURL == "" {
 		host := config.LoopbackHost(cfg.Host)
@@ -125,7 +127,12 @@ func resolveGatewayEndpoint(cfg *config.Config) (string, string) {
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	apiKey := cmp.Or(setupAPIKey, cfg.APIKey)
-	return baseURL, apiKey
+	if setupAPIKey != "" {
+		if err := config.ValidateAPIKey(setupAPIKey); err != nil {
+			return "", "", fmt.Errorf("invalid --api-key: %w", err)
+		}
+	}
+	return baseURL, apiKey, nil
 }
 
 // loadAvailableModels retrieves models from the running daemon, local cache, or family defaults.
@@ -197,7 +204,10 @@ func runSetupPi(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	baseURL, apiKey := resolveGatewayEndpoint(cfg)
+	baseURL, apiKey, err := resolveGatewayEndpoint(cfg)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -261,7 +271,10 @@ func runSetupOpenCode(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	baseURL, apiKey := resolveGatewayEndpoint(cfg)
+	baseURL, apiKey, err := resolveGatewayEndpoint(cfg)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -321,7 +334,10 @@ func runSetupClaude(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	baseURL, apiKey := resolveGatewayEndpoint(cfg)
+	baseURL, apiKey, err := resolveGatewayEndpoint(cfg)
+	if err != nil {
+		return err
+	}
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -369,17 +385,19 @@ func runSetupClaude(cmd *cobra.Command, args []string) error {
 }
 
 // redactSetupJSON masks sensitive API keys and tokens in configuration JSON before printing to stdout.
+// Masking never depends on the secret length: a short placeholder token is still a credential, and a
+// partially printed key is a leak.
 func redactSetupJSON(raw string, gatewayKey string) string {
 	if gatewayKey != "" {
 		raw = strings.ReplaceAll(raw, gatewayKey, "agw_••••••••")
 	}
-	re := regexp.MustCompile(`("apiKey"|"ANTHROPIC_AUTH_TOKEN"|"token"):\s*"([^"]+)"`)
+	re := regexp.MustCompile(`("(?:apiKey|api_key|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|token)"):\s*"([^"]*)"`)
 	raw = re.ReplaceAllStringFunc(raw, func(match string) string {
 		sub := re.FindStringSubmatch(match)
-		if len(sub) == 3 && len(sub[2]) > 8 {
-			return fmt.Sprintf(`%s: "%s••••••••"`, sub[1], sub[2][:4])
+		if len(sub) != 3 || sub[2] == "" {
+			return match
 		}
-		return match
+		return fmt.Sprintf(`%s: "<redacted:%d chars>"`, sub[1], len(sub[2]))
 	})
 	return raw
 }

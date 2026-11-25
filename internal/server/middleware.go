@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -98,9 +99,21 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Public liveness probe and local WebUI dashboard endpoints require no API key
-			path := strings.TrimRight(r.URL.Path, "/")
-			if path == "" || path == "/health" || path == "/ui" || strings.HasPrefix(path, "/ui/") {
+			// Normalize the request path before the public-endpoint decision: an uncleaned
+			// "/ui/../v1/accounts" must never inherit the unauthenticated /ui prefix, and any leftover
+			// traversal segment is rejected outright instead of relying on ServeMux redirect behavior.
+			if hasTraversalSegment(r.URL.Path) {
+				logger.Warn("rejected request path traversal attempt",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"remote", r.RemoteAddr,
+				)
+				sendJSONError(w, http.StatusBadRequest, "Invalid request path.", 0)
+				return
+			}
+
+			cleanPath := path.Clean("/" + r.URL.Path)
+			if cleanPath == "/" || cleanPath == "/health" || cleanPath == "/ui" || strings.HasPrefix(cleanPath, "/ui/") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -122,6 +135,17 @@ func AuthMiddleware(apiKey string, logger *slog.Logger) func(http.Handler) http.
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// hasTraversalSegment reports whether any decoded path segment is a parent-directory reference.
+// `path.Clean` resolves such segments silently, so the raw request path is inspected instead.
+func hasTraversalSegment(rawPath string) bool {
+	for segment := range strings.SplitSeq(rawPath, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // LoggingMiddleware logs HTTP requests, response status codes, and execution latency with log/slog.

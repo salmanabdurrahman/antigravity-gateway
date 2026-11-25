@@ -2,6 +2,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -9,8 +10,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
@@ -480,20 +484,45 @@ var connectivityDialer = func(ctx context.Context, host string) (time.Duration, 
 	return duration, err
 }
 
-// checkConnectivity tests outbound network reachability to Google OAuth and Cloud Code Assist endpoints.
+// addressFamilyResolver abstracts DNS resolution for the IPv4 vs IPv6 health checks, keeping the
+// diagnostic hermetic under tests and offline sandboxes.
+var addressFamilyResolver = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// familyDialer abstracts single-address-family TCP dialing for the IPv4 vs IPv6 health checks.
+var familyDialer = func(ctx context.Context, network, host string) (time.Duration, error) {
+	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, network, host)
+	duration := time.Since(start)
+	if err == nil {
+		_ = conn.Close()
+	}
+	return duration, err
+}
+
+// checkConnectivity tests outbound network reachability to Google OAuth and Cloud Code Assist endpoints,
+// reports address-family health for the Cloud Code hosts, and surfaces proxy configuration without
+// echoing proxy credentials.
 func checkConnectivity(ctx context.Context) []CheckItem {
 	var items []CheckItem
 
 	endpoints := []struct {
 		name string
 		host string
+		port string
+		// families enables per-address-family probing for hosts whose IPv6 path commonly stalls.
+		families bool
 	}{
-		{"Google OAuth 2.0 Endpoint", "oauth2.googleapis.com:443"},
-		{"Cloud Code Assist PA Endpoint", "cloudcode-pa.googleapis.com:443"},
+		{name: "Google OAuth 2.0 Endpoint", host: "oauth2.googleapis.com", port: "443"},
+		{name: "Cloud Code Assist Daily Endpoint", host: "daily-cloudcode-pa.googleapis.com", port: "443", families: true},
+		{name: "Cloud Code Assist PA Endpoint", host: "cloudcode-pa.googleapis.com", port: "443", families: true},
 	}
 
 	for _, ep := range endpoints {
-		duration, err := connectivityDialer(ctx, ep.host)
+		hostPort := net.JoinHostPort(ep.host, ep.port)
+		duration, err := connectivityDialer(ctx, hostPort)
 
 		if err != nil {
 			items = append(items, CheckItem{
@@ -501,19 +530,124 @@ func checkConnectivity(ctx context.Context) []CheckItem {
 				Name:     ep.name,
 				Status:   StatusFail,
 				Message:  fmt.Sprintf("Unreachable (%v)", err),
-				Hint:     "Check your internet connection or DNS resolver",
+				Hint:     "Check your internet connection, DNS resolver, and HTTPS_PROXY settings",
 			})
-		} else {
-			items = append(items, CheckItem{
-				Category: "Upstream Connectivity",
-				Name:     ep.name,
-				Status:   StatusOK,
-				Message:  fmt.Sprintf("Reachable (%s latency)", duration.Round(time.Millisecond)),
-			})
+			continue
+		}
+
+		items = append(items, CheckItem{
+			Category: "Upstream Connectivity",
+			Name:     ep.name,
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Reachable (%s latency)", duration.Round(time.Millisecond)),
+		})
+
+		if ep.families {
+			items = append(items, addressFamilyChecks(ctx, ep.name, ep.host, ep.port)...)
 		}
 	}
 
+	return append(items, proxyEnvironmentChecks()...)
+}
+
+// addressFamilyChecks probes IPv4 and IPv6 reachability independently. A family with no published
+// address is reported as informational rather than a failure, while a published but unreachable family
+// is a warning: it is the usual cause of multi-second Happy Eyeballs stalls.
+func addressFamilyChecks(ctx context.Context, endpointName, host, port string) []CheckItem {
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	addrs, err := addressFamilyResolver(lookupCtx, host)
+	cancel()
+	if err != nil {
+		return []CheckItem{{
+			Category: "Upstream Connectivity",
+			Name:     endpointName + " address families",
+			Status:   StatusWarn,
+			Message:  fmt.Sprintf("Could not resolve address families (%v)", err),
+			Hint:     "Verify DNS resolution; per-family health cannot be determined",
+		}}
+	}
+
+	var items []CheckItem
+	for _, family := range []struct {
+		label   string
+		network string
+		isIPv4  bool
+	}{
+		{label: "IPv4", network: "tcp4", isIPv4: true},
+		{label: "IPv6", network: "tcp6", isIPv4: false},
+	} {
+		published := slices.ContainsFunc(addrs, func(addr net.IPAddr) bool {
+			return (addr.IP.To4() != nil) == family.isIPv4
+		})
+		if !published {
+			items = append(items, CheckItem{
+				Category: "Upstream Connectivity",
+				Name:     fmt.Sprintf("%s over %s", endpointName, family.label),
+				Status:   StatusOK,
+				Message:  fmt.Sprintf("No %s address published by DNS", family.label),
+			})
+			continue
+		}
+
+		dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
+		duration, dialErr := familyDialer(dialCtx, family.network, net.JoinHostPort(host, port))
+		dialCancel()
+		if dialErr != nil {
+			items = append(items, CheckItem{
+				Category: "Upstream Connectivity",
+				Name:     fmt.Sprintf("%s over %s", endpointName, family.label),
+				Status:   StatusWarn,
+				Message:  fmt.Sprintf("Unreachable (%v)", dialErr),
+				Hint:     "If IPv6 blackholes traffic, set AGW_PREFER_IPV4=1 to dial IPv4 first",
+			})
+			continue
+		}
+
+		items = append(items, CheckItem{
+			Category: "Upstream Connectivity",
+			Name:     fmt.Sprintf("%s over %s", endpointName, family.label),
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Reachable (%s latency)", duration.Round(time.Millisecond)),
+		})
+	}
+
 	return items
+}
+
+// proxyEnvironmentChecks reports whether HTTPS_PROXY routes upstream traffic and masks any credentials
+// embedded in the proxy URL.
+func proxyEnvironmentChecks() []CheckItem {
+	raw := cmp.Or(os.Getenv("HTTPS_PROXY"), os.Getenv("https_proxy"))
+	if raw == "" {
+		return []CheckItem{{
+			Category: "Upstream Connectivity",
+			Name:     "HTTPS Proxy",
+			Status:   StatusOK,
+			Message:  "Direct connection (no HTTPS_PROXY configured)",
+		}}
+	}
+
+	item := CheckItem{
+		Category: "Upstream Connectivity",
+		Name:     "HTTPS Proxy",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("Configured (%s)", redactProxyURL(raw)),
+		Hint:     "Connectivity probes above dial Google directly; a proxy must allow the Cloud Code and OAuth hosts",
+	}
+	if noProxy := cmp.Or(os.Getenv("NO_PROXY"), os.Getenv("no_proxy")); noProxy != "" && !strings.Contains(noProxy, "googleapis.com") {
+		item.Message += fmt.Sprintf("; NO_PROXY=%s", noProxy)
+	}
+	return []CheckItem{item}
+}
+
+// redactProxyURL renders a proxy URL without its userinfo, so embedded proxy credentials never reach
+// the terminal or a diagnostic report.
+func redactProxyURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "<unparseable proxy url>"
+	}
+	return fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
 }
 
 // checkAPIKey verifies that the configured gateway API key still follows the generated format.

@@ -5,6 +5,7 @@ package client
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -61,8 +62,8 @@ func TestAtomicWriteAndBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat failed: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("expected perm 0600, got %o", info.Mode().Perm())
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
+		t.Errorf("expected perm 0600, got %o", perm)
 	}
 
 	backupPath, err := BackupFile(filePath, "20261114-120000")

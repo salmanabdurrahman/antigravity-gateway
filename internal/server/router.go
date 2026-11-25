@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -183,6 +184,8 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET /ui/api/status", s.handleUIStatus)
 	mux.HandleFunc("POST /ui/api/strategy", s.handleUIStrategy)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("GET /v1/models/{id}", s.handleModelByID)
+	mux.HandleFunc("POST /ui/api/refresh", s.handleUIRefresh)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 	mux.HandleFunc("GET /v1/accounts", s.handleAccounts)
@@ -197,8 +200,13 @@ func (s *Server) buildHandler() http.Handler {
 	return handler
 }
 
-// handleHealth answers liveness probes and reports gateway version and usable account counts.
+// handleHealth answers liveness probes and reports gateway version and usable account counts. The
+// endpoint is unauthenticated, so it stays restricted to loopback authorities like the dashboard.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackHost(r.Host) {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
+		return
+	}
 	if (r.URL.Path == "/" || r.URL.Path == "") && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		http.Redirect(w, r, "/ui", http.StatusFound)
 		return
@@ -238,28 +246,68 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	snap, _ := s.catalog.Snapshot()
 	items := make([]ModelItem, len(snap.Models))
 	for i, m := range snap.Models {
-		items[i] = ModelItem{
-			ID:            m.ID,
-			Object:        "model",
-			Created:       0,
-			OwnedBy:       ServerName,
-			ContextWindow: m.ContextWindow,
-			Meta: ModelMetadata{
-				DisplayName:     m.DisplayName,
-				ContextLength:   m.ContextWindow,
-				MaxOutputTokens: m.MaxOutputTokens,
-				Thinking:        m.Thinking,
-				ThinkingBudget:  m.ThinkingBudget,
-				Multimodal:      m.Images,
-				ToolCalling:     true,
-			},
-		}
+		items[i] = newModelItem(m)
 	}
 
 	sendJSON(w, http.StatusOK, ModelListResponse{
 		Object: "list",
 		Data:   items,
 	})
+}
+
+// newModelItem converts a catalog model into the OpenAI model descriptor returned by the models API.
+func newModelItem(m catalog.CatalogModel) ModelItem {
+	return ModelItem{
+		ID:            m.ID,
+		Object:        "model",
+		Created:       0,
+		OwnedBy:       ServerName,
+		ContextWindow: m.ContextWindow,
+		Meta: ModelMetadata{
+			DisplayName:     m.DisplayName,
+			ContextLength:   m.ContextWindow,
+			MaxOutputTokens: m.MaxOutputTokens,
+			Thinking:        m.Thinking,
+			ThinkingBudget:  m.ThinkingBudget,
+			Multimodal:      m.Images,
+			ToolCalling:     true,
+		},
+	}
+}
+
+// handleModelByID retrieves a single model descriptor, resolving configured and built-in aliases the
+// same way a completions request would, and answers an OpenAI-compatible 404 for unknown models.
+func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
+	requested := strings.TrimSpace(r.PathValue("id"))
+	if requested == "" {
+		sendJSONError(w, http.StatusNotFound, "Model identifier is required.", 0)
+		return
+	}
+
+	if err := s.catalog.Ensure(r.Context()); err != nil {
+		if snap, _ := s.catalog.Snapshot(); len(snap.Models) == 0 {
+			status := http.StatusBadGateway
+			var rotErr *rotator.RotatorError
+			if errors.As(err, &rotErr) {
+				status = rotErr.StatusCode
+			}
+			sendJSONError(w, status, fmt.Sprintf("Could not resolve model '%s': %v", requested, err), 0)
+			return
+		}
+	}
+
+	resolved := catalog.ResolveModelAlias(requested, s.config().ModelMapping)
+	upstream := catalog.UpstreamModel(resolved)
+
+	snap, _ := s.catalog.Snapshot()
+	for _, m := range snap.Models {
+		if strings.EqualFold(m.ID, requested) || strings.EqualFold(m.ID, resolved) || strings.EqualFold(m.ID, upstream) {
+			sendJSON(w, http.StatusOK, newModelItem(m))
+			return
+		}
+	}
+
+	sendJSONError(w, http.StatusNotFound, fmt.Sprintf("The model '%s' does not exist", requested), 0)
 }
 
 // handleAccounts returns non-secret account diagnostics, request metrics, and cooldown states.
@@ -286,6 +334,9 @@ type UIStatusResponse struct {
 
 	// Quotas maps model identifiers to their live remaining quota metrics.
 	Quotas map[string]catalog.ModelQuota `json:"quotas,omitempty"`
+
+	// AccountQuota separates the rolling five-hour window from the weekly allowance.
+	AccountQuota *catalog.AccountQuotaSummary `json:"account_quota,omitzero"`
 }
 
 // UIStrategyRequest represents the incoming JSON payload to dynamically update the rotation strategy.
@@ -319,6 +370,11 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The dashboard is unauthenticated on loopback, so framing defenses stop a remote page from
+	// embedding it and driving the strategy control through a victim browser. Only frame-ancestors is
+	// declared because the page relies on inline styles and scripts.
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(webui.IndexHTML))
 }
@@ -339,32 +395,81 @@ func (s *Server) handleUIStatus(w http.ResponseWriter, r *http.Request) {
 	snapshots := s.rotator.Pool().Snapshots()
 
 	sendJSON(w, http.StatusOK, UIStatusResponse{
-		Version:  config.Version,
-		Strategy: string(s.rotator.Strategy()),
-		Accounts: snapshots,
-		Models:   snap.Models,
-		Quotas:   snap.Quotas,
+		Version:      config.Version,
+		Strategy:     string(s.rotator.Strategy()),
+		Accounts:     snapshots,
+		Models:       snap.Models,
+		Quotas:       snap.Quotas,
+		AccountQuota: snap.AccountQuota,
 	})
+}
+
+// handleUIRefresh forces a live model catalog and quota refresh for the dashboard.
+func (s *Server) handleUIRefresh(w http.ResponseWriter, r *http.Request) {
+	if !authorizeSameOriginMutation(w, r) {
+		return
+	}
+
+	if err := s.catalog.Refresh(r.Context()); err != nil {
+		// Refresh failures are surfaced without leaking upstream credentials; the dashboard keeps
+		// rendering the last known snapshot.
+		s.logger.Warn("dashboard quota refresh failed", "error", err)
+		sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Quota refresh failed: %v", err), 0)
+		return
+	}
+
+	snap, _ := s.catalog.Snapshot()
+	sendJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"models": len(snap.Models),
+	})
+}
+
+// authorizeSameOriginMutation enforces loopback authority plus a same-origin request signal on the
+// unauthenticated dashboard mutation endpoints, and writes the rejection response itself when the
+// request must not proceed.
+func authorizeSameOriginMutation(w http.ResponseWriter, r *http.Request) bool {
+	if !isLoopbackHost(r.Host) {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
+		return false
+	}
+
+	// Protocol Quirk: the dashboard is unauthenticated on loopback, so reject cross-site mutations that a
+	// malicious page could issue as a "simple" request without preflight. A mutation must carry a
+	// same-origin signal: browsers always send Origin on cross-origin POSTs and modern browsers also send
+	// Sec-Fetch-Site, so older clients that send neither are rejected rather than trusted by default.
+	site := r.Header.Get("Sec-Fetch-Site")
+	if site != "" && site != "same-origin" && site != "none" {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
+		return false
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		parsedOrigin, parseErr := url.Parse(origin)
+		if parseErr != nil || !strings.EqualFold(parsedOrigin.Host, r.Host) || !isLoopbackHost(parsedOrigin.Host) {
+			sendJSONError(w, http.StatusForbidden, "Cross-origin strategy mutation is not permitted.", 0)
+			return false
+		}
+		return true
+	}
+
+	if site != "same-origin" && site != "none" {
+		sendJSONError(w, http.StatusForbidden, "Forbidden: mutations require a same-origin Origin or Sec-Fetch-Site header", 0)
+		return false
+	}
+	return true
 }
 
 // handleUIStrategy updates the active account rotation strategy dynamically via the WebUI dashboard.
 func (s *Server) handleUIStrategy(w http.ResponseWriter, r *http.Request) {
-	if !isLoopbackHost(r.Host) {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: loopback access only", 0)
-		return
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		sendJSONError(w, http.StatusForbidden, "Forbidden: cross-site requests not allowed", 0)
+	if !authorizeSameOriginMutation(w, r) {
 		return
 	}
 
-	// Protocol Quirk: the dashboard is unauthenticated on loopback, so reject cross-site
-	// mutations that a malicious page could issue as a "simple" request without preflight.
-	if origin := r.Header.Get("Origin"); origin != "" {
-		if host, err := url.Parse(origin); err != nil || !strings.EqualFold(host.Host, r.Host) || !isLoopbackHost(host.Host) {
-			sendJSONError(w, http.StatusForbidden, "Cross-origin strategy mutation is not permitted.", 0)
-			return
-		}
+	if mediaType, _, mediaErr := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaErr != nil || mediaType != "application/json" {
+		sendJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json", 0)
+		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
@@ -438,6 +543,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("session_id"),
 		r.Header.Get("X-Session-Id"),
 	)
+	// Clients that send no affinity header still need a stable session so sticky rotation and the
+	// thought-signature cache survive multi-turn tool loops. Derivation stays limited to tool-enabled
+	// turns because a session identifier marks the envelope as agent traffic.
+	if sessionID == "" && len(chatReq.Tools) > 0 {
+		sessionID = deriveSessionID(resolvedModel, openingChatPrompt(chatReq.Messages))
+	}
+
+	// Replay the last recorded recipe when the client stripped reasoning_details between turns.
+	s.recipeCache.Apply(sessionID, chatReq.Messages)
 
 	randID := make([]byte, 12)
 	_, _ = rand.Read(randID)
@@ -494,7 +608,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		chatReq.Model = originalModel
-		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, continuation, id, created, upstream, attempt)
+		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, continuation, id, created, upstream, attempt, sessionID)
 		if retry {
 			chatReq.Model = resolvedModel
 			continue
@@ -517,6 +631,7 @@ func (s *Server) processCompletionsResponse(
 	created int64,
 	upstream string,
 	attempt int,
+	sessionID string,
 ) (done bool, retry bool) {
 	defer result.Response.Body.Close()
 
@@ -612,6 +727,7 @@ func (s *Server) processCompletionsResponse(
 		}
 
 		if details := translator.ReasoningDetails(); len(details) > 0 {
+			s.recipeCache.Store(sessionID, details)
 			writeChunk(translate.ChatCompletionChunk{
 				ID:      id,
 				Object:  "chat.completion.chunk",
@@ -672,6 +788,10 @@ func (s *Server) processCompletionsResponse(
 		return true, false
 	}
 
+	if details := translator.ReasoningDetails(); len(details) > 0 {
+		s.recipeCache.Store(sessionID, details)
+	}
+
 	completion := translator.Completion(id, created)
 	sendJSON(w, http.StatusOK, completion)
 	return true, false
@@ -710,6 +830,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		r.Header.Get("session_id"),
 		r.Header.Get("X-Session-Id"),
 	)
+	// Anthropic clients rarely send an affinity header, so a tool-enabled conversation derives a stable
+	// session from its opening prompt while plain chat keeps an empty (non-agent) session.
+	if sessionID == "" && len(anthReq.Tools) > 0 {
+		sessionID = deriveSessionID(resolvedModel, openingAnthropicPrompt(anthReq.Messages))
+	}
+
+	// The reasoning-recipe cache is intentionally OpenAI-only: Anthropic clients replay signed `thinking`
+	// blocks inside message content themselves, so there is no stripped reasoning_details field to restore.
+	// The derived session identifier still stabilizes upstream session affinity for tool loops.
 
 	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
 	// the system instruction moved into the first user turn before the error is surfaced.

@@ -3,6 +3,7 @@
 package translate
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -204,5 +205,82 @@ func TestEnsureValidArrayItems(t *testing.T) {
 	items, ok := result["items"].(map[string]any)
 	if !ok || items["type"] != "string" {
 		t.Errorf("expected fallback items {type: string}, got %v", result["items"])
+	}
+}
+
+// TestSanitizeComplexSchemaRecursesCompositionKeywords verifies that the normalization pipeline
+// reaches subschemas nested under additionalProperties, prefixItems, dependentSchemas, not, and
+// if/then/else instead of only properties and items.
+func TestSanitizeComplexSchemaRecursesCompositionKeywords(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"lookup": map[string]any{
+				"type":                 "object",
+				"additionalProperties": map[string]any{"$ref": "#/$defs/Entry"},
+			},
+			"tuple": map[string]any{
+				"type":        "array",
+				"prefixItems": []any{map[string]any{"$ref": "#/$defs/Item"}},
+			},
+			"conditional": map[string]any{
+				"if":   map[string]any{"$ref": "#/$defs/IfBranch"},
+				"then": map[string]any{"type": []any{"string", "null"}},
+				"else": map[string]any{"not": map[string]any{"$ref": "#/$defs/NotBranch"}},
+			},
+			"dependent": map[string]any{
+				"type":             "object",
+				"dependentSchemas": map[string]any{"owner": map[string]any{"$ref": "#/$defs/Dependent"}},
+			},
+			"matrix": map[string]any{
+				"type":        "array",
+				"prefixItems": []any{map[string]any{"type": "array"}},
+			},
+			"nested": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "array", "items": map[string]any{"type": "array"}},
+			},
+		},
+	}
+
+	result := SanitizeComplexSchema(schema, false)
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshaling sanitized schema: %v", err)
+	}
+	if strings.Contains(string(encoded), "$ref") {
+		t.Errorf("expected every $ref to be converted to a hint, got %s", encoded)
+	}
+
+	props := result.(map[string]any)["properties"].(map[string]any)
+	conditional := props["conditional"].(map[string]any)
+	thenBranch := conditional["then"].(map[string]any)
+	if thenBranch["type"] != "string" {
+		t.Errorf("expected nested then branch type array flattened to string, got %v", thenBranch["type"])
+	}
+	if thenBranch["nullable"] != true {
+		t.Errorf("expected nested nullable then branch to keep nullable hint, got %v", thenBranch)
+	}
+
+	matrix := props["matrix"].(map[string]any)
+	matrixEntry := matrix["prefixItems"].([]any)[0].(map[string]any)
+	items, ok := matrixEntry["items"].(map[string]any)
+	if !ok || items["type"] != "string" {
+		t.Errorf("expected prefixItems array without items to receive fallback items, got %v", matrixEntry)
+	}
+
+	// The items chain is walked once per level, and a nested array without items still receives the fallback.
+	nested := props["nested"].(map[string]any)
+	level1, ok := nested["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested items object, got %v", nested)
+	}
+	level2, ok := level1["items"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected second-level items object, got %v", level1)
+	}
+	level3, ok := level2["items"].(map[string]any)
+	if !ok || level3["type"] != "string" {
+		t.Errorf("expected innermost items to receive the fallback, got %v", level2)
 	}
 }

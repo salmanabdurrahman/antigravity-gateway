@@ -45,8 +45,14 @@ var (
 	reRetryIn = regexp.MustCompile(`(?i)Please retry in ([0-9.]+)(ms|s)\b`)
 	// google.rpc.RetryInfo: "retryDelay": "34.07s"
 	reRetryDelay = regexp.MustCompile(`(?i)"retryDelay"\s*:\s*"([0-9.]+)(ms|s)"`)
-	// google.rpc.ErrorInfo metadata: "quotaResetDelay": "1h2m3s"
-	reQuotaReset = regexp.MustCompile(`(?i)"quotaResetDelay"\s*:\s*"(?:(\d+)h)?(?:(\d+)m)?([0-9.]+)?(ms|s)?"`)
+	// google.rpc.ErrorInfo metadata: "quotaResetDelay": "1h2m3s" / "15m" / "500ms".
+	// The duration is captured raw and tokenized separately: a single expression with optional
+	// hours/minutes groups would split "500ms" into 500 minutes plus a stray second, stretching a
+	// sub-second upstream delay into an eight-hour cooldown.
+	reQuotaReset = regexp.MustCompile(`(?i)"quotaResetDelay"\s*:\s*"([^"]+)"`)
+	// reDurationToken matches one <magnitude><unit> pair inside a composite duration string. The "ms"
+	// alternative is listed before "m" so millisecond suffixes are never read as minutes.
+	reDurationToken = regexp.MustCompile(`(?i)([0-9]+(?:\.[0-9]+)?)(ms|h|m|s)`)
 )
 
 // Classify inspects an HTTP status code and response body to categorize the upstream error.
@@ -196,21 +202,37 @@ func ParseRetryDelay(body string, headers http.Header, now time.Time) (time.Dura
 		}
 	}
 
-	if match := reQuotaReset.FindStringSubmatch(body); len(match) > 0 {
-		h, _ := strconv.ParseFloat(match[1], 64)
-		m, _ := strconv.ParseFloat(match[2], 64)
-		secVal, _ := strconv.ParseFloat(match[3], 64)
-		unit := match[4]
-		total := time.Duration(h)*time.Hour + time.Duration(m)*time.Minute
-		if secVal > 0 {
-			total += parseDurationUnit(secVal, unit)
-		}
-		if total > 0 {
+	if match := reQuotaReset.FindStringSubmatch(body); len(match) > 1 {
+		if total := parseCompositeDuration(match[1]); total > 0 {
 			return total, true
 		}
 	}
 
 	return 0, false
+}
+
+// parseCompositeDuration sums every <magnitude><unit> token of a composite duration string such as
+// "1h2m3s", "15m", or "500ms". Tokens are matched independently so millisecond magnitudes never
+// bleed into the minutes component.
+func parseCompositeDuration(raw string) time.Duration {
+	var total time.Duration
+	for _, token := range reDurationToken.FindAllStringSubmatch(raw, -1) {
+		magnitude, err := strconv.ParseFloat(token[1], 64)
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(token[2]) {
+		case "h":
+			total += time.Duration(magnitude * float64(time.Hour))
+		case "m":
+			total += time.Duration(magnitude * float64(time.Minute))
+		case "s":
+			total += time.Duration(magnitude * float64(time.Second))
+		case "ms":
+			total += time.Duration(magnitude * float64(time.Millisecond))
+		}
+	}
+	return total
 }
 
 // parseDurationUnit converts a floating-point magnitude and time unit ("ms", "s") into a time.Duration.
@@ -264,14 +286,15 @@ func NewCooldownTracker() *CooldownTracker {
 	}
 }
 
-// SetCooldown sets the cooldown expiration for a specific model or wildcard ("*") and prunes expired entries.
-func (c *CooldownTracker) SetCooldown(model string, until time.Time) {
+// SetCooldown sets the cooldown expiration for a specific model or wildcard ("*") and prunes expired
+// entries. The caller supplies `now` so pruning follows the injected clock used by the rest of the
+// rotator instead of the process wall clock.
+func (c *CooldownTracker) SetCooldown(model string, until, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cooldowns == nil {
 		c.cooldowns = make(map[string]time.Time)
 	}
-	now := time.Now()
 	for k, v := range c.cooldowns {
 		if !v.IsZero() && v.Before(now) {
 			delete(c.cooldowns, k)

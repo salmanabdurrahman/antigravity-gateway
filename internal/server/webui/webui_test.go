@@ -65,3 +65,25 @@ func TestWebUIModelFieldsMatchAPI(t *testing.T) {
 		}
 	}
 }
+
+// TestWebUIAccountMetricsAndQuotaWindows verifies the dashboard renders the account request counters,
+// sanitized error text, manual quota refresh control, and rolling five-hour vs weekly quota windows.
+func TestWebUIAccountMetricsAndQuotaWindows(t *testing.T) {
+	requiredSnippets := []string{
+		"a.requests",
+		"a.rate_limits",
+		"a.last_error",
+		"data.account_quota",
+		"fiveHour",
+		"weekly",
+		"id=\"quota-refresh\"",
+		"function refreshQuota(",
+		"/ui/api/refresh",
+		".replace(/'/g, '&#39;')",
+	}
+	for _, snippet := range requiredSnippets {
+		if !strings.Contains(IndexHTML, snippet) {
+			t.Errorf("expected dashboard to contain %q", snippet)
+		}
+	}
+}

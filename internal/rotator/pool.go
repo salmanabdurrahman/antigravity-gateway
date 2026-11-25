@@ -112,6 +112,18 @@ func (s *AccountState) Email() string {
 	return s.account.Email
 }
 
+// Key returns the account's rotation identity: the immutable Google user ID when known, otherwise the
+// lowercased email of a legacy entry. Pool reloads key on it so an email change or alias keeps the
+// in-memory cooldowns, token cache, and request counters attached to the same account.
+func (s *AccountState) Key() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.account == nil {
+		return ""
+	}
+	return s.account.Key()
+}
+
 // ProjectID returns the account project ID safely.
 func (s *AccountState) ProjectID() string {
 	s.mu.RLock()
@@ -155,11 +167,21 @@ func (s *AccountState) CoolingUntil(model string) time.Time {
 }
 
 // SetCooldown sets cooldown expiration for a given model or wildcard ("*") and records error reason.
-func (s *AccountState) SetCooldown(model string, until time.Time, reason string) {
-	s.cooldowns.SetCooldown(model, until)
+// `now` is the caller's injected clock, used to prune expired cooldown entries deterministically.
+func (s *AccountState) SetCooldown(model string, until, now time.Time, reason string) {
+	s.cooldowns.SetCooldown(model, until, now)
 	s.mu.Lock()
 	s.lastError = reason
 	s.mu.Unlock()
+}
+
+// Refreshable reports whether the account holds an OAuth refresh token that can mint a new access
+// token. Accounts imported from a desktop session carry only a short-lived static bearer token, so a
+// 401 can never be recovered by resending the same credential.
+func (s *AccountState) Refreshable() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.account != nil && strings.TrimSpace(s.account.RefreshToken) != ""
 }
 
 // TokenBucket returns the account's token bucket instance safely without lock contention.
@@ -372,6 +394,10 @@ type Pool struct {
 	// mu guards concurrent access to the states slice and reload timestamps.
 	mu sync.RWMutex
 
+	// reloadMu serializes the stat/load/replace sequence of hot reloads so a stalled reload cannot
+	// overwrite newer account state with an older file snapshot.
+	reloadMu sync.Mutex
+
 	// store is the persistent credential repository on disk.
 	store *auth.Store
 
@@ -426,9 +452,9 @@ func (p *Pool) SetAccounts(accounts []*auth.Account) {
 
 	oldMap := make(map[string]*AccountState, len(p.states))
 	for _, s := range p.states {
-		email := s.Email()
-		if email != "" {
-			oldMap[strings.ToLower(email)] = s
+		key := s.Key()
+		if key != "" {
+			oldMap[strings.ToLower(key)] = s
 		}
 	}
 
@@ -437,7 +463,7 @@ func (p *Pool) SetAccounts(accounts []*auth.Account) {
 		if acc == nil {
 			continue
 		}
-		if prev, ok := oldMap[strings.ToLower(acc.Email)]; ok {
+		if prev, ok := oldMap[strings.ToLower(acc.Key())]; ok {
 			prev.mu.Lock()
 			// Compare both credential kinds: an account imported from a desktop session stores its
 			// bearer token in AccessToken, so comparing refresh tokens alone would keep serving a
@@ -470,25 +496,38 @@ func (p *Pool) States() []*AccountState {
 
 // RefreshIfChanged checks if accounts.json has been modified by CLI login/logout and reloads state.
 // It implements a lockless fast-path via atomic timestamps to avoid mutex contention on the request path.
+//
+// Hot reloads are serialized by reloadMu: without it, two callers spaced beyond FileCheckInterval
+// could both run ModTime/Load/SetAccounts and let a stalled older snapshot clobber newer accounts.
+// A contended caller keeps the non-blocking fast path and lets the in-flight reload finish its work.
 func (p *Pool) RefreshIfChanged() error {
 	if p.store == nil {
 		return nil
 	}
 
-	now := p.nowFn()
-	nowNano := now.UnixNano()
-	lastStat := p.lastStatNano.Load()
-	if time.Duration(nowNano-lastStat) < FileCheckInterval {
-		return nil
-	}
-	if !p.lastStatNano.CompareAndSwap(lastStat, nowNano) {
+	// A negative delta means the wall clock stepped backwards (NTP correction, suspend/resume). Treat
+	// it as an immediate resync instead of freezing hot reload until the clock catches up.
+	if elapsed := time.Duration(p.nowFn().UnixNano() - p.lastStatNano.Load()); elapsed >= 0 && elapsed < FileCheckInterval {
 		return nil
 	}
 
+	if !p.reloadMu.TryLock() {
+		return nil
+	}
+	defer p.reloadMu.Unlock()
+
+	// Re-check under the reload lock: a concurrent reload may have just refreshed the stat window.
+	nowNano := p.nowFn().UnixNano()
+	if elapsed := time.Duration(nowNano - p.lastStatNano.Load()); elapsed >= 0 && elapsed < FileCheckInterval {
+		return nil
+	}
 	modTime, err := p.store.ModTime()
 	if err != nil {
+		// A failed stat is usually transient (the file is being replaced); leave the window untouched so
+		// the next request retries instead of suppressing hot reload for a full interval.
 		return err
 	}
+	p.lastStatNano.Store(nowNano)
 	p.mu.RLock()
 	currentMod := p.fileMod
 	p.mu.RUnlock()

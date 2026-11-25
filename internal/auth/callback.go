@@ -111,13 +111,29 @@ func StartCallbackListener(ctx context.Context, listenAddr string, callbackPath 
 	if listenAddr == "" {
 		listenAddr = "127.0.0.1:51121"
 	}
-	if callbackPath == "" {
-		callbackPath = "/oauth-callback"
-	}
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("binding local oauth callback listener on %s: %w", listenAddr, err)
+	}
+
+	return ServeCallbackListener(ctx, listener, callbackPath, expectedState)
+}
+
+// ServeCallbackListener serves the OAuth callback handshake on an already-bound listener and returns
+// the first accepted result. Splitting the seam lets callers (and tests) bind an ephemeral ":0" port and
+// address it through listener.Addr() instead of racing on a fixed port number.
+func ServeCallbackListener(ctx context.Context, listener net.Listener, callbackPath string, expectedState string) (*CallbackResult, error) {
+	if callbackPath == "" {
+		callbackPath = "/oauth-callback"
+	}
+	if listener == nil {
+		return nil, errors.New("oauth callback listener must not be nil")
+	}
+	// Fail closed: without an expected state value the listener cannot distinguish the legitimate
+	// redirect from any other request that guesses the callback path.
+	if expectedState == "" {
+		return nil, errors.New("oauth callback listener requires a non-empty expected state")
 	}
 
 	resultChan := make(chan *CallbackResult, 1)

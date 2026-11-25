@@ -175,4 +175,99 @@ if [ "$OUTPUT" != "agw version 9.9.9-mock" ]; then
 fi
 echo "PASS: stdin piped execution succeeded"
 
+# 10. Test 'v'-prefixed version acceptance (tag-style input)
+echo "[test 9] v-prefixed version accepted"
+VPREFIX_INSTALL_DIR="${TMP_TEST_DIR}/bin-vprefix"
+"$INSTALLER" \
+    "v${MOCK_VERSION}" \
+    --dist-url "$MOCK_DIST" \
+    --install-dir "$VPREFIX_INSTALL_DIR"
+if [ ! -x "${VPREFIX_INSTALL_DIR}/agw" ]; then
+    echo "FAIL: v-prefixed version installation failed" >&2
+    exit 1
+fi
+echo "PASS: v-prefixed version accepted"
+
+# 11. Test strict semver validation
+echo "[test 10] invalid version strings rejected"
+for bad_version in "1.2" "v1.2.3.4" "../1.2.3" "1.2.3/../../evil" "latest"; do
+    if "$INSTALLER" \
+        --version "$bad_version" \
+        --dist-url "$MOCK_DIST" \
+        --install-dir "${TMP_TEST_DIR}/bin-bad-version" >/dev/null 2>&1; then
+        echo "FAIL: Installer accepted invalid version '$bad_version'" >&2
+        exit 1
+    fi
+done
+echo "PASS: invalid versions rejected"
+
+# 12. Test symlink extraction rejection
+echo "[test 11] archive symlink instead of binary rejected"
+SYMLINK_DIST="${TMP_TEST_DIR}/symlink-dist"
+SYMLINK_STAGE="${TMP_TEST_DIR}/symlink-stage"
+mkdir -p "$SYMLINK_DIST" "$SYMLINK_STAGE"
+ln -s /etc/passwd "${SYMLINK_STAGE}/agw"
+tar -czf "${SYMLINK_DIST}/${MOCK_ARCHIVE_NAME}" -C "$SYMLINK_STAGE" agw
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$SYMLINK_DIST" && sha256sum "$MOCK_ARCHIVE_NAME" > SHA256SUMS)
+else
+    (cd "$SYMLINK_DIST" && shasum -a 256 "$MOCK_ARCHIVE_NAME" > SHA256SUMS)
+fi
+
+SYMLINK_INSTALL_DIR="${TMP_TEST_DIR}/bin-symlink"
+if "$INSTALLER" \
+    --version "$MOCK_VERSION" \
+    --dist-url "$SYMLINK_DIST" \
+    --install-dir "$SYMLINK_INSTALL_DIR" >/dev/null 2>&1; then
+    echo "FAIL: Installer accepted a symlinked binary entry" >&2
+    exit 1
+fi
+if [ -f "${SYMLINK_INSTALL_DIR}/agw" ]; then
+    echo "FAIL: Binary installed from a symlinked archive entry" >&2
+    exit 1
+fi
+echo "PASS: symlinked archive entry rejected"
+
+# 13. Test --dry-run performs verification without installing
+echo "[test 12] --dry-run verifies without installing"
+DRY_RUN_DIR="${TMP_TEST_DIR}/bin-dry-run"
+DRY_RUN_OUTPUT="$("$INSTALLER" \
+    --version "$MOCK_VERSION" \
+    --dist-url "$MOCK_DIST" \
+    --install-dir "$DRY_RUN_DIR" \
+    --dry-run)"
+case "$DRY_RUN_OUTPUT" in
+    *"[dry-run]"*) ;;
+    *)
+        echo "FAIL: --dry-run did not report a dry-run summary: $DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+if [ -e "${DRY_RUN_DIR}/agw" ]; then
+    echo "FAIL: --dry-run installed a binary" >&2
+    exit 1
+fi
+echo "PASS: --dry-run verified without installing"
+
+# 14. Test file:// dist URL support
+echo "[test 13] file:// dist url supported"
+FILE_URL_INSTALL_DIR="${TMP_TEST_DIR}/bin-file-url"
+"$INSTALLER" \
+    --version "$MOCK_VERSION" \
+    --dist-url "file://${MOCK_DIST}" \
+    --install-dir "$FILE_URL_INSTALL_DIR"
+if [ ! -x "${FILE_URL_INSTALL_DIR}/agw" ]; then
+    echo "FAIL: file:// dist url installation failed" >&2
+    exit 1
+fi
+echo "PASS: file:// dist url supported"
+
+# 15. Test unknown flags are rejected
+echo "[test 14] unknown flag rejected"
+if "$INSTALLER" --bogus-flag >/dev/null 2>&1; then
+    echo "FAIL: Installer accepted an unknown flag" >&2
+    exit 1
+fi
+echo "PASS: unknown flag rejected"
+
 echo "=== All Installer Tests Passed Successfully ==="

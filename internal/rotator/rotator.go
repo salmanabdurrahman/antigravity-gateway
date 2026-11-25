@@ -414,7 +414,7 @@ rotation:
 			if errors.As(err, &oauthErr) && oauthErr.InvalidGrant {
 				_ = r.pool.DisableAccount(s.Email(), "refresh token revoked")
 			} else {
-				s.SetCooldown("*", now.Add(r.progressiveCooldown(1)), err.Error())
+				s.SetCooldown("*", now.Add(r.progressiveCooldown(1)), now, err.Error())
 			}
 			skip[s] = struct{}{}
 			lastRotErr = &RotatorError{
@@ -496,7 +496,8 @@ rotation:
 			if !ok {
 				delay = r.progressiveCooldown(s.NextRateLimitStreak())
 			}
-			s.SetCooldown(model, r.nowFn().Add(delay), fmt.Sprintf("HTTP 429: %s", errMsg))
+			now := r.nowFn()
+			s.SetCooldown(model, now.Add(delay), now, fmt.Sprintf("HTTP 429: %s", errMsg))
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusTooManyRequests,
 				RetryAfter:   delay,
@@ -506,14 +507,17 @@ rotation:
 
 		case FailureAuth:
 			r.refundToken(s, tokenCharged)
-			if _, alreadyRetried := retried401[s]; !alreadyRetried {
+			// A desktop-session account holds a static bearer token that Google's token endpoint cannot
+			// exchange, so resending the identical token can never succeed: cool it down immediately.
+			if _, alreadyRetried := retried401[s]; !alreadyRetried && s.Refreshable() {
 				retried401[s] = struct{}{}
 				s.ClearAccessToken()
 				r.logger.Info("Retrying account after 401 token invalidation", "account", s.Email())
 				continue
 			}
 			// Repeated auth failure: apply forbidden cooldown
-			s.SetCooldown("*", r.nowFn().Add(ForbiddenCooldownDuration), fmt.Sprintf("HTTP 401: %s", errMsg))
+			now := r.nowFn()
+			s.SetCooldown("*", now.Add(ForbiddenCooldownDuration), now, fmt.Sprintf("HTTP 401: %s", errMsg))
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusUnauthorized,
 				ErrorMessage: fmt.Sprintf("Google auth refused %s: %s", s.Email(), errMsg),
@@ -538,7 +542,8 @@ rotation:
 				r.logger.Warn("Account permanently disabled by upstream", "account", s.Email(), "error", errMsg)
 				continue
 			}
-			s.SetCooldown("*", r.nowFn().Add(ForbiddenCooldownDuration), fmt.Sprintf("HTTP 403: %s", errMsg))
+			now := r.nowFn()
+			s.SetCooldown("*", now.Add(ForbiddenCooldownDuration), now, fmt.Sprintf("HTTP 403: %s", errMsg))
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusForbidden,
 				ErrorMessage: fmt.Sprintf("Google forbidden %s: %s", s.Email(), errMsg),

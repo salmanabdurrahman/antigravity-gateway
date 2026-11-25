@@ -190,6 +190,57 @@ func TestExtractErrorMessage(t *testing.T) {
 	}
 }
 
+// TestParseRetryDelayMillisecondQuotaReset verifies that a sub-second quotaResetDelay is read as
+// milliseconds instead of being split into a minutes component plus a stray second.
+func TestParseRetryDelayMillisecondQuotaReset(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		body string
+		want time.Duration
+	}{
+		{"milliseconds", `{"error":{"details":[{"quotaResetDelay":"500ms"}]}}`, 500 * time.Millisecond},
+		{"composite hours minutes seconds", `{"quotaResetDelay":"1h2m3s"}`, time.Hour + 2*time.Minute + 3*time.Second},
+		{"minutes only", `{"quotaResetDelay":"15m"}`, 15 * time.Minute},
+		{"fractional seconds", `{"quotaResetDelay":"0.5s"}`, 500 * time.Millisecond},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := rotator.ParseRetryDelay(tc.body, nil, now)
+			if !ok {
+				t.Fatalf("ParseRetryDelay(%q) reported no delay", tc.body)
+			}
+			if got != tc.want {
+				t.Errorf("ParseRetryDelay(%q) = %v; want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCooldownTrackerPrunesWithInjectedClock verifies that expired cooldown entries are pruned using
+// the caller-supplied clock, so pruning stays deterministic when the wall clock differs from the
+// rotator's injected clock.
+func TestCooldownTrackerPrunesWithInjectedClock(t *testing.T) {
+	tracker := rotator.NewCooldownTracker()
+	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+
+	tracker.SetCooldown("expired-model", base.Add(-time.Minute), base)
+
+	// The injected clock is far ahead of the wall clock; pruning must follow the injected value.
+	future := base.Add(24 * time.Hour)
+	tracker.SetCooldown("active-model", future.Add(time.Hour), future)
+
+	active := tracker.ActiveCooldowns(future)
+	if _, exists := active["expired-model"]; exists {
+		t.Errorf("expired cooldown must be pruned using the injected clock, got %v", active)
+	}
+	if _, exists := active["active-model"]; !exists {
+		t.Errorf("active cooldown must be retained, got %v", active)
+	}
+}
+
 // TestCooldownTracker verifies thread-safe per-model and wildcard expiration tracking in memory.
 func TestCooldownTracker(t *testing.T) {
 	now := time.Now()
@@ -199,7 +250,7 @@ func TestCooldownTracker(t *testing.T) {
 		t.Fatalf("expected not cooling initially")
 	}
 
-	tracker.SetCooldown("gemini", now.Add(10*time.Second))
+	tracker.SetCooldown("gemini", now.Add(10*time.Second), now)
 	if !tracker.IsCooling("gemini", now) {
 		t.Errorf("expected gemini to be cooling")
 	}
@@ -208,7 +259,7 @@ func TestCooldownTracker(t *testing.T) {
 	}
 
 	// Wildcard cooldown affects all models
-	tracker.SetCooldown("*", now.Add(20*time.Second))
+	tracker.SetCooldown("*", now.Add(20*time.Second), now)
 	if !tracker.IsCooling("claude", now) {
 		t.Errorf("expected claude to be cooling due to wildcard")
 	}

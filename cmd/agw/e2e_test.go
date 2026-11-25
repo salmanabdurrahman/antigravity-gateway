@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -85,7 +87,7 @@ func TestEndToEndAuthWorkflow(t *testing.T) {
 	cfg.TokenURL = mockServer.URL + "/token"
 	cfg.UserInfoURL = mockServer.URL + "/userinfo"
 	cfg.Endpoints = []string{mockServer.URL}
-	cfg.RedirectURI = "http://127.0.0.1:51128/oauth-callback"
+	cfg.RedirectURI = "http://127.0.0.1:51121/oauth-callback"
 
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("config.Save failed: %v", err)
@@ -114,21 +116,26 @@ func TestEndToEndAuthWorkflow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	listenAddr, callbackPath := auth.ResolveCallbackEndpoint(cfg.RedirectURI)
+	_, callbackPath := auth.ResolveCallbackEndpoint(cfg.RedirectURI)
+	// Bind an ephemeral port so the simulated callback never collides with a real listener.
+	callbackListener, listenErr := net.Listen("tcp", "127.0.0.1:0")
+	if listenErr != nil {
+		t.Fatalf("binding ephemeral callback listener: %v", listenErr)
+	}
+	listenAddr := callbackListener.Addr().String()
 	listenerResultChan := make(chan *auth.CallbackResult, 1)
 
 	go func() {
-		res, lErr := auth.StartCallbackListener(ctx, listenAddr, callbackPath, state)
+		res, lErr := auth.ServeCallbackListener(ctx, callbackListener, callbackPath, state)
 		if lErr != nil {
-			t.Errorf("StartCallbackListener error: %v", lErr)
+			t.Errorf("ServeCallbackListener error: %v", lErr)
 			return
 		}
 		listenerResultChan <- res
 	}()
 
-	time.Sleep(50 * time.Millisecond)
-
-	// Simulate browser callback hitting loopback server
+	// Simulate browser callback hitting loopback server; the bound listener queues the connection until
+	// the handshake server accepts it, so no bind sleep is required.
 	callbackURL := "http://" + listenAddr + callbackPath + "?code=valid-mock-code&state=" + state
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(callbackURL)
@@ -386,8 +393,8 @@ func TestEndToEndCatalogAndQuotaWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model cache file not found on disk: %v", err)
 	}
-	if cStat.Mode().Perm() != config.FilePerm {
-		t.Errorf("expected cache file permissions %o, got %o", config.FilePerm, cStat.Mode().Perm())
+	if perm := cStat.Mode().Perm(); runtime.GOOS != "windows" && perm != config.FilePerm {
+		t.Errorf("expected cache file permissions %o, got %o", config.FilePerm, perm)
 	}
 
 	// 3. Simulate offline mode by closing mock server

@@ -93,7 +93,12 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 
+	// A live quota inspection cannot report anything meaningful without configuration, so a config
+	// failure aborts the command instead of printing an "Error (config)" status and exiting 0.
 	cfg, cfgErr := loadConfig()
+	if cfgErr != nil {
+		return fmt.Errorf("loading configuration for live quota check: %w", cfgErr)
+	}
 	now := time.Now()
 
 	for _, acc := range accounts {
@@ -114,66 +119,62 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 		claudeQuota := "-"
 		resetTime := "Ready"
 
-		if cfgErr != nil {
-			status = "Error (config)"
+		tokenRes, refreshErr := auth.AccessTokenFor(ctx, cfg, acc)
+		if refreshErr != nil {
+			var oauthErr *auth.OAuthError
+			switch {
+			case errors.Is(refreshErr, auth.ErrLocalSessionExpired):
+				status = "Local session expired (run 'agw login --local')"
+			case errors.As(refreshErr, &oauthErr) && oauthErr.InvalidGrant:
+				_ = accountStore.SetDisabled(acc.Email, true, "refresh token revoked")
+				status = "Disabled (refresh token revoked)"
+			default:
+				status = "Error (refresh failed)"
+			}
 		} else {
-			tokenRes, refreshErr := auth.AccessTokenFor(ctx, cfg, acc)
-			if refreshErr != nil {
-				var oauthErr *auth.OAuthError
-				switch {
-				case errors.Is(refreshErr, auth.ErrLocalSessionExpired):
-					status = "Local session expired (run 'agw login --local')"
-				case errors.As(refreshErr, &oauthErr) && oauthErr.InvalidGrant:
-					_ = accountStore.SetDisabled(acc.Email, true, "refresh token revoked")
-					status = "Disabled (refresh token revoked)"
-				default:
-					status = "Error (refresh failed)"
-				}
-			} else {
-				if acc.Disabled {
-					// A live inspection must not silently mutate stored account state: re-enabling a
-					// disabled or ToS-flagged account requires the explicit --re-enable opt-in.
-					if checkAccountsReenable {
-						if reEnableErr := accountStore.SetDisabled(acc.Email, false, ""); reEnableErr != nil {
-							return fmt.Errorf("re-enabling account %s: %w", acc.Email, reEnableErr)
-						}
-						status = "Active"
-					} else {
-						status = "Disabled (credentials valid; rerun with --re-enable to activate)"
+			if acc.Disabled {
+				// A live inspection must not silently mutate stored account state: re-enabling a
+				// disabled or ToS-flagged account requires the explicit --re-enable opt-in.
+				if checkAccountsReenable {
+					if reEnableErr := accountStore.SetDisabled(acc.Email, false, ""); reEnableErr != nil {
+						return fmt.Errorf("re-enabling account %s: %w", acc.Email, reEnableErr)
 					}
-				}
-
-				snap, fetchErr := catalog.FetchCatalogForTier(ctx, cfg, nil, tokenRes.AccessToken, acc.ProjectID, acc.Tier)
-				if fetchErr != nil {
-					geminiQuota = "Error"
-					claudeQuota = "Error"
-					resetTime = "-"
+					status = "Active"
 				} else {
-					summary := catalog.SummarizeQuotas(snap.Quotas)
-					geminiQuota = catalog.FormatQuota(summary.GeminiRemainingFraction)
-					claudeQuota = catalog.FormatQuota(summary.ClaudeRemainingFraction)
+					status = "Disabled (credentials valid; rerun with --re-enable to activate)"
+				}
+			}
 
-					// If quota is exhausted (0%), status indicates Cooling
-					isCooling := (summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction == 0) ||
-						(summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction == 0)
-					if isCooling && status == "Active" {
-						status = "Cooling"
-					}
+			snap, fetchErr := catalog.FetchCatalogForTier(ctx, cfg, nil, tokenRes.AccessToken, acc.ProjectID, acc.Tier)
+			if fetchErr != nil {
+				geminiQuota = "Error"
+				claudeQuota = "Error"
+				resetTime = "-"
+			} else {
+				summary := catalog.SummarizeQuotas(snap.Quotas)
+				geminiQuota = catalog.FormatQuota(summary.GeminiRemainingFraction)
+				claudeQuota = catalog.FormatQuota(summary.ClaudeRemainingFraction)
 
-					// Prioritize exhausted family (0% quota / cooling) first for reset time
-					if summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction == 0 && summary.GeminiResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
-					} else if summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction == 0 && summary.ClaudeResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
-					} else if summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction < 1.0 && summary.GeminiResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
-					} else if summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction < 1.0 && summary.ClaudeResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
-					} else if summary.GeminiResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
-					} else if summary.ClaudeResetTime != "" {
-						resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
-					}
+				// If quota is exhausted (0%), status indicates Cooling
+				isCooling := (summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction == 0) ||
+					(summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction == 0)
+				if isCooling && status == "Active" {
+					status = "Cooling"
+				}
+
+				// Prioritize exhausted family (0% quota / cooling) first for reset time
+				if summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction == 0 && summary.GeminiResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
+				} else if summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction == 0 && summary.ClaudeResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
+				} else if summary.GeminiRemainingFraction != nil && *summary.GeminiRemainingFraction < 1.0 && summary.GeminiResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
+				} else if summary.ClaudeRemainingFraction != nil && *summary.ClaudeRemainingFraction < 1.0 && summary.ClaudeResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
+				} else if summary.GeminiResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.GeminiResetTime, now)
+				} else if summary.ClaudeResetTime != "" {
+					resetTime = catalog.FormatResetTime(summary.ClaudeResetTime, now)
 				}
 			}
 		}

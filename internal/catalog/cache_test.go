@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -69,8 +70,8 @@ func TestModelCatalogCacheLoadAndSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Stat failed: %v", err)
 	}
-	if info.Mode().Perm() != config.FilePerm {
-		t.Errorf("expected file mode %o, got %o", config.FilePerm, info.Mode().Perm())
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != config.FilePerm {
+		t.Errorf("expected file mode %o, got %o", config.FilePerm, perm)
 	}
 
 	// Read back in new catalog instance
@@ -207,6 +208,50 @@ func TestModelCatalogConcurrency(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+// TestModelCatalogConcurrentEnsureAndRefresh verifies that overlapping Ensure and Refresh calls share
+// the catalog without data races or a lost snapshot.
+func TestModelCatalogConcurrentEnsureAndRefresh(t *testing.T) {
+	tempDir := t.TempDir()
+	cacheFile := filepath.Join(tempDir, "models-cache.json")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		resp := rawCatalogResponse{
+			Models: map[string]rawModelInfo{
+				"gemini-4-hydrogen-high": {DisplayName: "Gemini 4 Hydrogen"},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{Endpoints: []string{ts.URL}}
+	cat := NewModelCatalog(cfg, nil, cacheFile, nil)
+	cat.SetHTTPClient(ts.Client())
+	if err := cat.LoadCache(); err != nil {
+		t.Fatalf("LoadCache failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := range 12 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if idx%2 == 0 {
+				_ = cat.Ensure(t.Context())
+				return
+			}
+			_ = cat.Refresh(t.Context())
+		}(i)
+	}
+	wg.Wait()
+
+	snap, _ := cat.Snapshot()
+	if snap.Models == nil {
+		t.Error("expected a snapshot after concurrent Ensure/Refresh, got nil models")
+	}
 }
 
 // TestModelCatalogStaleWhileRevalidateNonBlocking verifies that Ensure returns immediately when

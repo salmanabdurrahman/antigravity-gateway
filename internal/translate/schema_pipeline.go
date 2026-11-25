@@ -48,6 +48,73 @@ func ScoreSchemaOption(schema any) int {
 	return 0
 }
 
+// schemaSubschemaKeywords group the JSON Schema keywords whose values hold nested subschemas.
+// Cloud Code Assist validates the entire schema tree, so every normalization walker must recurse
+// through these composition keywords instead of only properties/items.
+var (
+	// singleSubschemaKeywords map a keyword to exactly one nested subschema object or boolean.
+	singleSubschemaKeywords = []string{
+		"items", "additionalItems", "additionalProperties", "contains", "propertyNames",
+		"not", "if", "then", "else", "unevaluatedItems", "unevaluatedProperties",
+	}
+
+	// listSubschemaKeywords map a keyword to an ordered array of nested subschemas.
+	listSubschemaKeywords = []string{"anyOf", "oneOf", "allOf", "prefixItems"}
+
+	// mapSubschemaKeywords map a keyword to a name-to-subschema object.
+	mapSubschemaKeywords = []string{"dependentSchemas", "patternProperties"}
+)
+
+// walkPropertySchemas applies transform to every subschema of a properties object, preserving names.
+func walkPropertySchemas(out map[string]any, transform func(any) any) {
+	props, ok := out["properties"].(map[string]any)
+	if !ok {
+		return
+	}
+	next := make(map[string]any, len(props))
+	for name, subschema := range props {
+		next[name] = transform(subschema)
+	}
+	out["properties"] = next
+}
+
+// walkNestedSchemas applies transform to every subschema reachable through the JSON Schema
+// composition keywords (items, additionalProperties, prefixItems, dependentSchemas, not,
+// if/then/else, and the union keywords). Boolean subschema values are handed to transform, which
+// returns them unchanged, so additionalProperties: false survives untouched. Keywords named in skip are
+// left for the caller, which already walked them with extra context; skipping them keeps nested-array
+// schemas linear instead of re-walking the items subtree at every level.
+func walkNestedSchemas(out map[string]any, transform func(any) any, skip ...string) {
+	for _, key := range mapSubschemaKeywords {
+		if m, ok := out[key].(map[string]any); ok {
+			next := make(map[string]any, len(m))
+			for name, subschema := range m {
+				next[name] = transform(subschema)
+			}
+			out[key] = next
+		}
+	}
+
+	for _, key := range singleSubschemaKeywords {
+		if slices.Contains(skip, key) {
+			continue
+		}
+		if subschema, ok := out[key]; ok {
+			out[key] = transform(subschema)
+		}
+	}
+
+	for _, key := range listSubschemaKeywords {
+		if list, ok := out[key].([]any); ok {
+			next := make([]any, len(list))
+			for i, subschema := range list {
+				next[i] = transform(subschema)
+			}
+			out[key] = next
+		}
+	}
+}
+
 // ConvertRefsToHints recursively traverses a schema, converting "$ref" definitions
 // into object declarations with "See: DefName" description hints.
 //
@@ -81,27 +148,8 @@ func ConvertRefsToHints(schema any) any {
 		delete(out, "$defs")
 		delete(out, "definitions")
 
-		if props, ok := out["properties"].(map[string]any); ok {
-			newProps := make(map[string]any, len(props))
-			for k, v := range props {
-				newProps[k] = ConvertRefsToHints(v)
-			}
-			out["properties"] = newProps
-		}
-
-		if items, ok := out["items"]; ok {
-			out["items"] = ConvertRefsToHints(items)
-		}
-
-		for _, key := range []string{"anyOf", "oneOf", "allOf"} {
-			if slice, ok := out[key].([]any); ok {
-				newSlice := make([]any, len(slice))
-				for i, v := range slice {
-					newSlice[i] = ConvertRefsToHints(v)
-				}
-				out[key] = newSlice
-			}
-		}
+		walkPropertySchemas(out, ConvertRefsToHints)
+		walkNestedSchemas(out, ConvertRefsToHints)
 
 		return out
 	default:
@@ -186,17 +234,8 @@ func MergeAllOfSchemas(schema any) any {
 			}
 		}
 
-		if props, ok := out["properties"].(map[string]any); ok {
-			newProps := make(map[string]any, len(props))
-			for k, v := range props {
-				newProps[k] = MergeAllOfSchemas(v)
-			}
-			out["properties"] = newProps
-		}
-
-		if items, ok := out["items"]; ok {
-			out["items"] = MergeAllOfSchemas(items)
-		}
+		walkPropertySchemas(out, MergeAllOfSchemas)
+		walkNestedSchemas(out, MergeAllOfSchemas)
 
 		return out
 	default:
@@ -322,17 +361,8 @@ func FlattenAnyOfOneOfSchemas(schema any) any {
 			}
 		}
 
-		if props, ok := out["properties"].(map[string]any); ok {
-			newProps := make(map[string]any, len(props))
-			for k, v := range props {
-				newProps[k] = FlattenAnyOfOneOfSchemas(v)
-			}
-			out["properties"] = newProps
-		}
-
-		if items, ok := out["items"]; ok {
-			out["items"] = FlattenAnyOfOneOfSchemas(items)
-		}
+		walkPropertySchemas(out, FlattenAnyOfOneOfSchemas)
+		walkNestedSchemas(out, FlattenAnyOfOneOfSchemas)
 
 		return out
 	default:
@@ -420,6 +450,13 @@ func flattenTypeArraysInternal(schema any, nullableProps map[string]bool, curren
 			out["items"] = flattenTypeArraysInternal(items, nullableProps, "")
 		}
 
+		// Composition keywords (additionalProperties, prefixItems, dependentSchemas, not,
+		// if/then/else) carry nested subschemas whose type arrays need the same normalization. items was
+		// already normalized above, so it is skipped here to avoid re-walking the subtree.
+		walkNestedSchemas(out, func(subschema any) any {
+			return flattenTypeArraysInternal(subschema, nil, "")
+		}, "items")
+
 		return out
 	default:
 		return schema
@@ -465,17 +502,12 @@ func MoveConstraintsToHints(schema any, dropKeywords bool) any {
 			out["description"] = AppendDescriptionHint(desc, strings.Join(hints, ", "))
 		}
 
-		if props, ok := out["properties"].(map[string]any); ok {
-			newProps := make(map[string]any, len(props))
-			for k, v := range props {
-				newProps[k] = MoveConstraintsToHints(v, dropKeywords)
-			}
-			out["properties"] = newProps
-		}
-
-		if items, ok := out["items"]; ok {
-			out["items"] = MoveConstraintsToHints(items, dropKeywords)
-		}
+		walkPropertySchemas(out, func(subschema any) any {
+			return MoveConstraintsToHints(subschema, dropKeywords)
+		})
+		walkNestedSchemas(out, func(subschema any) any {
+			return MoveConstraintsToHints(subschema, dropKeywords)
+		})
 
 		return out
 	default:
@@ -521,9 +553,9 @@ func EnsureValidArrayItems(schema any) any {
 			out["properties"] = newProps
 		}
 
-		if items, ok := out["items"]; ok && !strings.EqualFold(t, "array") {
-			out["items"] = EnsureValidArrayItems(items)
-		}
+		// Composition keywords may hide array subschemas without items, which upstream also rejects. items
+		// was already validated above, so it is skipped here.
+		walkNestedSchemas(out, EnsureValidArrayItems, "items")
 
 		return out
 	default:

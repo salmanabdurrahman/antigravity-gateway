@@ -59,39 +59,48 @@ func ReadPID(pidFile string) (int, error) {
 }
 
 // WritePID writes a process ID to the target file atomically with POSIX 0600 permissions.
+// The staging file is created with os.CreateTemp (O_EXCL) so an attacker-planted path in a shared
+// directory can never be followed or truncated; the final rename replaces any existing entry instead of
+// writing through it.
 func WritePID(pidFile string, pid int) error {
 	dir := filepath.Dir(pidFile)
 	if err := os.MkdirAll(dir, config.DirPerm); err != nil {
 		return fmt.Errorf("creating directory for pid file %s: %w", dir, err)
 	}
 
-	tmpFile := fmt.Sprintf("%s.tmp.%d", pidFile, time.Now().UnixNano())
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(pidFile)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp pid file in %s: %w", dir, err)
+	}
+	tmpPath := tmpFile.Name()
+
 	content := fmt.Sprintf("%d\n", pid)
 
-	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, config.FilePerm)
-	if err != nil {
-		return fmt.Errorf("creating temp pid file: %w", err)
-	}
-
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpFile)
+	if _, err := tmpFile.WriteString(content); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp pid file: %w", err)
 	}
 
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpFile)
+	if err := tmpFile.Chmod(config.FilePerm); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("setting pid file permissions: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("syncing temp pid file: %w", err)
 	}
 
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpFile)
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("closing temp pid file: %w", err)
 	}
 
-	if err := os.Rename(tmpFile, pidFile); err != nil {
-		_ = os.Remove(tmpFile) // Best-effort cleanup of temporary pid file if atomic rename fails.
+	if err := os.Rename(tmpPath, pidFile); err != nil {
+		_ = os.Remove(tmpPath) // Best-effort cleanup of temporary pid file if atomic rename fails.
 		return fmt.Errorf("renaming temp pid file to %s: %w", pidFile, err)
 	}
 
@@ -284,9 +293,6 @@ func StopDetached(cfg *config.Config) (int, error) {
 	if err != nil || !IsProcessAlive(pid) {
 		isStale = true
 	} else {
-		// When PID appears alive, verify it is actually an antigravity-gateway daemon by checking /health.
-		// If health is unreachable or does not report ServerName, check port ownership before signalling
-		// to avoid terminating an unrelated reused OS PID.
 		host := config.DefaultHost
 		port := config.DefaultPort
 		if cfg != nil {
@@ -295,14 +301,23 @@ func StopDetached(cfg *config.Config) (int, error) {
 				port = cfg.Port
 			}
 		}
-		healthURL := config.URL(host, port, "/health")
-		ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
-		health, healthErr := CheckHealth(ctx, healthURL)
-		cancel()
 
-		if healthErr != nil || health == nil || !health.OK || health.Name != ServerName {
-			portPID, portErr := processListeningOnPort(port)
-			if portErr != nil || portPID != pid {
+		// Port ownership is the strongest available identity signal: /health proves *a* gateway answers
+		// on the port, not that it is the process recorded in the pid file. A stale pid file whose PID was
+		// later recycled by the OS would otherwise receive SIGTERM/SIGKILL while a different daemon
+		// answers /health.
+		portPID, portErr := processListeningOnPort(port)
+		switch {
+		case portErr == nil && portPID != pid:
+			isStale = true
+		case portErr != nil:
+			// Ownership could not be attributed (restricted sandbox, missing platform tooling), so fall
+			// back to the /health identity probe before deciding whether the PID is safe to signal.
+			healthURL := config.URL(host, port, "/health")
+			ctx, cancel := context.WithTimeout(context.Background(), DefaultHealthTimeout)
+			health, healthErr := CheckHealth(ctx, healthURL)
+			cancel()
+			if healthErr != nil || health == nil || !health.OK || health.Name != ServerName {
 				isStale = true
 			}
 		}

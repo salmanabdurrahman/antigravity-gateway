@@ -144,9 +144,30 @@ download_file() {
   esac
 
   if [ "$DOWNLOADER" = "curl" ]; then
-    curl -fsSL --retry 2 "$_src" -o "$_dst"
+    # Remote downloads are pinned to HTTPS so a redirected or spoofed URL cannot downgrade the
+    # checksum-signing transport. Local directory and file:// sources bypass curl entirely above.
+    case "$_src" in
+      https://*)
+        curl -fsSL --proto '=https' --retry 2 "$_src" -o "$_dst"
+        ;;
+      http://*)
+        echo "Error: Refusing insecure HTTP download from $_src" >&2
+        return 1
+        ;;
+      *)
+        curl -fsSL --retry 2 "$_src" -o "$_dst"
+        ;;
+    esac
   elif [ "$DOWNLOADER" = "wget" ]; then
-    wget -q --tries=2 "$_src" -O "$_dst"
+    case "$_src" in
+      http://*)
+        echo "Error: Refusing insecure HTTP download from $_src" >&2
+        return 1
+        ;;
+      *)
+        wget -q --tries=2 "$_src" -O "$_dst"
+        ;;
+    esac
   else
     echo "Error: No utility to fetch $_src" >&2
     return 1
@@ -160,7 +181,7 @@ if [ -z "$VERSION" ]; then
 
   # Try HTTP redirect resolution first (immune to unauthenticated GitHub API rate limits)
   if [ "$DOWNLOADER" = "curl" ]; then
-    LATEST_REDIRECT="$(curl -fsSLI -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+    LATEST_REDIRECT="$(curl -fsSLI --proto '=https' -o /dev/null -w "%{url_effective}" "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
     if [ -n "$LATEST_REDIRECT" ]; then
       CANDIDATE="${LATEST_REDIRECT##*/}"
       if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "latest" ]; then
@@ -172,7 +193,7 @@ if [ -z "$VERSION" ]; then
   # Fallback to GitHub REST API if redirect did not resolve to a tag
   if [ -z "$TAG_NAME" ]; then
     if [ "$DOWNLOADER" = "curl" ]; then
-      TAG_NAME="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
+      TAG_NAME="$(curl -fsSL --proto '=https' "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
     elif [ "$DOWNLOADER" = "wget" ]; then
       TAG_NAME="$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n1 | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
     fi
@@ -190,6 +211,20 @@ fi
 
 # Clean version (strip leading 'v' if present)
 CLEAN_VERSION="${VERSION#v}"
+
+# Reject anything that is not a strict semantic version. The value is interpolated into archive
+# filenames and download paths, so an unvalidated tag containing '/', '..', or whitespace could escape
+# the staging directory or fetch an unrelated asset.
+case "$CLEAN_VERSION" in
+  *[!0-9A-Za-z.+-]*|[!0-9]*)
+    echo "Error: Invalid version '$VERSION': expected a semantic version such as 0.1.0 or v0.1.0." >&2
+    exit 1
+    ;;
+esac
+if ! printf '%s' "$CLEAN_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+  echo "Error: Invalid version '$VERSION': expected a semantic version such as 0.1.0 or v0.1.0." >&2
+  exit 1
+fi
 
 # 1. Detect OS
 RAW_OS="$(uname -s)"
@@ -258,9 +293,12 @@ compute_sha256() {
 
 # Prepare workspace
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'agw-install')"
+INSTALL_TMP=""
 cleanup() {
   rm -rf "$TMP_DIR"
-  rm -f "${TARGET_BIN}.tmp.$$" 2>/dev/null || true
+  if [ -n "$INSTALL_TMP" ]; then
+    rm -f "$INSTALL_TMP" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -344,12 +382,18 @@ if [ ! -f "$EXTRACTED_BIN" ]; then
   echo "Error: Extracted archive did not contain binary '${BIN_NAME}'." >&2
   exit 1
 fi
+if [ -L "$EXTRACTED_BIN" ]; then
+  echo "Error: Extracted '${BIN_NAME}' is a symbolic link; refusing to install a link target." >&2
+  exit 1
+fi
 
-# 10. Install binary
+# 10. Install binary through an exclusively created staging file in the destination directory, so a
+# pre-planted symlink at a predictable temp name can never be followed.
 mkdir -p "$INSTALL_DIR"
-cp "$EXTRACTED_BIN" "${TARGET_BIN}.tmp.$$"
-chmod +x "${TARGET_BIN}.tmp.$$"
-mv -f "${TARGET_BIN}.tmp.$$" "$TARGET_BIN"
+INSTALL_TMP="$(mktemp "${INSTALL_DIR}/.agw.tmp.XXXXXX")"
+cp "$EXTRACTED_BIN" "$INSTALL_TMP"
+chmod +x "$INSTALL_TMP"
+mv -f "$INSTALL_TMP" "$TARGET_BIN"
 
 echo ""
 echo "================================================================================"

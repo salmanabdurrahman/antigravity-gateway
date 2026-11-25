@@ -74,6 +74,10 @@ type Server struct {
 	// configPath is the configuration file the daemon was started with. Runtime settings changed
 	// through the WebUI are persisted here instead of always rewriting the default location.
 	configPath string
+
+	// recipeCache replays recent thought signatures for sessions whose client stripped
+	// reasoning_details between turns.
+	recipeCache *recipeCache
 }
 
 // Options encapsulates configuration parameters for initializing a Server instance.
@@ -120,12 +124,13 @@ func NewServer(opts Options) (*Server, error) {
 	}
 
 	s := &Server{
-		rotator:    opts.Rotator,
-		catalog:    opts.Catalog,
-		logger:     logger,
-		listener:   opts.Listener,
-		pidFile:    opts.PIDFile,
-		configPath: opts.ConfigPath,
+		rotator:     opts.Rotator,
+		catalog:     opts.Catalog,
+		logger:      logger,
+		listener:    opts.Listener,
+		pidFile:     opts.PIDFile,
+		configPath:  opts.ConfigPath,
+		recipeCache: newRecipeCache(time.Now),
 	}
 	// Clone so later mutation of the caller's configuration cannot change what handlers observe.
 	s.cfg.Store(opts.Config.Clone())

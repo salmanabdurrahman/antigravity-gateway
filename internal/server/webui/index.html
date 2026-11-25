@@ -174,15 +174,26 @@
                 <th>Project ID</th>
                 <th>Health</th>
                 <th>Status</th>
+                <th>Requests</th>
+                <th>429s</th>
                 <th>Last Used</th>
                 <th>Cooldown</th>
+                <th>Last Error</th>
               </tr>
             </thead>
             <tbody id="accounts-body">
-              <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Loading accounts...</td></tr>
+              <tr><td colspan="9" style="text-align: center; color: var(--text-muted);">Loading accounts...</td></tr>
             </tbody>
           </table>
         </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>Account Quota Windows</span>
+          <button id="quota-refresh" onclick="refreshQuota()">Refresh quota</button>
+        </div>
+        <div id="quota-windows" style="color: var(--text-muted); font-size: 13px;">Loading quota windows...</div>
       </div>
 
       <div class="card">
@@ -245,7 +256,7 @@
         document.getElementById('account-count').textContent = `${accs.length} account(s)`;
         const accBody = document.getElementById('accounts-body');
         if (accs.length === 0) {
-          accBody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--text-muted);">No accounts configured yet. Run: <code>agw login</code></td></tr>';
+          accBody.innerHTML = '<tr><td colspan="9" style="text-align:center; color: var(--text-muted);">No accounts configured yet. Run: <code>agw login</code></td></tr>';
         } else {
           accBody.innerHTML = accs.map(a => {
             const health = a.health > 0 ? a.health : 100;
@@ -266,12 +277,39 @@
                   </div>
                 </td>
                 <td>${statusBadge}</td>
+                <td>${a.requests || 0}</td>
+                <td>${a.rate_limits || 0}</td>
                 <td>${escapeHtml(lastUsed)}</td>
                 <td>${escapeHtml(cooldowns || '-')}</td>
+                <td style="color: var(--text-muted); font-size: 12px;">${escapeHtml(a.last_error || '-')}</td>
               </tr>
             `;
           }).join('');
         }
+
+        // Render rolling five-hour vs weekly account quota windows.
+        const quotaWindows = document.getElementById('quota-windows');
+        const accountQuota = data.account_quota || {};
+        const windowKeys = [['fiveHour', '5-hour window'], ['weekly', 'Weekly window']];
+        const rendered = windowKeys.map(([key, label]) => {
+          const win = accountQuota[key];
+          if (!win || (win.remainingFraction === undefined && !win.resetTime)) return '';
+          const pct = win.remainingFraction !== undefined ? Math.round(win.remainingFraction * 100) : 100;
+          const cls = pct <= 10 ? 'critical' : (pct <= 30 ? 'low' : '');
+          const reset = win.resetTime ? `Resets: ${escapeHtml(new Date(win.resetTime).toLocaleString())}` : 'No reset scheduled';
+          return `
+            <div style="margin-bottom: 12px;">
+              <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px;">
+                <span>${label}</span>
+                <span>${pct}% remaining &middot; ${reset}</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill ${cls}" style="width: ${pct}%;"></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+        quotaWindows.innerHTML = rendered || '<span>No rolling or weekly quota windows reported by upstream yet.</span>';
 
         // Render models
         const models = data.models || [];
@@ -351,9 +389,29 @@
       }
     }
 
+    async function refreshQuota() {
+      const button = document.getElementById('quota-refresh');
+      if (button) button.disabled = true;
+      try {
+        const res = await fetch('/ui/api/refresh', { method: 'POST' });
+        if (!res.ok) throw new Error('refresh rejected');
+        showToast('Quota refreshed from upstream', 'success');
+        loadData();
+      } catch (e) {
+        showToast('Quota refresh failed: ' + e.message, 'error');
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     function escapeHtml(str) {
       if (!str) return '';
-      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     // Poll only while the dashboard is visible; refresh immediately when the tab regains focus so a

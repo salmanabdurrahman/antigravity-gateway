@@ -24,6 +24,8 @@ const DefaultProviderName = "Google Antigravity"
 
 // BackupFile creates a timestamped copy of the specified file if it exists.
 // Returns the absolute path of the backup, or empty string if the source does not exist.
+// The copy is staged in an O_EXCL temp file and renamed into place, so a pre-planted symlink at the
+// documented `<name>.bak-<timestamp>` path is replaced rather than written through.
 func BackupFile(srcPath string, ts string) (string, error) {
 	info, err := os.Stat(srcPath)
 	if err != nil {
@@ -46,19 +48,42 @@ func BackupFile(srcPath string, ts string) (string, error) {
 	}
 	defer srcFile.Close()
 
-	destFile, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	destFile, err := os.CreateTemp(filepath.Dir(backupPath), filepath.Base(backupPath)+"-*")
 	if err != nil {
-		return "", fmt.Errorf("creating backup file %s: %w", backupPath, err)
+		return "", fmt.Errorf("creating backup staging file for %s: %w", backupPath, err)
 	}
-	defer destFile.Close()
+	tempPath := destFile.Name()
+
+	cleanup := func() {
+		_ = os.Remove(tempPath)
+	}
 
 	if _, err := io.Copy(destFile, srcFile); err != nil {
-		_ = os.Remove(backupPath)
-		return "", fmt.Errorf("copying backup data to %s: %w", backupPath, err)
+		_ = destFile.Close()
+		cleanup()
+		return "", fmt.Errorf("copying backup data to %s: %w", tempPath, err)
+	}
+
+	if err := destFile.Chmod(0o600); err != nil {
+		_ = destFile.Close()
+		cleanup()
+		return "", fmt.Errorf("setting backup permissions on %s: %w", tempPath, err)
 	}
 
 	if err := destFile.Sync(); err != nil {
-		return "", fmt.Errorf("syncing backup file %s: %w", backupPath, err)
+		_ = destFile.Close()
+		cleanup()
+		return "", fmt.Errorf("syncing backup file %s: %w", tempPath, err)
+	}
+
+	if err := destFile.Close(); err != nil {
+		cleanup()
+		return "", fmt.Errorf("closing backup file %s: %w", tempPath, err)
+	}
+
+	if err := os.Rename(tempPath, backupPath); err != nil {
+		cleanup()
+		return "", fmt.Errorf("renaming backup %s to %s: %w", tempPath, backupPath, err)
 	}
 
 	return backupPath, nil

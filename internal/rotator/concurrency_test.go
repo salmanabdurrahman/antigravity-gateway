@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,4 +176,183 @@ func TestRotatorConcurrent429AndReload(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestRotatorHybridConcurrency verifies that hybrid selection serves concurrent requests without data
+// races or token-bucket imbalance across the pool.
+func TestRotatorHybridConcurrency(t *testing.T) {
+	ctx := t.Context()
+	var served atomic.Int64
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		served.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer mockServer.Close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategyHybrid),
+		TokenURL:  mockServer.URL + "/token",
+		Endpoints: []string{mockServer.URL},
+	}
+
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{
+		newTestAccount("hybrid1@example.com"),
+		newTestAccount("hybrid2@example.com"),
+		newTestAccount("hybrid3@example.com"),
+	})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.Client())
+
+	const workers = 24
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := range workers {
+		go func(idx int) {
+			defer wg.Done()
+			res, err := r.Generate(ctx, "gemini-3.8-pro", func(s *rotator.AccountState) (any, error) {
+				return map[string]string{"project": s.ProjectID()}, nil
+			})
+			if err != nil {
+				t.Errorf("hybrid worker %d failed: %v", idx, err)
+				return
+			}
+			_ = res.Response.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	if got := served.Load(); got != workers {
+		t.Errorf("expected %d served requests, got %d", workers, got)
+	}
+}
+
+// TestRotatorSetStrategyDuringGenerate verifies that switching rotation strategy while requests are in
+// flight never races dispatch or loses a response.
+func TestRotatorSetStrategyDuringGenerate(t *testing.T) {
+	ctx := t.Context()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer mockServer.Close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategySticky),
+		TokenURL:  mockServer.URL + "/token",
+		Endpoints: []string{mockServer.URL},
+	}
+
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{
+		newTestAccount("switch1@example.com"),
+		newTestAccount("switch2@example.com"),
+	})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.Client())
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		strategies := []rotator.Strategy{rotator.StrategySticky, rotator.StrategyRoundRobin, rotator.StrategyHybrid}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				r.SetStrategy(strategies[i%len(strategies)])
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(stop)
+		for range 20 {
+			res, err := r.Generate(ctx, "gemini-3.8-pro", func(s *rotator.AccountState) (any, error) {
+				return map[string]string{"project": s.ProjectID()}, nil
+			})
+			if err != nil {
+				t.Errorf("Generate during strategy switch failed: %v", err)
+				return
+			}
+			_ = res.Response.Body.Close()
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestRotatorInvalidGrantDisablesAccount verifies that a refresh token rejected with invalid_grant
+// disables the offending account persistently while the remaining account serves the request.
+func TestRotatorInvalidGrantDisablesAccount(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			if err := r.ParseForm(); err == nil && strings.Contains(r.PostFormValue("refresh_token"), "revoked") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"Token has been expired or revoked."}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer mockServer.Close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategyRoundRobin),
+		TokenURL:  mockServer.URL + "/token",
+		Endpoints: []string{mockServer.URL},
+	}
+
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{
+		{Email: "revoked@example.com", RefreshToken: "rt-revoked", ProjectID: "proj-revoked", AddedAt: time.Now().UTC().Format(time.RFC3339)},
+		newTestAccount("healthy@example.com"),
+	})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.Client())
+
+	res, err := r.Generate(t.Context(), "gemini-3.8-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]string{"project": s.ProjectID()}, nil
+	})
+	if err != nil {
+		t.Fatalf("expected failover to the healthy account, got %v", err)
+	}
+	_ = res.Response.Body.Close()
+	if res.State.Email() != "healthy@example.com" {
+		t.Errorf("expected healthy account to serve, got %s", res.State.Email())
+	}
+
+	for _, state := range pool.States() {
+		if state.Email() == "revoked@example.com" && state.Usable() {
+			t.Error("expected the invalid_grant account to be disabled")
+		}
+	}
 }

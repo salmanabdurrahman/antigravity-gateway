@@ -5,6 +5,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -53,8 +54,8 @@ func TestStoreUpsertAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat failed: %v", err)
 	}
-	perm := fi.Mode().Perm()
-	if perm != config.FilePerm {
+	// Windows does not model POSIX permission bits, so the 0600 contract is asserted on POSIX only.
+	if perm := fi.Mode().Perm(); runtime.GOOS != "windows" && perm != config.FilePerm {
 		t.Errorf("expected permission 0600 (0%o), got 0%o", config.FilePerm, perm)
 	}
 
@@ -205,7 +206,12 @@ func TestStoreConcurrentAccess(t *testing.T) {
 				RefreshToken: "ref",
 				ProjectID:    "proj",
 			})
+			// Concurrent enablement flips and removals must serialize with upserts and reads.
+			_ = store.SetDisabled(email, id%2 == 0, "concurrent toggle")
 			_, _ = store.Load()
+			if id%3 == 0 {
+				_, _ = store.Remove(email)
+			}
 		}(i)
 	}
 
@@ -217,5 +223,147 @@ func TestStoreConcurrentAccess(t *testing.T) {
 	}
 	if len(accounts) == 0 {
 		t.Errorf("expected accounts to be stored")
+	}
+}
+
+// TestStoreUpsertBackfillsUserIDOnLegacyEntry verifies that logging in again backfills the immutable
+// Google user ID onto an existing email-keyed entry written before identity capture, without creating
+// a duplicate account.
+func TestStoreUpsertBackfillsUserIDOnLegacyEntry(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "accounts.json")
+	legacy := `{"version":1,"accounts":[{"email":"legacy@example.com","refresh_token":"legacy-refresh","project_id":"proj-legacy","added_at":"2026-01-01T00:00:00Z"}]}`
+	if err := os.WriteFile(storePath, []byte(legacy), config.FilePerm); err != nil {
+		t.Fatalf("writing legacy accounts file: %v", err)
+	}
+
+	store := NewStore(storePath)
+	isNew, err := store.Upsert(&Account{
+		Email:        "legacy@example.com",
+		UserID:       "google-sub-12345",
+		RefreshToken: "legacy-refresh-rotated",
+		ProjectID:    "proj-legacy",
+	})
+	if err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+	if isNew {
+		t.Fatal("expected legacy entry to be updated, not duplicated")
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 account after backfill, got %d", len(loaded))
+	}
+	if loaded[0].UserID != "google-sub-12345" {
+		t.Errorf("expected user id backfilled, got %q", loaded[0].UserID)
+	}
+	if loaded[0].AddedAt != "2026-01-01T00:00:00Z" {
+		t.Errorf("expected original AddedAt preserved, got %s", loaded[0].AddedAt)
+	}
+}
+
+// TestStoreUpsertMatchesUserIDAcrossEmailChange verifies that an account keeps a single store entry
+// when the Google address changes, because deduplication prefers the immutable user ID.
+func TestStoreUpsertMatchesUserIDAcrossEmailChange(t *testing.T) {
+	tempDir := t.TempDir()
+	store := NewStore(filepath.Join(tempDir, "accounts.json"))
+
+	if _, err := store.Upsert(&Account{
+		Email:        "old-address@example.com",
+		UserID:       "google-sub-999",
+		RefreshToken: "refresh-old",
+		ProjectID:    "proj-shared",
+		AddedAt:      "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seeding account: %v", err)
+	}
+
+	isNew, err := store.Upsert(&Account{
+		Email:        "new-address@example.com",
+		UserID:       "google-sub-999",
+		RefreshToken: "refresh-new",
+		ProjectID:    "proj-shared",
+	})
+	if err != nil {
+		t.Fatalf("Upsert after email change failed: %v", err)
+	}
+	if isNew {
+		t.Fatal("expected the same user ID to update the existing entry")
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 account after email change, got %d", len(loaded))
+	}
+	if loaded[0].Email != "new-address@example.com" || loaded[0].RefreshToken != "refresh-new" {
+		t.Errorf("expected renamed account with rotated token, got %+v", loaded[0])
+	}
+	if loaded[0].AddedAt != "2026-01-01T00:00:00Z" {
+		t.Errorf("expected AddedAt continuity across email change, got %s", loaded[0].AddedAt)
+	}
+}
+
+// TestStoreLoadDeduplicatesLegacyUserIDEntries verifies that a file holding two entries for the same
+// immutable identity collapses to the entry whose credentials can still be refreshed.
+func TestStoreLoadDeduplicatesLegacyUserIDEntries(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "accounts.json")
+	payload := `{"version":1,"accounts":[` +
+		`{"email":"alias@example.com","user_id":"google-sub-777","access_token":"desktop-token","project_id":"proj-1","added_at":"2026-01-01T00:00:00Z"},` +
+		`{"email":"canonical@example.com","user_id":"google-sub-777","refresh_token":"refresh-777","project_id":"proj-1","added_at":"2025-12-01T00:00:00Z"}` +
+		`]}`
+	if err := os.WriteFile(storePath, []byte(payload), config.FilePerm); err != nil {
+		t.Fatalf("writing duplicate identity file: %v", err)
+	}
+
+	loaded, err := NewStore(storePath).Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected duplicate identity collapsed to 1 account, got %d", len(loaded))
+	}
+	if loaded[0].RefreshToken != "refresh-777" {
+		t.Errorf("expected refreshable entry retained, got %+v", loaded[0])
+	}
+}
+
+// TestStoreDistinctUserIDsStaySeparate verifies that two different Google subjects which happen to share
+// an email address are not merged: the immutable user ID is authoritative when both sides carry one.
+func TestStoreDistinctUserIDsStaySeparate(t *testing.T) {
+	tempDir := t.TempDir()
+	store := NewStore(filepath.Join(tempDir, "accounts.json"))
+
+	first := &Account{Email: "shared@example.com", UserID: "google-sub-aaa", RefreshToken: "rt-a", ProjectID: "proj-1", AddedAt: "2026-01-01T00:00:00Z"}
+	second := &Account{Email: "shared@example.com", UserID: "google-sub-bbb", RefreshToken: "rt-b", ProjectID: "proj-2", AddedAt: "2026-01-02T00:00:00Z"}
+
+	if first.Matches(second) {
+		t.Fatal("expected distinct user IDs to be treated as distinct identities")
+	}
+
+	if _, err := store.Upsert(first); err != nil {
+		t.Fatalf("seeding first identity: %v", err)
+	}
+	isNew, err := store.Upsert(second)
+	if err != nil {
+		t.Fatalf("inserting second identity: %v", err)
+	}
+	if !isNew {
+		t.Fatal("expected the second subject to be stored separately instead of overwriting the first")
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(loaded))
 	}
 }

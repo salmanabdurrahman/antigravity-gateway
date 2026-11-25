@@ -23,8 +23,15 @@ const CredentialSourceLocalDesktop = "local_desktop"
 
 // Account represents a configured Google Antigravity account with associated credentials and companion project.
 type Account struct {
-	// Email is the primary Google user email address associated with this account.
+	// Email is the primary Google user email address associated with this account. It is display and
+	// lookup metadata only: Google users can change or alias it, so it is never the identity key.
 	Email string `json:"email"`
+
+	// UserID is Google's immutable account subject identifier (`sub` from the userinfo endpoint). It
+	// stays stable across email changes and aliases, so stored accounts, duplicate detection, and
+	// cooldown continuity key on it whenever it is known. It is empty for legacy files written before
+	// the identifier was captured and is backfilled on the next login or local import.
+	UserID string `json:"user_id,omitempty"`
 
 	// RefreshToken is the long-lived OAuth refresh token used to mint fresh access tokens.
 	RefreshToken string `json:"refresh_token,omitempty"`
@@ -62,6 +69,32 @@ func (a *Account) HasCredentials() bool {
 		return false
 	}
 	return strings.TrimSpace(a.RefreshToken) != "" || strings.TrimSpace(a.AccessToken) != ""
+}
+
+// Key returns the account's stable identity key: the immutable Google user ID when known, otherwise
+// the lowercased email address of a legacy entry that predates identity capture.
+func (a *Account) Key() string {
+	if a == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(a.UserID); id != "" {
+		return id
+	}
+	return strings.ToLower(strings.TrimSpace(a.Email))
+}
+
+// Matches reports whether the account represents the same Google identity as another account.
+// The immutable UserID is authoritative whenever both sides carry one: an email change or alias updates
+// the existing entry instead of creating a duplicate, while two distinct subjects that happen to share
+// an address stay separate. Email is only the fallback for legacy entries without an identifier.
+func (a *Account) Matches(other *Account) bool {
+	if a == nil || other == nil {
+		return false
+	}
+	if a.UserID != "" && other.UserID != "" {
+		return a.UserID == other.UserID
+	}
+	return a.Email != "" && strings.EqualFold(a.Email, other.Email)
 }
 
 // IsLocalDesktopSession reports whether the account credentials came from a local desktop import,
@@ -155,7 +188,49 @@ func (s *Store) loadUnlocked() ([]*Account, error) {
 		valid = append(valid, acc)
 	}
 
-	return valid, nil
+	return dedupeAccountsByUserID(valid), nil
+}
+
+// dedupeAccountsByUserID collapses legacy duplicates that describe the same immutable Google identity,
+// for example an account stored once per pre-change email alias. Entries without a UserID are kept
+// verbatim because email remains the only available identity for them.
+func dedupeAccountsByUserID(accounts []*Account) []*Account {
+	positions := make(map[string]int, len(accounts))
+	out := make([]*Account, 0, len(accounts))
+	for _, acc := range accounts {
+		if acc.UserID == "" {
+			out = append(out, acc)
+			continue
+		}
+		pos, exists := positions[acc.UserID]
+		if !exists {
+			positions[acc.UserID] = len(out)
+			out = append(out, acc)
+			continue
+		}
+		if preferAccount(acc, out[pos]) {
+			out[pos] = acc
+		}
+	}
+	return out
+}
+
+// preferAccount reports whether candidate should replace existing when both describe the same identity.
+// A refreshable credential wins over a short-lived desktop token, and the most recently added entry wins
+// otherwise, so a deduplicated account keeps the credentials that can still be refreshed.
+func preferAccount(candidate, existing *Account) bool {
+	if candidate == nil {
+		return false
+	}
+	if existing == nil {
+		return true
+	}
+	candidateRefreshable := strings.TrimSpace(candidate.RefreshToken) != ""
+	existingRefreshable := strings.TrimSpace(existing.RefreshToken) != ""
+	if candidateRefreshable != existingRefreshable {
+		return candidateRefreshable
+	}
+	return candidate.AddedAt > existing.AddedAt
 }
 
 // Save atomically writes the account slice to disk with POSIX 0600 permissions.
@@ -221,8 +296,10 @@ func (s *Store) saveUnlocked(accounts []*Account) error {
 	return nil
 }
 
-// Upsert adds a new account or updates an existing account matching the same email (case-insensitive).
-// Returns true if a new account was inserted, or false if an existing account was updated.
+// Upsert adds a new account or updates an existing account describing the same Google identity.
+// Identity is the immutable user ID when both sides carry one, falling back to the case-insensitive
+// email address for legacy entries. Returns true if a new account was inserted, or false if an
+// existing account was updated.
 func (s *Store) Upsert(account *Account) (bool, error) {
 	if account == nil {
 		return false, errors.New("cannot upsert nil account")
@@ -240,7 +317,7 @@ func (s *Store) Upsert(account *Account) (bool, error) {
 	}
 
 	index := slices.IndexFunc(accounts, func(a *Account) bool {
-		return strings.EqualFold(a.Email, account.Email)
+		return a.Matches(account)
 	})
 
 	isNew := index == -1
@@ -250,9 +327,13 @@ func (s *Store) Upsert(account *Account) (bool, error) {
 		}
 		accounts = append(accounts, account)
 	} else {
-		// Preserve original AddedAt date when updating credentials
+		// Preserve original AddedAt date when updating credentials, and backfill the immutable user ID
+		// onto a legacy email-keyed entry so later logins match by identity instead of address.
 		if account.AddedAt == "" {
 			account.AddedAt = accounts[index].AddedAt
+		}
+		if account.UserID == "" {
+			account.UserID = accounts[index].UserID
 		}
 		accounts[index] = account
 	}

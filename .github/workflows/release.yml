@@ -28,6 +28,9 @@ jobs:
           go-version: '1.24'
           cache: true
 
+      - name: Run unit test suite with race detector
+        run: go test -race ./...
+
       - name: Build cross-platform release archives and checksums
         run: |
           TAG="${{ github.ref_name }}"
@@ -44,6 +47,40 @@ jobs:
         run: |
           cd dist
           sha256sum -c SHA256SUMS
+
+      # Artifact smoke checks run before publishing so a broken archive is never released: every
+      # unpacked binary must report its own version, and the installer must verify a real asset set.
+      - name: Smoke-test packaged binary
+        run: |
+          set -euo pipefail
+          VERSION="$(ls dist/ | sed -n 's/^agw_\([^_]*\)_linux_amd64\.tar\.gz$/\1/p' | head -n1)"
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: linux/amd64 release archive missing from dist/" >&2
+            ls -1 dist >&2
+            exit 1
+          fi
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          tar -xzf "dist/agw_${VERSION}_linux_amd64.tar.gz" -C "$WORK"
+          chmod +x "$WORK/agw"
+          "$WORK/agw" version
+
+      - name: Verify release assets through the installer
+        env:
+          AGW_DIST_URL: file://${{ github.workspace }}/dist
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION="$(ls dist/ | sed -n 's/^agw_\([^_]*\)_.*/\1/p' | head -n1)"
+          if [ -z "$RELEASE_VERSION" ]; then
+            echo "ERROR: could not determine the packaged release version" >&2
+            exit 1
+          fi
+          INSTALL_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$INSTALL_ROOT"' EXIT
+          ./scripts/install.sh --version "$RELEASE_VERSION" \
+            --dist-url "file://${PWD}/dist" \
+            --install-dir "$INSTALL_ROOT/bin"
+          "$INSTALL_ROOT/bin/agw" version
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4

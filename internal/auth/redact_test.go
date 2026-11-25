@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -101,24 +102,27 @@ func TestStartCallbackListenerStateValidation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	listenAddr := "127.0.0.1:51199"
 	callbackPath := "/oauth-callback"
 	expectedState := "valid-session-state-12345"
+
+	// Bind an ephemeral port instead of a fixed one so concurrent runs cannot collide.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("binding ephemeral callback listener: %v", err)
+	}
+	listenAddr := listener.Addr().String()
 
 	resultChan := make(chan *CallbackResult, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
-		res, err := StartCallbackListener(ctx, listenAddr, callbackPath, expectedState)
-		if err != nil {
-			errChan <- err
+		res, serveErr := ServeCallbackListener(ctx, listener, callbackPath, expectedState)
+		if serveErr != nil {
+			errChan <- serveErr
 			return
 		}
 		resultChan <- res
 	}()
-
-	// Give ephemeral listener time to bind
-	time.Sleep(50 * time.Millisecond)
 
 	// Step 1: Send forged error callback with wrong state (should be rejected with 400 and ignored)
 	badURL := fmt.Sprintf("http://%s%s?error=access_denied&state=forged-state", listenAddr, callbackPath)

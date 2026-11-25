@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -180,28 +181,31 @@ func TestParseRedirectURL(t *testing.T) {
 // TestStartCallbackListener verifies loopback HTTP callback listener mechanics and CSRF state validation.
 func TestStartCallbackListener(t *testing.T) {
 	ctx := t.Context()
-	listenAddr := "127.0.0.1:51129"
 	callbackPath := "/test-callback"
 	expectedState := "expected-state-value"
+
+	// Bind an ephemeral port so parallel test runs never contend for a fixed callback port.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("binding ephemeral callback listener: %v", err)
+	}
 
 	resChan := make(chan *CallbackResult, 1)
 	errChan := make(chan error, 1)
 
 	go func() {
-		res, err := StartCallbackListener(ctx, listenAddr, callbackPath, expectedState)
-		if err != nil {
-			errChan <- err
+		res, serveErr := ServeCallbackListener(ctx, listener, callbackPath, expectedState)
+		if serveErr != nil {
+			errChan <- serveErr
 			return
 		}
 		resChan <- res
 	}()
 
-	// Allow listener to bind
-	time.Sleep(50 * time.Millisecond)
-
-	// Send callback request
+	// The bound TCP listener queues the connection until the server accepts it, so the request below
+	// never races the handshake and no bind sleep is needed.
 	client := &http.Client{Timeout: 2 * time.Second}
-	reqURL := fmt.Sprintf("http://%s%s?code=returned-code&state=%s", listenAddr, callbackPath, expectedState)
+	reqURL := fmt.Sprintf("http://%s%s?code=returned-code&state=%s", listener.Addr().String(), callbackPath, expectedState)
 	resp, err := client.Get(reqURL)
 	if err != nil {
 		t.Fatalf("failed to invoke callback endpoint: %v", err)

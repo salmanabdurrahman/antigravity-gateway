@@ -124,8 +124,9 @@ func TestHealthAndAccountsEndpoints(t *testing.T) {
 
 	handler := harness.server.buildHandler()
 
-	// 1. GET /health
+	// 1. GET /health (loopback authority, as every daemon probe uses)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Host = "127.0.0.1:51400"
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -220,6 +221,82 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected to find gemini-2.5-flash in model list")
+	}
+}
+
+// TestModelByIDEndpoint verifies single model retrieval resolves configured aliases and answers an
+// OpenAI-compatible 404 for unknown identifiers.
+func TestModelByIDEndpoint(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "fetchAvailableModels") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"models": map[string]any{
+					"gemini-pro-agent": map[string]any{
+						"displayName":     "Gemini 3.1 Pro",
+						"maxTokens":       1048576,
+						"maxOutputTokens": 65536,
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := harness.server.buildHandler()
+
+	// 1. Direct identifier.
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/gemini-pro-agent", nil)
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for known model, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var item ModelItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatalf("decoding model item: %v", err)
+	}
+	if item.ID != "gemini-pro-agent" || item.Object != "model" {
+		t.Errorf("unexpected model payload: %+v", item)
+	}
+	if item.Meta.MaxOutputTokens != 65536 {
+		t.Errorf("expected max output tokens preserved, got %d", item.Meta.MaxOutputTokens)
+	}
+
+	// 2. Public alias resolves to the upstream catalog identifier.
+	aliasReq := httptest.NewRequest(http.MethodGet, "/v1/models/gemini-3.1-pro-high", nil)
+	aliasReq.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	aliasRec := httptest.NewRecorder()
+	handler.ServeHTTP(aliasRec, aliasReq)
+	if aliasRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for aliased model, got %d: %s", aliasRec.Code, aliasRec.Body.String())
+	}
+	var aliasItem ModelItem
+	if err := json.Unmarshal(aliasRec.Body.Bytes(), &aliasItem); err != nil {
+		t.Fatalf("decoding aliased model item: %v", err)
+	}
+	if aliasItem.ID != "gemini-pro-agent" {
+		t.Errorf("expected alias resolved to gemini-pro-agent, got %q", aliasItem.ID)
+	}
+
+	// 3. Unknown identifier answers an OpenAI-shaped 404.
+	missingReq := httptest.NewRequest(http.MethodGet, "/v1/models/does-not-exist", nil)
+	missingReq.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	missingRec := httptest.NewRecorder()
+	handler.ServeHTTP(missingRec, missingReq)
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown model, got %d", missingRec.Code)
+	}
+	var errResp APIErrorResponse
+	if err := json.Unmarshal(missingRec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decoding 404 payload: %v", err)
+	}
+	if errResp.Error.Code != http.StatusNotFound || errResp.Error.Message == "" {
+		t.Errorf("unexpected 404 payload: %+v", errResp)
 	}
 }
 
@@ -758,6 +835,7 @@ func TestUIEndpoints(t *testing.T) {
 
 	// 2. GET / with Accept: text/html redirects to /ui
 	reqRoot := httptest.NewRequest(http.MethodGet, "/", nil)
+	reqRoot.Host = "127.0.0.1:51400"
 	reqRoot.Header.Set("Accept", "text/html,application/xhtml+xml")
 	recRoot := httptest.NewRecorder()
 	handler.ServeHTTP(recRoot, reqRoot)
@@ -804,6 +882,7 @@ func TestUIEndpoints(t *testing.T) {
 	reqStrat := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "hybrid"}`))
 	reqStrat.Host = "127.0.0.1:51400"
 	reqStrat.Header.Set("Content-Type", "application/json")
+	reqStrat.Header.Set("Sec-Fetch-Site", "same-origin")
 	recStrat := httptest.NewRecorder()
 	handler.ServeHTTP(recStrat, reqStrat)
 
@@ -838,6 +917,7 @@ func TestUIEndpoints(t *testing.T) {
 	reqBad := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy": "random"}`))
 	reqBad.Host = "127.0.0.1:51400"
 	reqBad.Header.Set("Content-Type", "application/json")
+	reqBad.Header.Set("Sec-Fetch-Site", "same-origin")
 	recBad := httptest.NewRecorder()
 	handler.ServeHTTP(recBad, reqBad)
 
@@ -870,6 +950,86 @@ func TestUIEndpoints(t *testing.T) {
 	handler.ServeHTTP(recRebind, reqRebind)
 	if recRebind.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for DNS rebinding attempt, got %d", recRebind.Code)
+	}
+}
+
+// TestUIEndpointsSecFetchSiteAndCrossPortOrigin verifies the loopback-only CSRF and framing defenses
+// on the unauthenticated dashboard endpoints.
+func TestUIEndpointsSecFetchSiteAndCrossPortOrigin(t *testing.T) {
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := harness.server.buildHandler()
+
+	// 1. /ui advertises framing defenses alongside the dashboard HTML.
+	uiReq := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	uiReq.Host = "127.0.0.1:51400"
+	uiRec := httptest.NewRecorder()
+	handler.ServeHTTP(uiRec, uiReq)
+	if uiRec.Code != http.StatusOK {
+		t.Fatalf("/ui status = %d; want 200", uiRec.Code)
+	}
+	if got := uiRec.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q; want DENY", got)
+	}
+	if got := uiRec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Errorf("Content-Security-Policy = %q; want frame-ancestors 'none'", got)
+	}
+
+	// 2. /health rejects a non-loopback authority so DNS rebinding cannot reach it.
+	rebindReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rebindReq.Host = "attacker.example.com:51400"
+	rebindRec := httptest.NewRecorder()
+	handler.ServeHTTP(rebindRec, rebindReq)
+	if rebindRec.Code != http.StatusForbidden {
+		t.Fatalf("/health with foreign host status = %d; want 403", rebindRec.Code)
+	}
+
+	// 3. A same-origin Sec-Fetch-Site signal alone authorizes a JSON strategy mutation.
+	sameSiteReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"sticky"}`))
+	sameSiteReq.Host = "127.0.0.1:51400"
+	sameSiteReq.Header.Set("Content-Type", "application/json")
+	sameSiteReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	sameSiteRec := httptest.NewRecorder()
+	handler.ServeHTTP(sameSiteRec, sameSiteReq)
+	if sameSiteRec.Code != http.StatusOK {
+		t.Fatalf("same-origin Sec-Fetch-Site status = %d; want 200: %s", sameSiteRec.Code, sameSiteRec.Body.String())
+	}
+
+	// 4. A cross-port loopback Origin is still cross-origin.
+	crossPortReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"hybrid"}`))
+	crossPortReq.Host = "127.0.0.1:51400"
+	crossPortReq.Header.Set("Content-Type", "application/json")
+	crossPortReq.Header.Set("Origin", "http://127.0.0.1:52400")
+	crossPortRec := httptest.NewRecorder()
+	handler.ServeHTTP(crossPortRec, crossPortReq)
+	if crossPortRec.Code != http.StatusForbidden {
+		t.Fatalf("cross-port origin status = %d; want 403", crossPortRec.Code)
+	}
+
+	// 5. A request with neither Origin nor Sec-Fetch-Site is rejected instead of trusted.
+	noSignalReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"hybrid"}`))
+	noSignalReq.Host = "127.0.0.1:51400"
+	noSignalReq.Header.Set("Content-Type", "application/json")
+	noSignalRec := httptest.NewRecorder()
+	handler.ServeHTTP(noSignalRec, noSignalReq)
+	if noSignalRec.Code != http.StatusForbidden {
+		t.Fatalf("missing same-origin signal status = %d; want 403", noSignalRec.Code)
+	}
+
+	// 6. A same-origin signal does not bypass the JSON content-type requirement.
+	textPlainReq := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`strategy=hybrid`))
+	textPlainReq.Host = "127.0.0.1:51400"
+	textPlainReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	textPlainReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	textPlainRec := httptest.NewRecorder()
+	handler.ServeHTTP(textPlainRec, textPlainReq)
+	if textPlainRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("form-encoded strategy mutation status = %d; want 415", textPlainRec.Code)
+	}
+
+	if strat := harness.server.rotator.Strategy(); strat != rotator.StrategySticky {
+		t.Errorf("expected only the same-origin mutation to apply, got strategy %s", strat)
 	}
 }
 
@@ -1129,6 +1289,7 @@ func TestUIStrategyPersistsToLaunchedConfigPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/ui/api/strategy", bytes.NewBufferString(`{"strategy":"round-robin"}`))
 	req.Host = "127.0.0.1:51400"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -65,9 +66,9 @@ func TestEnsureDir(t *testing.T) {
 		t.Errorf("expected %q to be a directory", tempDir)
 	}
 
-	// Verify POSIX permissions (0700)
-	perm := info.Mode().Perm()
-	if perm != DirPerm {
+	// Verify POSIX permissions (0700). Windows does not model POSIX bits, so this contract is asserted
+	// on POSIX hosts only.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != DirPerm {
 		t.Errorf("expected permissions %o, got %o", DirPerm, perm)
 	}
 }

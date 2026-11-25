@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,9 +76,9 @@ func TestLoadNonExistentInitializesFile(t *testing.T) {
 		t.Fatalf("os.Stat() on generated config file failed: %v", err)
 	}
 
-	// Verify POSIX 0600 file permissions
-	perm := info.Mode().Perm()
-	if perm != FilePerm {
+	// Verify POSIX 0600 file permissions. Windows does not model POSIX bits, so this contract is
+	// asserted on POSIX hosts only.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != FilePerm {
 		t.Errorf("expected file permissions %o, got %o", FilePerm, perm)
 	}
 
@@ -111,8 +112,8 @@ func TestSaveAndLoadRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Stat() failed: %v", err)
 	}
-	if info.Mode().Perm() != FilePerm {
-		t.Errorf("expected permissions %o, got %o", FilePerm, info.Mode().Perm())
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != FilePerm {
+		t.Errorf("expected permissions %o, got %o", FilePerm, perm)
 	}
 
 	loaded, err := Load(configPath)
@@ -268,8 +269,8 @@ func TestSaveStrategyPreservesUnrelatedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Stat() failed: %v", err)
 	}
-	if info.Mode().Perm() != FilePerm {
-		t.Errorf("expected permissions %o, got %o", FilePerm, info.Mode().Perm())
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != FilePerm {
+		t.Errorf("expected permissions %o, got %o", FilePerm, perm)
 	}
 }
 

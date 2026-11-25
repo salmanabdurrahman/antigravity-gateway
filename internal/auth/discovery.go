@@ -20,8 +20,19 @@ import (
 // ErrNoCompanionProject is returned when Google does not return or provision a companion project.
 var ErrNoCompanionProject = errors.New("google did not return a cloud code companion project for this account")
 
-// GetUserEmail retrieves the authenticated user's email address from Google's userinfo endpoint.
-func GetUserEmail(ctx context.Context, cfg *config.Config, accessToken string) (string, error) {
+// UserIdentity holds the immutable Google account subject identifier alongside the display email.
+type UserIdentity struct {
+	// ID is Google's immutable account subject identifier (`sub`). It stays stable across email
+	// changes and aliases, so it is the durable key for a stored account.
+	ID string
+
+	// Email is the account's primary email address, which the user can change or alias.
+	Email string
+}
+
+// GetUserIdentity retrieves the authenticated user's immutable subject ID and email address from
+// Google's userinfo endpoint in a single round trip.
+func GetUserIdentity(ctx context.Context, cfg *config.Config, accessToken string) (*UserIdentity, error) {
 	userInfoURL := config.DefaultUserInfoURL
 	if cfg != nil {
 		userInfoURL = cmp.Or(cfg.UserInfoURL, config.DefaultUserInfoURL)
@@ -29,33 +40,44 @@ func GetUserEmail(ctx context.Context, cfg *config.Config, accessToken string) (
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating userinfo request: %w", err)
+		return nil, fmt.Errorf("creating userinfo request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	client := config.DefaultHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("calling userinfo endpoint %s: %w", userInfoURL, err)
+		return nil, fmt.Errorf("calling userinfo endpoint %s: %w", userInfoURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("userinfo request failed with status %d", resp.StatusCode)
+		return nil, fmt.Errorf("userinfo request failed with status %d", resp.StatusCode)
 	}
 
 	var data struct {
+		Sub   string `json:"sub"`
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
-		return "", fmt.Errorf("decoding userinfo response: %w", err)
+		return nil, fmt.Errorf("decoding userinfo response: %w", err)
 	}
 
-	if data.Email == "" {
-		return "", errors.New("no email returned by google userinfo")
+	identity := &UserIdentity{ID: strings.TrimSpace(data.Sub), Email: strings.TrimSpace(data.Email)}
+	if identity.Email == "" {
+		return nil, errors.New("no email returned by google userinfo")
 	}
 
-	return data.Email, nil
+	return identity, nil
+}
+
+// GetUserEmail retrieves the authenticated user's email address from Google's userinfo endpoint.
+func GetUserEmail(ctx context.Context, cfg *config.Config, accessToken string) (string, error) {
+	identity, err := GetUserIdentity(ctx, cfg, accessToken)
+	if err != nil {
+		return "", err
+	}
+	return identity.Email, nil
 }
 
 // ExtractProjectID searches for companion project identifier keys within arbitrary JSON response objects.

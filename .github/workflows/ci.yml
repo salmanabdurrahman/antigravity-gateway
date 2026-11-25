@@ -45,6 +45,40 @@ jobs:
       - name: Run automated installer verification
         run: ./scripts/test-installer.sh
 
+  native-tests:
+    name: Native Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      # The daemon lifecycle, port-owner lookup, and binary applier have platform-specific
+      # implementations (lsof/netstat, Windows rename semantics). Running the race suite natively on
+      # macOS and Windows is the only way those branches are exercised.
+      - name: Run unit tests with race detector
+        shell: bash
+        run: go test -race ./...
+
+      - name: Build and smoke-test CLI
+        shell: bash
+        run: |
+          BIN="bin/agw"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN="bin/agw.exe"
+          fi
+          go build -trimpath -o "$BIN" ./cmd/agw
+          "$BIN" version
+
   matrix-build-check:
     name: Cross-Platform Build Check (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ubuntu-latest

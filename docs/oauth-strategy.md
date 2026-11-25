@@ -76,13 +76,22 @@ The gateway requests the following 5 OAuth scopes during authentication:
    - Stored in `~/.agw/accounts.json` with strict POSIX `0600` permissions (`-rw-------`).
    - Atomic rename pattern (`temp file` -> `flush` -> `rename`) prevents corrupted state.
    - The SQLite credential database is only read by an absolute-path `sqlite3` binary, never one resolved through `PATH`.
-6. **Zero Secret Leakage**:
+6. **Account Identity**: every login and desktop import resolves the immutable Google user ID (`sub`) from the `userinfo` endpoint in the same round trip that yields the email address. Stored accounts, duplicate detection, and in-memory rotation state key on that identifier, so a changed or aliased address updates the existing entry instead of appending a duplicate. Entries written before identity capture are matched by email once and backfilled with the user ID; duplicate entries that later share one user ID collapse to the entry whose credentials can still be refreshed.
+7. **Zero Secret Leakage**:
    - Access tokens, refresh tokens, and client secrets implement string redaction (`fmt.Stringer`).
    - Logging never outputs raw authorization headers or bearer credentials.
    - Status commands (`agw accounts`) mask tokens and display only email, project ID, and status.
    - Imported payloads are validated (length, control characters) and error messages report only the reason, never the token value.
 
-## 6. Pre-Distribution Requirements
+## 6. Application Default Credentials & Enterprise Scope
+
+`agw` intentionally ships only two credential sources: interactive OAuth 2.0 PKCE login and read-only import of an already signed-in desktop session.
+
+- **Application Default Credentials (ADC) are not supported.** Reading `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud` well-known files, or the GCE/GKE metadata server would add Google auth SDK dependencies, broaden the credential surface the daemon can read, and mix service-account principals into a pool whose quota and companion-project model is user-scoped.
+- **Enterprise and Workspace accounts remain supported through the same flows.** Tier metadata from `v1internal:loadCodeAssist` orders upstream endpoints (production Cloud Code first for business and enterprise tiers), and a self-hosted OAuth client can be supplied through `AGW_CLIENT_ID` / `AGW_CLIENT_SECRET` or `client_id` / `client_secret` in `config.json`.
+- **Future ADC support must be a separate authentication provider** with its own config surface, explicit opt-in, and secret-redaction audit rather than an implicit fallback inside the existing token refresher.
+
+## 7. Pre-Distribution Requirements
 
 Before publishing and distributing binary releases:
 

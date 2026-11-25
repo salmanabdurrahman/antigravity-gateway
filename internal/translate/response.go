@@ -367,13 +367,15 @@ func (t *ResponseTranslator) processPart(part map[string]any) {
 		return
 	}
 
-	t.sawOutput = true
 	isThought, _ := part["thought"].(bool)
 	if isThought {
 		t.recipe.Thought(txt, sig)
 		if txt != "" {
 			t.reasoning.WriteString(txt)
 			t.onDelta(Delta{ReasoningContent: txt})
+		}
+		if txt != "" || sig != "" {
+			t.sawOutput = true
 		}
 		return
 	}
@@ -384,6 +386,11 @@ func (t *ResponseTranslator) processPart(part map[string]any) {
 	if txt != "" {
 		t.text.WriteString(txt)
 		t.onDelta(Delta{Content: txt})
+	}
+	// An empty text frame without a signature carries no model output, so it must not mark the stream
+	// as produced: doing so would suppress the empty-response retry and surface a blank answer.
+	if txt != "" || sig != "" {
+		t.sawOutput = true
 	}
 }
 

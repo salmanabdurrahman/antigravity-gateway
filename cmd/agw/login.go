@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -105,19 +106,30 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 	listenAddr, callbackPath := auth.ResolveCallbackEndpoint(redirectURI)
 
-	go func() {
-		res, err := auth.StartCallbackListener(ctx, listenAddr, callbackPath, state)
-		if err != nil {
-			cmd.PrintErrf("Warning: callback listener could not bind to %s (%v); falling back to manual URL paste\n", listenAddr, err)
-			return
-		}
-		select {
-		case codeChan <- res.Code:
-		default:
-		}
-	}()
+	// Bind synchronously so a port conflict is reported from the command goroutine instead of racing
+	// command output from a background goroutine.
+	callbackListener, listenErr := net.Listen("tcp", listenAddr)
+	if listenErr != nil {
+		cmd.PrintErrf("Warning: callback listener could not bind to %s (%v); falling back to manual URL paste\n", listenAddr, listenErr)
+	} else {
+		go func() {
+			res, err := auth.ServeCallbackListener(ctx, callbackListener, callbackPath, state)
+			if err != nil {
+				return
+			}
+			select {
+			case codeChan <- res.Code:
+			default:
+			}
+		}()
+	}
 
-	// Also support pasting the callback URL in terminal if browser redirect did not hit server
+	// Manual paste stays available for remote/SSH sessions. The reader never writes to the command
+	// output (which would interleave with the prompt) and stops as soon as a code is selected, so the
+	// only remaining goroutine is a single blocking read discarded at process exit.
+	pasteCtx, stopPaste := context.WithCancel(ctx)
+	defer stopPaste()
+	pasteCodes := make(chan string, 1)
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
 		for {
@@ -125,26 +137,35 @@ func runLogin(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return
 			}
-			line = strings.TrimSpace(line)
-			if strings.Contains(line, "code=") {
-				parsed, parseErr := auth.ParseRedirectURL(line)
-				if parseErr == nil && parsed.Code != "" {
-					// Verify state parameter to prevent OAuth CSRF in manually pasted redirect URLs
-					if subtle.ConstantTimeCompare([]byte(parsed.State), []byte(state)) != 1 {
-						cmd.PrintErrln("Warning: Ignored pasted URL with mismatched OAuth state parameter.")
-						continue
-					}
-					select {
-					case codeChan <- parsed.Code:
-					default:
-					}
-					return
-				}
+			select {
+			case <-pasteCtx.Done():
+				return
+			default:
 			}
+
+			line = strings.TrimSpace(line)
+			if !strings.Contains(line, "code=") {
+				continue
+			}
+			parsed, parseErr := auth.ParseRedirectURL(line)
+			if parseErr != nil || parsed.Code == "" {
+				continue
+			}
+			// Verify state parameter to prevent OAuth CSRF in manually pasted redirect URLs.
+			if subtle.ConstantTimeCompare([]byte(parsed.State), []byte(state)) != 1 {
+				continue
+			}
+			select {
+			case pasteCodes <- parsed.Code:
+			default:
+			}
+			return
 		}
 	}()
 
-	cmd.Printf("Waiting for authentication callback on http://%s%s ...\n", listenAddr, callbackPath)
+	if listenErr == nil {
+		cmd.Printf("Waiting for authentication callback on http://%s%s ...\n", listenAddr, callbackPath)
+	}
 	cmd.Println("(If browser doesn't redirect automatically, paste the full callback URL here and press Enter)")
 
 	var code string
@@ -153,7 +174,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("login timed out after 5 minutes: %w", ctx.Err())
 	case c := <-codeChan:
 		code = c
+	case c := <-pasteCodes:
+		code = c
 	}
+	stopPaste()
 
 	cmd.Println("Authorization code received. Exchanging for tokens...")
 	tokens, err := auth.ExchangeCode(ctx, cfg, code, pkce.Verifier)
@@ -161,11 +185,12 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("exchanging code for tokens: %w", err)
 	}
 
-	cmd.Println("Retrieving account email from Google...")
-	email, err := auth.GetUserEmail(ctx, cfg, tokens.AccessToken)
+	cmd.Println("Retrieving account identity from Google...")
+	identity, err := auth.GetUserIdentity(ctx, cfg, tokens.AccessToken)
 	if err != nil {
-		return fmt.Errorf("retrieving user email: %w", err)
+		return fmt.Errorf("retrieving user identity: %w", err)
 	}
+	email := identity.Email
 
 	cmd.Println("Discovering Cloud Code companion project...")
 	projectID, tier, err := auth.DiscoverProjectAndTier(ctx, cfg, tokens.AccessToken)
@@ -179,7 +204,8 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 	accountStore := auth.NewStore(accPath)
 	account := &auth.Account{
-		Email:        email,
+		Email:        identity.Email,
+		UserID:       identity.ID,
 		RefreshToken: tokens.RefreshToken,
 		ProjectID:    projectID,
 		Tier:         tier,

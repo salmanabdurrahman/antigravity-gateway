@@ -101,15 +101,15 @@ All documentation and comments in this repository MUST be written in clear techn
 
 Follow the standard Go project layout (`golang-standards/project-layout`):
 
-- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands. No business logic.
+- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands (`root.go`, `start.go`, `stop.go`, `login.go`, `logout.go`, `accounts.go`, `models.go`, `setup.go`, `doctor.go`, `ui.go`, `update.go`, `version.go`). No business logic.
 - `internal/`: All core logic belongs under `internal/` packages:
-  - `internal/config`: Paths, defaults, env overrides, header builders.
-  - `internal/auth`: OAuth PKCE, tokens, companion project discovery, account persistence.
-  - `internal/rotator`: Account pool, strategy pickers (`sticky`, `round-robin`), cooldown timers, error classification.
-  - `internal/catalog`: Dynamic model fetcher, token limits, quota tracking, disk cache.
-  - `internal/translate`: OpenAI $\leftrightarrow$ Cloud Code schema mapping, thought signature recipe, SSE streamer.
-  - `internal/server`: `net/http` daemon, API key middleware, slog recovery, graceful shutdown.
-  - `internal/client`: Client auto-configurators (`pi.go`, `opencode.go`).
+  - `internal/config`: Paths (`paths.go`), defaults and env overrides (`config.go`), loopback address helpers (`addr.go`), upstream headers (`headers.go`), HTTP transport (`transport.go`).
+  - `internal/auth`: OAuth PKCE (`oauth.go`, `pkce.go`, `callback.go`), token refresh (`token.go`), companion project discovery (`discovery.go`), IDE/CLI session detection (`local_detect.go`), account persistence (`store.go`).
+  - `internal/rotator`: Account pool (`pool.go`), strategy pickers (`picker.go`), cooldown timers (`tracker.go`), error classification and retry delays (`retry.go`), dispatch loop (`rotator.go`).
+  - `internal/catalog`: Dynamic model fetcher and quota parsing (`catalog.go`, `models.go`, `quota.go`), embedded offline manifest (`fallback.go`), disk cache (`cache.go`).
+  - `internal/translate`: OpenAI/Anthropic request builders (`request.go`, `anthropic.go`), thinking budgets (`thinking.go`), thought signature recipes (`recipe.go`), cache-control markers (`cache_control.go`), schema normalization (`schema.go`, `schema_pipeline.go`), SSE and response translation (`response.go`).
+  - `internal/server`: `net/http` daemon (`server.go`, `daemon.go`), router and handlers (`router.go`), middleware (`middleware.go`), bounded thought-signature cache (`signature_cache.go`), PID/port ownership helpers (`portowner*.go`).
+  - `internal/client`: Client auto-configurators (`pi.go`, `opencode.go`, `claude.go`), atomic file helpers (`fs.go`), connectivity probes (`test_completion.go`).
 - **Internal Encapsulation**: Never leak private structs or raw internal states across package boundaries. Keep interfaces small and focused.
 
 ### 4.3 Error Handling Discipline
@@ -155,25 +155,25 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 
 ## 5. Repository Map & Boundaries
 
-| Path                     | Responsibility                                    | Invariants & Rules                                                                                                |
-| :----------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------- |
-| `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages                                                     |
-| `docs/`                  | Architectural specifications & contracts          | OAuth strategy, binary distribution, web dashboard, and installation contracts                                    |
-| `internal/config/`       | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                           |
-| `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                   |
-| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                                                        |
-| `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                |
-| `internal/translate/`    | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                             |
-| `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write                                  |
-| `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; same-origin mutations; no external assets                                  |
-| `internal/client/`       | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                          |
-| `internal/updater/`      | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                       |
-| `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); zero secrets in logs                                         |
-| `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                              |
-| `scripts/`               | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer                                        |
-| `Makefile`               | Standard task runner                              | Canonical build, format, test, and verification commands                                                          |
-| `.agents/skills/`        | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases                                        |
-| `CHANGELOG.md` / `*.md`  | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide; strict release-only edit rule |
+| Path                     | Responsibility                                    | Invariants & Rules                                                                                                                                          |
+| :----------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages; includes native `update` self-upgrade                                                        |
+| `docs/`                  | Architectural specifications & contracts          | OAuth strategy, binary distribution, web dashboard, and installation contracts                                                                              |
+| `internal/config/`       | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                                                                     |
+| `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                                                             |
+| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                                                                                                  |
+| `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                                                          |
+| `internal/translate/`    | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                                                                       |
+| `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write; bounded signature cache                                                   |
+| `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; same-origin mutations; no external assets                                                                            |
+| `internal/client/`       | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                                                                    |
+| `internal/updater/`      | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                                                                 |
+| `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); native Linux/macOS/Windows test jobs; release publishes only after artifact and installer verification |
+| `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                                                                        |
+| `scripts/`               | Tooling & operational scripts                     | Release packager, checksum installer, test runner, and git hooks installer                                                                                  |
+| `Makefile`               | Standard task runner                              | Canonical build, format, test, and verification commands                                                                                                    |
+| `.agents/skills/`        | Project-scoped skill definitions                  | Consult `use-modern-go` before writing Go; use `bump-version` for releases                                                                                  |
+| `CHANGELOG.md` / `*.md`  | Open source governance, changelog, and guidance   | Keep a Changelog (`CHANGELOG.md`), MIT license, security policy, contributor guide; strict release-only edit rule                                           |
 
 ### 5.1 Strict Changelog Policy: Release-Only Mutations
 

@@ -706,6 +706,56 @@ func TestRotatorPermanentForbiddenDisablesAccount(t *testing.T) {
 	}
 }
 
+// TestRotatorStaticToken401CoolsDownImmediately verifies that an account holding only a static
+// desktop bearer token is never retried with the identical credential after a 401; it cools down on
+// the first refusal instead of doubling latency with a guaranteed-failing resend.
+func TestRotatorStaticToken401CoolsDownImmediately(t *testing.T) {
+	var dispatches atomic.Int64
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			t.Errorf("static desktop token must never hit the OAuth token endpoint")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		dispatches.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"Request had invalid authentication credentials"}}`))
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{{
+		Email:            "desktop@example.com",
+		AccessToken:      "static-desktop-token",
+		CredentialSource: auth.CredentialSourceLocalDesktop,
+		ProjectID:        "proj-desktop",
+		AddedAt:          time.Now().UTC().Format(time.RFC3339),
+	}})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+
+	_, err := r.Generate(t.Context(), "gemini-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"project": s.ProjectID()}, nil
+	})
+	var rotErr *rotator.RotatorError
+	if !errors.As(err, &rotErr) || rotErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected HTTP 401 rotator error, got %v", err)
+	}
+
+	if got := dispatches.Load(); got != 1 {
+		t.Errorf("expected exactly 1 upstream dispatch for a static token, got %d", got)
+	}
+	if until := pool.States()[0].CoolingUntil("*"); until.IsZero() {
+		t.Error("static-token 401 must cool the account down immediately")
+	}
+}
+
 // TestRotatorProgressiveCooldownWithoutRetryInfo verifies escalating backoff for repeated 429s that
 // carry no explicit retry metadata.
 func TestRotatorProgressiveCooldownWithoutRetryInfo(t *testing.T) {

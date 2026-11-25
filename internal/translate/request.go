@@ -765,9 +765,16 @@ func buildModelParts(msg ChatMessage, model string) []Part {
 	var parts []Part
 	placedCalls := make(map[string]bool)
 	textPlaced := false
+	textPartIndex := -1
 
+	// placeText appends the assistant text part once. A recipe may list a "call" step before the
+	// matching "text" step, so a later signature is backfilled onto the already placed text part
+	// instead of being silently dropped.
 	placeText := func(sig string) {
 		if textPlaced {
+			if sig != "" && textPartIndex >= 0 && parts[textPartIndex].ThoughtSignature == "" {
+				parts[textPartIndex].ThoughtSignature = sig
+			}
 			return
 		}
 		textPlaced = true
@@ -777,6 +784,7 @@ func buildModelParts(msg ChatMessage, model string) []Part {
 				p.ThoughtSignature = sig
 			}
 			parts = append(parts, p)
+			textPartIndex = len(parts) - 1
 		}
 	}
 

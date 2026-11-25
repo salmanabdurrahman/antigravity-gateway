@@ -93,6 +93,14 @@ make release
 ./scripts/build-release.sh 0.1.0
 ```
 
+### Release Gates
+
+Continuous integration and the release workflow are gated so a broken archive never reaches users:
+
+- **Native test matrix**: the race-enabled unit suite runs on Linux, macOS, and Windows runners, exercising the platform-specific daemon, port-owner, and binary-applier code paths instead of only cross-compiling them.
+- **Pre-publish verification**: the release job runs the same race suite, verifies `dist/SHA256SUMS`, unpacks the `linux/amd64` archive and runs `agw version` on the packaged binary, then installs from `dist/` through `scripts/install.sh` over a `file://` mirror before `gh release create` executes.
+- **Read-only defaults**: workflow permissions stay at `contents: read` for CI and are elevated only inside the release job that publishes artifacts.
+
 ## 3. Automated Checksum-Verifying Installer
 
 Antigravity Gateway provides checksum-verifying, architecture-detecting installer scripts for POSIX systems (`scripts/install.sh`) and Windows PowerShell (`scripts/install.ps1`) that install released binaries to user-local directories without requiring elevated/root privileges.
@@ -102,7 +110,9 @@ Antigravity Gateway provides checksum-verifying, architecture-detecting installe
 - **Cryptographic Verification**: The installer downloads the release archive and companion `SHA256SUMS`, calculates the local SHA-256 digest, and halts immediately if checksums do not match.
 - **Unmanaged Binary Protection**: The installer will not overwrite an existing binary unless `--force` (or `-Force`) is explicitly provided.
 - **Zero Elevated Privileges**: Installs to user-local directory (`~/.local/bin` on POSIX, `%LOCALAPPDATA%\Programs\agw` on Windows by default), preventing unwanted mutation of system directories.
-- **Flexible Versioning**: Supports automatic resolution of the latest GitHub release or explicit pinned semantic versions (`vX.Y.Z`).
+- **Strict Version Validation**: Supports automatic resolution of the latest GitHub release or explicit pinned semantic versions (`vX.Y.Z` / `X.Y.Z`). Any other value (for example `1.2`, `latest`, or a string containing path separators) is rejected before a download URL is constructed.
+- **HTTPS-Only Remote Downloads**: `curl` invocations pass `--proto '=https'` and plain `http://` remote URLs are refused outright; local directories and `file://` mirrors used for offline installs stay supported.
+- **Symlink-Safe Extraction and Staging**: An extracted `agw` entry that is a symbolic link is refused, and the installed binary is staged through an exclusively created temp file (`mktemp` / `os.CreateTemp`) before being renamed into place.
 
 ### Quick Start (One-Liner Install)
 

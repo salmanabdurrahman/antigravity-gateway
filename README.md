@@ -9,9 +9,9 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 ## Key Features
 
-- **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
+- **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format), `/v1/messages` (Anthropic format), and OpenAI-style model discovery (`/v1/models`, `/v1/models/{id}`) bounded strictly to local loopback (`127.0.0.1:51400`).
 - **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally with configurable strategies (`sticky`, `round-robin`, or `hybrid` with health scores, token bucket burst throttling, and proactive quota protection).
-- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 2.x and newer plus Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), categorical thinking levels, thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header plus third-party agent identity sanitization.
+- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 2.x and newer plus Claude models, including a bounded per-session signature cache with tool-call-ID matching, deterministic session affinity for clients that send no header, required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair across every JSON Schema composition keyword), categorical thinking levels, thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header plus third-party agent identity sanitization.
 - **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
 - **Zero Runtime Dependencies**: Compiled into a single self-contained binary built on Go 1.24+ standard library and Cobra CLI.
@@ -292,7 +292,7 @@ Launch your default browser to open the embedded zero-dependency dashboard hoste
 agw ui
 ```
 
-Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, token bucket balances, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of the configuration file the daemon was started with, leaving every other stored setting untouched. That file is the one supplied through `--config` when present, otherwise `~/.agw/config.json`.
+Or navigate directly to `http://127.0.0.1:51400/ui` (automatic redirect from root when visited in web browsers). Features visual account health progress bars, per-account request/429 counters with the last recorded error, rolling five-hour versus weekly quota windows, a manual quota refresh control, live model quota tracking, and dynamic strategy switching. Strategy changes take effect immediately in memory and are persisted by rewriting only the `strategy` field of the configuration file the daemon was started with, leaving every other stored setting untouched. That file is the one supplied through `--config` when present, otherwise `~/.agw/config.json`.
 
 The dashboard and its JSON endpoints are documented in the [Web Dashboard Contract](docs/webui.md): read endpoints stay unauthenticated on loopback, strategy mutation is same-origin restricted, and no token material is ever serialized.
 
@@ -360,7 +360,7 @@ Audits and reports:
 1. **Network Ports**: Verifies gateway port (`51400`) and OAuth callback port (`51121`).
 2. **File System Permissions**: Confirms `0700` directory and `0600` credential file security, and validates that the stored gateway API key still matches the generated `agw_` format.
 3. **Account Pool**: Validates configured Google accounts, refresh tokens, and companion project IDs.
-4. **Upstream Connectivity**: Tests TLS reachability and latency to Google OAuth (`oauth2.googleapis.com`) and Cloud Code PA (`cloudcode-pa.googleapis.com`).
+4. **Upstream Connectivity**: Tests TLS reachability and latency to Google OAuth (`oauth2.googleapis.com`), the daily Cloud Code host (`daily-cloudcode-pa.googleapis.com`), and Cloud Code PA (`cloudcode-pa.googleapis.com`); reports IPv4 versus IPv6 reachability per Cloud Code host and surfaces the configured `HTTPS_PROXY` with credentials masked.
 5. **Client Integrations**: Checks whether Pi Coding Agent, OpenCode, and Claude Code configurations are installed, configured, and carrying the same gateway API key as `config.json`.
 
 ### HTTP API Endpoints
@@ -369,10 +369,16 @@ The gateway listens exclusively on local loopback (`127.0.0.1:51400`):
 
 | Method & Route              | Purpose                                                               | Authentication               |
 | :-------------------------- | :-------------------------------------------------------------------- | :--------------------------- |
-| `GET /health`               | Liveness probe, gateway name, version, and active account count       | None (public)                |
+| `GET /health`               | Liveness probe, gateway name, version, and active account count       | None (loopback only)         |
 | `GET /v1/models`            | OpenAI-compatible model listing with context windows and capabilities | Bearer token (`config.json`) |
+| `GET /v1/models/{id}`       | Single model descriptor by identifier or alias, OpenAI 404 otherwise  | Bearer token (`config.json`) |
 | `POST /v1/chat/completions` | OpenAI-compatible streaming SSE or non-streaming chat completions     | Bearer token (`config.json`) |
+| `POST /v1/messages`         | Anthropic Messages API for Claude Code CLI and OpenClaw               | `x-api-key` or Bearer        |
 | `GET /v1/accounts`          | Redacted diagnostic snapshots, cooldown statuses, and request metrics | Bearer token (`config.json`) |
+| `GET /ui`                   | Embedded WebUI dashboard (loopback only, framing denied)              | None (loopback only)         |
+| `GET /ui/api/status`        | Dashboard status, model catalog, quotas, and 5h/weekly windows        | None (loopback only)         |
+| `POST /ui/api/strategy`     | Same-origin rotation strategy change, persisted to `config.json`      | Same-origin request signal   |
+| `POST /ui/api/refresh`      | Same-origin forced live quota and catalog refresh                     | Same-origin request signal   |
 
 #### Quick API Test with `curl`
 
@@ -399,6 +405,26 @@ The gateway transparently translates between OpenAI Chat Completions requests an
 - **Tool Schema Defenses**: Converts OpenAI function parameters for Gemini (`parametersJsonSchema`) and Claude (`parameters`), while stripping disallowed schema attributes (`$ref`, `$defs`, `$schema`, unsupported unions). Dynamically detects HTTP 400 schema rejections to fall back to legacy `parameters` mode.
 - **Thought Signature & Replay**: Encodes upstream thinking tokens, steps, and Gemini/Claude cryptographic `thoughtSignature` data into OpenAI `reasoning_details`. Replaces missing signatures on tool re-execution with `skip_thought_signature_validator` for every Gemini generation that validates them (2.x and newer) to avoid upstream tool validation failures, while authentic client signatures are always preserved.
 - **Streaming SSE Engine**: Streams `v1internal:streamGenerateContent?alt=sse` chunks to OpenAI SSE chunks (`choices[0].delta.content`, `choices[0].delta.reasoning_content`, and `choices[0].delta.tool_calls`), with buffered scanner capacity up to 10 MB to safely handle massive code diffs and thinking blocks.
+
+### Behavior Changes & Migration Notes
+
+These behaviors are intentionally stricter than earlier releases. Review them before upgrading scripts or automation that talks to the daemon directly.
+
+- **`/health` requires a loopback authority.** The liveness probe is unauthenticated, so it only answers requests whose `Host` header (or bracketed `Host` for IPv6) resolves to `127.0.0.1`, `localhost`, or `::1`; anything else receives `403`. SSH local forwards and `agw`'s own probes keep working because they preserve the loopback authority, while a reverse proxy that rewrites `Host` to a public name no longer passes the probe.
+- **Dashboard mutations require a same-origin signal and JSON.** `POST /ui/api/strategy` and `POST /ui/api/refresh` reject requests that carry neither a matching `Origin` nor `Sec-Fetch-Site: same-origin`, and cross-port loopback origins are treated as cross-origin. `POST /ui/api/strategy` additionally requires `Content-Type: application/json`; form-encoded bodies receive `415`. Scripts must send the header explicitly:
+
+  ```bash
+  curl -s -X POST http://127.0.0.1:51400/ui/api/strategy \
+    -H 'Content-Type: application/json' \
+    -H 'Sec-Fetch-Site: same-origin' \
+    -d '{"strategy":"sticky"}'
+  ```
+
+  Details: [Web Dashboard Contract](docs/webui.md).
+
+- **`agw accounts --check` exits non-zero when the configuration cannot be loaded.** It previously printed an `Error (config)` status column and exited `0`, which let broken configuration pass unnoticed in scripts. Live quota inspection now aborts with the configuration error, and `--re-enable` still requires `--check`.
+- **`agw setup --api-key` validates the generated key format.** A value that does not match `agw_` plus 64 hexadecimal characters now fails before any client file is written, instead of being injected into every agent configuration. To keep an intentionally custom key, edit `api_key` in `config.json` and the client files directly; `agw doctor` reports when a stored key no longer matches the generated format.
+- **Tool-enabled requests derive a session identifier.** When a tool-enabled request carries no `X-Session-Affinity`/`session_id` header, the gateway derives a stable session from the model, system instructions, and opening user turn. That session marks the upstream envelope as agent traffic (`requestType: "agent"`) and lets the bounded signature cache replay `reasoning_details` after a client strips them. Plain chat requests without tools keep an empty session and a non-agent envelope.
 
 ## Configuration & Environment
 
@@ -434,6 +460,9 @@ Operational thresholds are tunable without code changes:
 
 Default upstream requests identify as `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<changelist>)`. Override the whole header with `AGW_USER_AGENT` when proxying a different client identity.
 
+- `AGW_PREFER_IPV4`: Set to `1` to dial IPv4 addresses before IPv6 addresses. Use it when the local network publishes an IPv6 route that blackholes traffic and every upstream call stalls before falling back.
+- `AGW_AGY_TOKEN_PATH`: Explicit Antigravity CLI (`agy`) token file to import through `agw login --local` (for example `~/.config/antigravity/acp_token.json`). Auto-discovery probes the common CLI locations when unset.
+- `AGW_AGY_KEYRING`: Set to `1` to opt in to a read-only OS keyring lookup for the `agy` session token. Disabled by default.
 - `PI_AGENT_DIR`: Custom Pi Coding Agent configuration directory (default: `~/.pi/agent`).
 - `OPENCODE_CONFIG`: Custom OpenCode configuration file path (default: `~/.config/opencode/opencode.json`).
 

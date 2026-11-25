@@ -131,6 +131,41 @@ func TestGetUserEmail(t *testing.T) {
 	}
 }
 
+// TestGetUserIdentity verifies that the immutable Google subject identifier and email are resolved
+// from a single userinfo round trip.
+func TestGetUserIdentity(t *testing.T) {
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer identity-token" {
+			t.Errorf("expected Bearer identity-token, got %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"sub":   "109876543210987654321",
+			"email": "identity@example.com",
+		})
+	}))
+	defer ts.Close()
+
+	cfg := config.DefaultConfig()
+	cfg.UserInfoURL = ts.URL
+
+	identity, err := GetUserIdentity(t.Context(), cfg, "identity-token")
+	if err != nil {
+		t.Fatalf("GetUserIdentity failed: %v", err)
+	}
+	if identity.ID != "109876543210987654321" {
+		t.Errorf("expected immutable subject id, got %q", identity.ID)
+	}
+	if identity.Email != "identity@example.com" {
+		t.Errorf("expected email identity@example.com, got %q", identity.Email)
+	}
+	if requests != 1 {
+		t.Errorf("expected a single userinfo round trip, got %d", requests)
+	}
+}
+
 // TestDiscoverProjectLoadSuccess verifies discovering an existing companion project via loadCodeAssist.
 func TestDiscoverProjectLoadSuccess(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

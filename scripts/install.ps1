@@ -79,7 +79,12 @@ if (-not $Version) {
     }
 }
 
-$cleanVersion = $Version.TrimStart('v')
+$cleanVersion = $Version.Trim().TrimStart('v')
+if ($cleanVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$') {
+    Write-Error "Invalid version '$Version': expected a semantic version such as 0.1.0 or v0.1.0."
+    exit 1
+}
+
 $archiveName = "agw_${cleanVersion}_windows_${arch}.zip"
 $targetBin = Join-Path $InstallDir "agw.exe"
 
@@ -111,11 +116,12 @@ try {
     Write-Host "--> Fetching checksums from $sumsUrl..."
     Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing
 
-    # Parse expected hash
+    # Parse expected hash. sha256sum -b emits a binary-mode marker (`*`) before the filename, and the
+    # separator may be a tab or repeated spaces, so both the marker and whitespace are normalized.
     $expectedHash = ""
     Get-Content -Path $sumsPath | ForEach-Object {
-        $parts = $_ -split '\s+'
-        if ($parts.Length -ge 2 -and $parts[1] -eq $archiveName) {
+        $parts = $_.Trim() -split '\s+'
+        if ($parts.Length -ge 2 -and $parts[1].TrimStart('*') -eq $archiveName) {
             $expectedHash = $parts[0].Trim().ToLower()
         }
     }
@@ -149,8 +155,13 @@ try {
     Expand-Archive -Path $archivePath -DestinationPath $stageDir -Force
 
     $extractedBin = Join-Path $stageDir "agw.exe"
-    if (-not (Test-Path -Path $extractedBin)) {
-        Write-Error "Extracted archive did not contain 'agw.exe'."
+    if (-not (Test-Path -Path $extractedBin -PathType Leaf)) {
+        Write-Error "Extracted archive did not contain a regular 'agw.exe' file."
+        exit 1
+    }
+    $extractedItem = Get-Item -Path $extractedBin -Force
+    if ($extractedItem.LinkType) {
+        Write-Error "Extracted 'agw.exe' is a link ($($extractedItem.LinkType)); refusing to install a link target."
         exit 1
     }
 

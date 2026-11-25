@@ -4,6 +4,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,19 @@ func TestDoctorCommand(t *testing.T) {
 		return 5 * time.Millisecond, nil
 	}
 	defer func() { connectivityDialer = origDialer }()
+
+	// Keep the diagnostic offline: address-family resolution and per-family dialing are stubbed.
+	origResolver := addressFamilyResolver
+	addressFamilyResolver = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return nil, errors.New("stubbed resolver")
+	}
+	defer func() { addressFamilyResolver = origResolver }()
+
+	origFamilyDialer := familyDialer
+	familyDialer = func(ctx context.Context, network, host string) (time.Duration, error) {
+		return time.Millisecond, nil
+	}
+	defer func() { familyDialer = origFamilyDialer }()
 
 	origChecker := versionChecker
 	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
@@ -204,5 +219,67 @@ func mustWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing fixture %s: %v", path, err)
+	}
+}
+
+// TestConnectivityAddressFamiliesAndProxy verifies per-family reachability reporting, the daily Cloud
+// Code host probe, and credential masking for a configured HTTPS proxy.
+func TestConnectivityAddressFamiliesAndProxy(t *testing.T) {
+	origDialer := connectivityDialer
+	connectivityDialer = func(ctx context.Context, host string) (time.Duration, error) {
+		return 4 * time.Millisecond, nil
+	}
+	defer func() { connectivityDialer = origDialer }()
+
+	origResolver := addressFamilyResolver
+	addressFamilyResolver = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.10")}, {IP: net.ParseIP("2001:db8::10")}}, nil
+	}
+	defer func() { addressFamilyResolver = origResolver }()
+
+	origFamilyDialer := familyDialer
+	familyDialer = func(ctx context.Context, network, host string) (time.Duration, error) {
+		if network == "tcp6" {
+			return 3 * time.Millisecond, errors.New("network is unreachable")
+		}
+		return 2 * time.Millisecond, nil
+	}
+	defer func() { familyDialer = origFamilyDialer }()
+
+	t.Setenv("HTTPS_PROXY", "http://proxy-user:s3cr3t-proxy-pass@proxy.internal:8080")
+
+	items := checkConnectivity(t.Context())
+
+	var dailyFound, ipv4OK, ipv6Warn, proxyFound bool
+	for _, item := range items {
+		switch item.Name {
+		case "Cloud Code Assist Daily Endpoint":
+			dailyFound = item.Status == StatusOK
+		case "Cloud Code Assist Daily Endpoint over IPv4":
+			ipv4OK = item.Status == StatusOK
+		case "Cloud Code Assist Daily Endpoint over IPv6":
+			ipv6Warn = item.Status == StatusWarn && strings.Contains(item.Hint, "AGW_PREFER_IPV4")
+		case "HTTPS Proxy":
+			proxyFound = item.Status == StatusOK
+			if strings.Contains(item.Message, "s3cr3t-proxy-pass") || strings.Contains(item.Message, "proxy-user") {
+				t.Errorf("proxy diagnostics leaked credentials: %s", item.Message)
+			}
+			if !strings.Contains(item.Message, "proxy.internal:8080") {
+				t.Errorf("expected proxy host reported, got %s", item.Message)
+			}
+		}
+	}
+
+	if !dailyFound {
+		t.Error("expected daily-cloudcode-pa endpoint to be probed")
+	}
+	if !ipv4OK {
+		t.Error("expected IPv4 family probe to report reachability")
+	}
+	if !ipv6Warn {
+		t.Error("expected unreachable IPv6 family to warn with the IPv4 dial hint")
+	}
+	if !proxyFound {
+		t.Error("expected HTTPS proxy configuration to be reported")
 	}
 }

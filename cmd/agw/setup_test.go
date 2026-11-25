@@ -14,6 +14,41 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 )
 
+// validTestAPIKey is a generated-format key, required because setup validates any --api-key override.
+var validTestAPIKey = config.APIKeyPrefix + strings.Repeat("a", config.APIKeyHexLen)
+
+// TestSetupRejectsInvalidAPIKeyOverride verifies a malformed --api-key fails the command instead of
+// being written into every generated client configuration.
+func TestSetupRejectsInvalidAPIKeyOverride(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+
+	buf := new(bytes.Buffer)
+	setupPiCmd.SetOut(buf)
+	setupPiCmd.SetErr(buf)
+
+	setupURL = "http://127.0.0.1:51400"
+	setupAPIKey = "not-a-generated-key"
+	setupNoVerify = true
+	setupDryRun = true
+	setupPiDir = t.TempDir()
+	setupPiCleanLegacy = false
+	setupModelsFilter = ""
+
+	err := setupPiCmd.RunE(setupPiCmd, []string{})
+	if err == nil {
+		t.Fatal("expected an invalid --api-key to fail the command")
+	}
+	if !strings.Contains(err.Error(), "invalid --api-key") {
+		t.Errorf("expected a clear --api-key error, got %v", err)
+	}
+	if strings.Contains(buf.String(), "not-a-generated-key") {
+		t.Error("invalid key value must not be echoed")
+	}
+	if _, statErr := os.Stat(filepath.Join(setupPiDir, "models.json")); statErr == nil {
+		t.Error("invalid key must not write a client configuration")
+	}
+}
+
 // TestSetupPiCommand verifies executing agw setup pi to configure Pi Coding Agent.
 func TestSetupPiCommand(t *testing.T) {
 	tempHome := t.TempDir()
@@ -43,7 +78,7 @@ func TestSetupPiCommand(t *testing.T) {
 	setupPiCmd.SetErr(buf)
 
 	setupURL = srv.URL
-	setupAPIKey = "test-key"
+	setupAPIKey = validTestAPIKey
 	setupNoVerify = false
 	setupDryRun = false
 	setupPiDir = piDir
@@ -97,7 +132,7 @@ func TestSetupOpenCodeCommand(t *testing.T) {
 	setupOpenCodeCmd.SetErr(buf)
 
 	setupURL = srv.URL
-	setupAPIKey = "test-key"
+	setupAPIKey = validTestAPIKey
 	setupNoVerify = false
 	setupDryRun = false
 	setupOpenCodePath = opencodeConfig
@@ -147,7 +182,7 @@ func TestSetupClaudeCommand(t *testing.T) {
 	setupClaudeCmd.SetErr(buf)
 
 	setupURL = srv.URL
-	setupAPIKey = "test-key"
+	setupAPIKey = validTestAPIKey
 	setupNoVerify = false
 	setupDryRun = false
 	setupClaudeSettingsPath = claudeSettings
@@ -200,7 +235,7 @@ func TestSetupDryRunRedactsSecrets(t *testing.T) {
 	if strings.Contains(out, rawKey) {
 		t.Errorf("SECURITY LEAK: --dry-run output contains plaintext gateway API key: %s", out)
 	}
-	if !strings.Contains(out, "agw_••••••••") {
+	if !strings.Contains(out, `"apiKey": "<redacted:`) {
 		t.Errorf("expected redacted gateway key indicator in dry-run output, got: %s", out)
 	}
 }

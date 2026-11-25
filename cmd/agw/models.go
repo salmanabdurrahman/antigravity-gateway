@@ -4,6 +4,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"text/tabwriter"
 
@@ -95,10 +96,13 @@ func runModelsList(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("refreshing model catalog: %w", err)
 		}
 	} else {
-		// Ensure guarantees loading from disk or refreshing if empty
-		if err := cat.Ensure(ctx); err != nil {
-			// If ensure fails (e.g. offline and no cache), check if cache had anything
-			_ = cat.LoadCache()
+		// Ensure loads from disk or refreshes when the cache is empty. An upstream failure is only
+		// recoverable when the cache itself is readable, so both failures are surfaced instead of
+		// silently rendering an empty table.
+		if ensureErr := cat.Ensure(ctx); ensureErr != nil {
+			if loadErr := cat.LoadCache(); loadErr != nil {
+				return fmt.Errorf("loading model catalog: %w", errors.Join(ensureErr, loadErr))
+			}
 		}
 	}
 

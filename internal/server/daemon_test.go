@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -41,7 +42,8 @@ func TestPIDFileLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat pid file failed: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Windows does not model POSIX permission bits, so the 0600 contract is asserted on POSIX only.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Errorf("expected permissions 0600, got %#o", perm)
 	}
 
@@ -191,6 +193,44 @@ func TestStopDetachedRefusesToKillUnrelatedLiveProcess(t *testing.T) {
 	// Stale PID file should have been cleaned up
 	if _, err := os.Stat(pidFile); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("expected stale pid file to be removed, got err: %v", err)
+	}
+}
+
+// TestStopDetachedVerifiesPortOwnershipDespiteHealthyDaemon verifies that a passing /health probe never
+// authorizes signalling a pid file entry that does not own the daemon port.
+func TestStopDetachedVerifiesPortOwnershipDespiteHealthyDaemon(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv(config.EnvHome, tempDir)
+
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"name":"` + ServerName + `","version":"test","accounts":1}`))
+	}))
+	defer gateway.Close()
+	port := gateway.Listener.Addr().(*net.TCPAddr).Port
+
+	pidFile, err := config.PIDFilePath()
+	if err != nil {
+		t.Fatalf("resolving pid file path: %v", err)
+	}
+	// The parent process is alive and unrelated, but the listening socket belongs to this test process.
+	unrelatedPID := os.Getppid()
+	if err := WritePID(pidFile, unrelatedPID); err != nil {
+		t.Fatalf("writing pid file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Port = port
+
+	stoppedPID, stopErr := StopDetached(cfg)
+	if stopErr == nil {
+		t.Fatalf("expected StopDetached to refuse terminating the current process, got pid %d", stoppedPID)
+	}
+	if stoppedPID != 0 {
+		t.Errorf("expected no reported PID on refusal, got %d", stoppedPID)
+	}
+	if !IsProcessAlive(unrelatedPID) {
+		t.Fatal("the unrelated process recorded in the pid file must never be signalled")
 	}
 }
 

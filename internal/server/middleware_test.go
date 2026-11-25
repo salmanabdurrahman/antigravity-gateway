@@ -175,3 +175,31 @@ func TestSendJSONErrorForbiddenType(t *testing.T) {
 		t.Errorf("error type = %q; want permission_error", payload.Error.Type)
 	}
 }
+
+// TestAuthMiddlewareRejectsPathTraversal verifies the unauthenticated /ui prefix cannot be reached
+// through a parent-directory segment that ServeMux would otherwise clean away.
+func TestAuthMiddlewareRejectsPathTraversal(t *testing.T) {
+	apiKey := "test_secret_key_12345"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	reached := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/accounts", func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := AuthMiddleware(apiKey, logger)(mux)
+	for _, rawPath := range []string{"/ui/../v1/accounts", "/ui/./../v1/accounts", "/v1/../v1/accounts"} {
+		req := httptest.NewRequest(http.MethodGet, rawPath, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("path %q status = %d; want 400", rawPath, rec.Code)
+		}
+	}
+	if reached {
+		t.Error("traversal path must never reach a protected handler")
+	}
+}

@@ -3,7 +3,10 @@ package rotator_test
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,7 +46,7 @@ func TestPickerSticky(t *testing.T) {
 	}
 
 	// When a1 is cooling down, picker moves to a2
-	a1.SetCooldown("gemini-3.1-pro", now.Add(30*time.Second), "rate limit")
+	a1.SetCooldown("gemini-3.1-pro", now.Add(30*time.Second), now, "rate limit")
 
 	res3 := picker.Pick("gemini-3.1-pro", states, nil, now)
 	if res3.State == nil || res3.State.Account().Email != "a2@gmail.com" {
@@ -91,8 +94,8 @@ func TestPickerAllCoolingWait(t *testing.T) {
 	a2 := rotator.NewAccountState(newTestAccount("a2@gmail.com"))
 	states := []*rotator.AccountState{a1, a2}
 
-	a1.SetCooldown("gemini", now.Add(10*time.Second), "429")
-	a2.SetCooldown("gemini", now.Add(5*time.Second), "429")
+	a1.SetCooldown("gemini", now.Add(10*time.Second), now, "429")
+	a2.SetCooldown("gemini", now.Add(5*time.Second), now, "429")
 
 	picker := rotator.NewPicker(rotator.StrategySticky)
 	res := picker.Pick("gemini", states, nil, now)
@@ -127,14 +130,14 @@ func TestPickerHybrid_HealthAndQuotaAwareness(t *testing.T) {
 	}
 
 	// When a1 is cooling down, picker falls back to a2 (Tier 2: quota fallback)
-	a1.SetCooldown("gemini", now.Add(30*time.Second), "rate limit")
+	a1.SetCooldown("gemini", now.Add(30*time.Second), now, "rate limit")
 	res2 := picker.Pick("gemini", states, nil, now)
 	if res2.State == nil || res2.State.Account().Email != "a2@gmail.com" {
 		t.Fatalf("expected failover to a2@gmail.com under quota fallback tier, got %v", res2.State)
 	}
 
 	// Lift a1 cooldown, drop a1 health below usability threshold (< 20)
-	a1.SetCooldown("gemini", now.Add(-1*time.Second), "")
+	a1.SetCooldown("gemini", now.Add(-1*time.Second), now, "")
 	for range 9 {
 		picker.HealthTracker().RecordRateLimit("a1@gmail.com")
 	}
@@ -188,6 +191,136 @@ func TestPoolHotReload(t *testing.T) {
 	states := pool.States()
 	if len(states) != 2 {
 		t.Fatalf("expected 2 states after hot reload, got %d", len(states))
+	}
+}
+
+// TestPoolSetAccountsPreservesStateAcrossEmailChange verifies that pool reloads key on the immutable
+// Google user ID, so an address change keeps cooldowns and counters attached to the same account.
+func TestPoolSetAccountsPreservesStateAcrossEmailChange(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	pool, err := rotator.NewPool(nil, &config.Config{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new pool failed: %v", err)
+	}
+
+	original := newTestAccount("old-address@example.com")
+	original.UserID = "google-sub-42"
+	pool.SetAccounts([]*auth.Account{original})
+
+	until := now.Add(time.Minute)
+	pool.States()[0].SetCooldown("gemini", until, now, "HTTP 429: quota")
+
+	renamed := &auth.Account{
+		Email:        "new-address@example.com",
+		UserID:       "google-sub-42",
+		RefreshToken: original.RefreshToken,
+		ProjectID:    original.ProjectID,
+		AddedAt:      original.AddedAt,
+	}
+	pool.SetAccounts([]*auth.Account{renamed})
+
+	states := pool.States()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 state after rename, got %d", len(states))
+	}
+	if states[0].Email() != "new-address@example.com" {
+		t.Errorf("expected renamed address applied, got %q", states[0].Email())
+	}
+	if got := states[0].CoolingUntil("gemini"); !got.Equal(until) {
+		t.Errorf("expected cooldown continuity across rename, got %v", got)
+	}
+}
+
+// TestPoolRefreshIfChangedConcurrentReload verifies that concurrent hot-reload callers serialize
+// their stat/load/replace work so a stalled reload cannot clobber newer account state.
+func TestPoolRefreshIfChangedConcurrentReload(t *testing.T) {
+	tempDir := t.TempDir()
+	store := auth.NewStore(filepath.Join(tempDir, "accounts.json"))
+	if _, err := store.Upsert(newTestAccount("seed@example.com")); err != nil {
+		t.Fatalf("seeding account failed: %v", err)
+	}
+
+	var tick atomic.Int64
+	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time {
+		return base.Add(time.Duration(tick.Add(3)) * time.Second)
+	}
+
+	pool, err := rotator.NewPool(store, &config.Config{}, nowFn)
+	if err != nil {
+		t.Fatalf("new pool failed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				if err := pool.RefreshIfChanged(); err != nil {
+					t.Errorf("concurrent RefreshIfChanged failed: %v", err)
+				}
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 5 {
+			if _, err := store.Upsert(newTestAccount(fmt.Sprintf("extra%d@example.com", i))); err != nil {
+				t.Errorf("concurrent upsert failed: %v", err)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// A final reload must observe the complete account set written by the concurrent writer.
+	if err := pool.RefreshIfChanged(); err != nil {
+		t.Fatalf("final RefreshIfChanged failed: %v", err)
+	}
+	if got := len(pool.States()); got != 6 {
+		t.Fatalf("expected 6 states after concurrent reloads, got %d", got)
+	}
+}
+
+// TestPoolRefreshIfChangedBackwardClock verifies that a backward wall-clock step triggers a clean
+// resync instead of freezing hot reload until the clock catches up.
+func TestPoolRefreshIfChangedBackwardClock(t *testing.T) {
+	tempDir := t.TempDir()
+	store := auth.NewStore(filepath.Join(tempDir, "accounts.json"))
+	if _, err := store.Upsert(newTestAccount("first@example.com")); err != nil {
+		t.Fatalf("seeding first account failed: %v", err)
+	}
+
+	mockTime := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	pool, err := rotator.NewPool(store, &config.Config{}, func() time.Time { return mockTime })
+	if err != nil {
+		t.Fatalf("new pool failed: %v", err)
+	}
+
+	mockTime = mockTime.Add(3 * time.Second)
+	if _, err := store.Upsert(newTestAccount("second@example.com")); err != nil {
+		t.Fatalf("seeding second account failed: %v", err)
+	}
+	if err := pool.RefreshIfChanged(); err != nil {
+		t.Fatalf("forward-clock refresh failed: %v", err)
+	}
+	if got := len(pool.States()); got != 2 {
+		t.Fatalf("expected 2 states after forward reload, got %d", got)
+	}
+
+	// Step the injected clock backwards, as an NTP correction or suspend/resume would.
+	mockTime = mockTime.Add(-10 * time.Second)
+	if _, err := store.Upsert(newTestAccount("third@example.com")); err != nil {
+		t.Fatalf("seeding third account failed: %v", err)
+	}
+	if err := pool.RefreshIfChanged(); err != nil {
+		t.Fatalf("backward-clock refresh failed: %v", err)
+	}
+	if got := len(pool.States()); got != 3 {
+		t.Fatalf("expected 3 states after backward-clock resync, got %d", got)
 	}
 }
 
