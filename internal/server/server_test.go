@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -300,8 +299,11 @@ func TestServerBindErrorReportsOwningProcess(t *testing.T) {
 	if startErr == nil {
 		t.Fatalf("expected bind failure on occupied port %d", cfg.Port)
 	}
-	if !errors.Is(startErr, syscall.EADDRINUSE) {
-		t.Errorf("expected error wrapping syscall.EADDRINUSE, got %v", startErr)
+	// The wrapped errno differs by platform: POSIX reports EADDRINUSE while Windows reports
+	// WSAEADDRINUSE (10048), which syscall.EADDRINUSE never matches there. Assert the platform-neutral
+	// predicate the daemon itself uses.
+	if !isAddrInUse(startErr) {
+		t.Errorf("expected an address-in-use bind failure, got %v", startErr)
 	}
 
 	message := startErr.Error()
