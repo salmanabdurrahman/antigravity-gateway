@@ -63,20 +63,35 @@ func buildPlatformArchive(t *testing.T, content []byte) []byte {
 	return buf.Bytes()
 }
 
+// nextMajorVersion returns a semantic version guaranteed to compare greater than the running build, so
+// update-check fixtures stay valid across release bumps instead of pinning a version that later becomes
+// the current one.
+func nextMajorVersion(t *testing.T) string {
+	t.Helper()
+
+	major := 0
+	if _, err := fmt.Sscanf(config.Version, "%d.", &major); err != nil {
+		t.Fatalf("parsing current version %q: %v", config.Version, err)
+	}
+	return fmt.Sprintf("%d.0.0", major+1)
+}
+
 // TestUpdateCommandCheckOnly verifies running agw update --check with a mock release server.
 func TestUpdateCommandCheckOnly(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv(config.EnvHome, tempHome)
 
+	newerVersion := nextMajorVersion(t)
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/releases/latest") {
 			release := updater.GitHubRelease{
-				TagName:     "v0.2.0",
+				TagName:     "v" + newerVersion,
 				PublishedAt: "2026-11-26T12:00:00Z",
 				Assets: []updater.ReleaseAsset{
 					{
-						Name:               updater.FormatArchiveName("0.2.0", runtime.GOOS, runtime.GOARCH),
+						Name:               updater.FormatArchiveName(newerVersion, runtime.GOOS, runtime.GOARCH),
 						BrowserDownloadURL: "https://example.com/download/agw.tar.gz",
 					},
 					{
@@ -127,8 +142,8 @@ func TestUpdateCommandCheckOnly(t *testing.T) {
 	if !strings.Contains(out, "Checking for updates") {
 		t.Errorf("expected checking for updates message, got: %s", out)
 	}
-	if !strings.Contains(out, "Latest version:  v0.2.0") {
-		t.Errorf("expected latest version v0.2.0, got: %s", out)
+	if !strings.Contains(out, "Latest version:  v"+newerVersion) {
+		t.Errorf("expected latest version v%s, got: %s", newerVersion, out)
 	}
 	if !strings.Contains(out, "A new version is available!") {
 		t.Errorf("expected new version notification, got: %s", out)

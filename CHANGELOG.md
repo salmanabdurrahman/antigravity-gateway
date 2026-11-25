@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
+### Added
+
+- OpenAI-style single-model retrieval at `GET /v1/models/{id}` with alias resolution and an OpenAI-compatible 404 for unknown identifiers.
+- Same-origin `POST /ui/api/refresh` for an explicit live catalog and quota refresh without leaving the dashboard.
+- Dashboard account metrics (request count, 429 count, sanitized last error), rolling five-hour versus weekly quota windows, and a manual quota refresh control.
+- Deterministic session affinity for clients that send no affinity header, plus a bounded two-hour thought-signature cache that only replays a recipe when its tool-call IDs match the turn.
+- Antigravity CLI (`agy`) session discovery (`acp_token.json`, `antigravity-oauth-token`), with `AGW_AGY_TOKEN_PATH` override and opt-in read-only keyring lookup via `AGW_AGY_KEYRING`.
+- Immutable Google user identity (`user_id`) for account keying, duplicate detection, and legacy email-keyed migration.
+- `AGW_PREFER_IPV4` opt-in IPv4-first dialing for networks whose IPv6 route blackholes traffic.
+- `agw doctor` now probes the daily Cloud Code host, reports IPv4 versus IPv6 reachability per Cloud Code host, and surfaces `HTTPS_PROXY` with credentials masked.
+- Native macOS and Windows test jobs in CI, plus pre-publish artifact and installer verification gates in the release workflow.
+
+### Changed
+
+- Upstream identity now advertises the modern Antigravity Hub User-Agent (`antigravity/hub/<version>` with changelist) instead of the legacy IDE fingerprint.
+- Reasoning translation supports Anthropic `adaptive` thinking, Gemini 4 `xhigh`, and Claude 5.x `thinkingLevel`, while legacy Claude 4.x keeps `thinking_budget`.
+- Model catalog defaults migrate to the Gemini 4 and Claude 5.5 lineup, filter `*-disabled` placeholders, clamp Gemini 4 Neon to 512K context, and ship an embedded offline fallback manifest.
+- Upstream endpoint order follows account tier (personal prefers the daily host, business and enterprise prefer production), and rotator absorption limits are configurable through `max_wait_seconds`, `default_cooldown_seconds`, and `empty_stream_retries`.
+- Schema normalization now traverses every JSON Schema composition keyword: `additionalProperties`, `prefixItems`, `dependentSchemas`, `not`, and `if`/`then`/`else`.
+- Tool-enabled requests without an affinity header derive a stable session and are marked as agent traffic upstream.
+- `/health` answers only loopback authorities, dashboard mutations require a same-origin signal (and JSON for strategy changes), `agw accounts --check` fails non-zero when configuration cannot be loaded, and `agw setup --api-key` validates the generated key format. See the README "Behavior Changes & Migration Notes" section.
+
+### Fixed
+
+- `quotaResetDelay` millisecond values such as `"500ms"` no longer parse as minutes, preventing multi-hour cooldowns from sub-second upstream delays.
+- Cooldown pruning follows the injected clock, and accounts holding only a static desktop bearer token cool down immediately instead of retrying the same 401 token.
+- Account hot reloads serialize under a reload mutex, and backward wall-clock steps trigger a clean resync instead of freezing reloads.
+- Rotator dispatch budget no longer consumes cooldown absorption, backoff sleeps honor context cancellation, and token bucket accounting stays balanced across retries.
+- Anthropic streaming usage no longer double-counts cumulative thoughts tokens, and `tool_result` images, empty-text signatures, safety stop reasons, and tool identifiers are preserved.
+- Output ceilings are enforced per model, and Gemini 4 long decodes chain `CONTINUATION` hops with a bounded guard while resending the original payload.
+- IPv6 loopback (`::1`) addresses format correctly across the daemon, `doctor`, `start`, `setup`, `update`, and `ui`, and `agw start --detach` plus `agw update` preserve `--config`.
+- Self-updater rejects non-regular archive entries, caps decompression, requires HTTPS release metadata, and refuses HTTPS-to-HTTP redirect downgrades.
+- Clients that strip `reasoning_details` between turns still replay signed thinking parts, and a text signature is no longer dropped when a recipe lists a tool call before the text step.
+- Windows bind failures report the owning PID and the `agw stop` hint by recognizing the `WSAEADDRINUSE` errno.
+
+### Security
+
+- Bare `RESOURCE_EXHAUSTED` prompt rejections no longer cool healthy accounts, and third-party agent identity markers are scrubbed from system instructions.
+- Permanent terms-of-service 403 responses disable the account persistently instead of cycling thirty-minute cooldowns.
+- Daemon shutdown verifies port ownership before signalling a PID, request paths reject parent-directory traversal, and the dashboard sends framing-denial headers.
+- Setup and completion probes no longer forward bearer or `x-api-key` credentials across HTTP redirects.
+- Installers validate strict semantic versions, reject symlinked archive entries, stage installs through `mktemp`, and require HTTPS for remote downloads.
+
 ## [0.1.1] - 2026-11-25
 
 ### Changed
@@ -98,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
 - Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
-[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0
