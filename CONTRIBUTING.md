@@ -63,8 +63,11 @@ This project adheres to the Contributor Covenant. By participating, you are expe
 
 4. Commit your changes using conventional commit messages (e.g. `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`).
 
+The pre-commit hook installed by `make hooks-install` blocks the commit when whitespace, conflict markers, `gofmt`, `go vet`, or the smoke suite fail. Bypass it only for an emergency with `SKIP_HOOKS=1 git commit ...` (or `git commit --no-verify`), then fix the failure in a follow-up commit.
+
 ## Engineering Standards
 
+- **Modern Go Guidelines (mandatory)**: consult [`.agents/skills/use-modern-go/SKILL.md`](.agents/skills/use-modern-go/SKILL.md) before writing or refactoring Go code, and run `sh .agents/skills/use-modern-go/scripts/run-tool.sh list --go-version 1.24` for the version-specific idiom list.
 - **Modern Go Idioms**:
   - Target **Go 1.24+**.
   - Use `any` instead of `interface{}`.
@@ -78,6 +81,10 @@ This project adheres to the Contributor Covenant. By participating, you are expe
   - Struct fields in public or state models must be documented.
   - Test functions must include comments documenting scenarios, preconditions, and assertions.
   - Any Google Cloud Code Assist upstream quirks or protocol translations must be thoroughly explained with inline reasoning.
+- **Documentation Layout**:
+  - Keep `README.md` short: overview, risk notice, quick start, command and endpoint summaries.
+  - Put depth in `docs/`: CLI flags (`docs/cli.md`), protocol and endpoint details (`docs/api.md`), configuration keys and rotation rules (`docs/configuration.md`), design and benchmarks (`docs/architecture.md`).
+  - Link instead of duplicating; a behavior change must update the deepest relevant document, not only the README.
 - **Security & Hygiene**:
   - **Loopback Enforcement**: Proxy and callback servers must bind strictly to `127.0.0.1`. Never default to `0.0.0.0`.
   - **POSIX Permissions**: All config and account files must be written with `0600` permissions (`0700` for directory).
@@ -91,14 +98,25 @@ Antigravity Gateway maintains a high standard of automated verification:
 
 | Command                 | Description                                                    |
 | :---------------------- | :------------------------------------------------------------- |
+| `make build`            | Build the CLI binary into `bin/agw`                            |
 | `make fmt`              | Automatically format Go source files via `gofmt`               |
 | `make fmt-check`        | Verify all files follow Go formatting conventions              |
 | `make lint`             | Run static analysis with `go vet`                              |
 | `make test`             | Run unit tests with race detection (`go test -v -race ./...`)  |
+| `make test-short`       | Run the fast unit subset used by the pre-commit hook           |
 | `make test-integration` | Run end-to-end integration tests (multi-account failover)      |
 | `make test-installer`   | Run automated verification test suite for `scripts/install.sh` |
 | `make test-all`         | Run all unit, integration, and installer tests                 |
 | `make check`            | Run preflight verification (fmt-check, lint, test, installer)  |
+| `make pre-commit`       | Run the pre-commit hook checks manually                        |
+| `make release`          | Build cross-platform archives and `dist/SHA256SUMS`            |
+
+Cross-platform sanity check before touching platform-specific code (`internal/server`, `internal/updater`, `scripts/`):
+
+```bash
+GOOS=windows go vet ./... && GOOS=windows go build ./...
+GOOS=windows go test -c -o /dev/null ./internal/server/
+```
 
 ## Pull Request Process
 
@@ -106,3 +124,4 @@ Antigravity Gateway maintains a high standard of automated verification:
 2. Ensure `git diff --check` reports zero whitespace or newline errors.
 3. Keep pull requests focused on a single responsibility. Large architectural changes should be preceded by an issue discussion.
 4. Fill out the pull request template completely, including testing evidence.
+5. Confirm user-facing documentation stayed consistent: `README.md` for the quick path, `docs/` for depth, and `CHANGELOG.md` only when preparing a release.

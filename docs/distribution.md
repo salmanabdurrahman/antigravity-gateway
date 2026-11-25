@@ -2,6 +2,8 @@
 
 This document defines the supported operating systems, hardware architectures, filesystem layout, binary installation contract, and lifecycle management for distributed Antigravity Gateway (`agw`) binaries.
 
+Related documents: [CLI Reference](cli.md) covers `agw update` and daemon lifecycle commands; [Configuration Reference](configuration.md) covers the state files this contract describes.
+
 ## 1. Supported Platform Matrix
 
 Antigravity Gateway is compiled as a static, zero-dependency binary with native cross-platform build support:
@@ -29,14 +31,14 @@ agw_<version>_<os>_<arch>.tar.gz   (macOS, Linux)
 agw_<version>_<os>_<arch>.zip      (Windows)
 ```
 
-Example artifacts for version `0.1.0`:
+Example artifacts for version `0.2.1`:
 
-- `agw_0.1.0_darwin_arm64.tar.gz`
-- `agw_0.1.0_darwin_amd64.tar.gz`
-- `agw_0.1.0_linux_amd64.tar.gz`
-- `agw_0.1.0_linux_arm64.tar.gz`
-- `agw_0.1.0_windows_amd64.zip`
-- `agw_0.1.0_windows_arm64.zip`
+- `agw_0.2.1_darwin_arm64.tar.gz`
+- `agw_0.2.1_darwin_amd64.tar.gz`
+- `agw_0.2.1_linux_amd64.tar.gz`
+- `agw_0.2.1_linux_arm64.tar.gz`
+- `agw_0.2.1_windows_amd64.zip`
+- `agw_0.2.1_windows_arm64.zip`
 
 ### Integrity & Verification
 
@@ -60,10 +62,10 @@ shasum -a 256 --check --ignore-missing SHA256SUMS
 
 ```powershell
 # Compute SHA-256 hash
-(Get-FileHash -Algorithm SHA256 .\agw_0.1.0_windows_amd64.zip).Hash.ToLower()
+(Get-FileHash -Algorithm SHA256 .\agw_0.2.1_windows_amd64.zip).Hash.ToLower()
 
 # Compare against the hash listed in SHA256SUMS
-Get-Content SHA256SUMS | Select-String "agw_0.1.0_windows_amd64.zip"
+Get-Content SHA256SUMS | Select-String "agw_0.2.1_windows_amd64.zip"
 ```
 
 ### Unpacking & Initial Execution Verification
@@ -72,7 +74,7 @@ Once checksum verification passes, extract the binary and confirm functionality:
 
 ```bash
 # Linux / macOS
-tar -xzf agw_0.1.0_darwin_arm64.tar.gz
+tar -xzf agw_0.2.1_darwin_arm64.tar.gz
 ./agw version
 ./agw --help
 
@@ -90,7 +92,7 @@ Developers can reproduce official release packages and checksums locally:
 make release
 
 # Or invoke the release builder directly with a custom version tag
-./scripts/build-release.sh 0.1.0
+./scripts/build-release.sh 0.2.1
 ```
 
 ### Release Gates
@@ -123,7 +125,7 @@ Antigravity Gateway provides checksum-verifying, architecture-detecting installe
 curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh
 
 # Install a specific pinned release version
-curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.sh | sh -s -- v0.2.1
 ```
 
 #### Windows (PowerShell)
@@ -133,7 +135,7 @@ curl -fsSL https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gatew
 irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1 | iex
 
 # Install a specific pinned release version
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1))) -Version "0.1.0"
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main/scripts/install.ps1))) -Version "0.2.1"
 ```
 
 ### Local Script Options
@@ -141,17 +143,17 @@ irm https://raw.githubusercontent.com/salmanabdurrahman/antigravity-gateway/main
 ```bash
 # Install latest or pinned version via local script
 ./scripts/install.sh
-./scripts/install.sh 0.1.0
-./scripts/install.sh --version 0.1.0
+./scripts/install.sh 0.2.1
+./scripts/install.sh --version 0.2.1
 
 # Install to a custom directory
-./scripts/install.sh --version 0.1.0 --install-dir ~/bin
+./scripts/install.sh --version 0.2.1 --install-dir ~/bin
 
 # Overwrite an existing installation
-./scripts/install.sh --version 0.1.0 --force
+./scripts/install.sh --version 0.2.1 --force
 
 # Dry-run validation (verifies platform and checksums without writing)
-./scripts/install.sh --version 0.1.0 --dry-run
+./scripts/install.sh --version 0.2.1 --dry-run
 ```
 
 To run the automated installer test suite:

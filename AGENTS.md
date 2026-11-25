@@ -153,20 +153,27 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 - **No External Test Dependencies**: Unit and integration tests MUST NEVER depend on untracked local directories, external internet connections, or machine-specific absolute paths.
 - **Environment Isolation**: Tests mutating environment variables MUST use `t.Setenv(...)` or cleanup functions to ensure zero leakage across parallel test runs.
 
+### 4.8 Documentation Layout
+
+- `README.md` stays short: project overview, risk notice, quick start, command/endpoint summaries, documentation index.
+- Depth belongs in `docs/`: `cli.md` (commands and flags), `api.md` (endpoints, translation, migration notes), `configuration.md` (files, keys, environment, rotation), `architecture.md` (pipeline, package map, protocol fidelity), plus the existing contract documents.
+- Never duplicate a fact across documents; link to the deepest authoritative page and update it at the source.
+- Behavior changes must update the affected `docs/` page and the README summary that points at it; `CHANGELOG.md` remains release-only.
+
 ## 5. Repository Map & Boundaries
 
 | Path                     | Responsibility                                    | Invariants & Rules                                                                                                                                          |
 | :----------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cmd/agw/`               | CLI commands via Cobra                            | Thin CLI layer; parses flags and invokes `internal/` packages; includes native `update` self-upgrade                                                        |
-| `docs/`                  | Architectural specifications & contracts          | OAuth strategy, binary distribution, web dashboard, and installation contracts                                                                              |
+| `docs/`                  | User-facing documentation & contracts             | Installation contract, CLI reference, HTTP API reference, configuration reference, architecture notes, OAuth strategy, web dashboard contract               |
 | `internal/config/`       | Config, paths, address helpers, headers           | Handles `~/.agw` resolution, env overrides, and IPv6-safe loopback host/port formatting                                                                     |
 | `internal/auth/`         | OAuth PKCE, tokens, discovery, storage            | Manages `accounts.json` with `0600` permissions                                                                                                             |
-| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky` & `round-robin`; transparent 429 retry                                                                                                  |
+| `internal/rotator/`      | Account pool, failover, cooldowns                 | Implements `sticky`, `round-robin` & `hybrid`; transparent 429 retry                                                                                        |
 | `internal/catalog/`      | Upstream model discovery & quota                  | Filters chat models; caches to `models-cache.json`                                                                                                          |
 | `internal/translate/`    | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                                                                       |
 | `internal/server/`       | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write; bounded signature cache                                                   |
 | `internal/server/webui/` | Embedded dashboard HTML/JS assets (`embed.FS`)    | Served read-only on loopback at `/ui`; same-origin mutations; no external assets                                                                            |
-| `internal/client/`       | Agent configuration injectors                     | Safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                                                                    |
+| `internal/client/`       | Agent configuration injectors                     | Pi, OpenCode, and Claude Code injectors; safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                           |
 | `internal/updater/`      | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                                                                 |
 | `.github/`               | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); native Linux/macOS/Windows test jobs; release publishes only after artifact and installer verification |
 | `.githooks/`             | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                                                                        |
@@ -240,4 +247,5 @@ Before reporting completion on any task:
 - [ ] All targeted unit/integration tests pass with `-race` enabled.
 - [ ] `go vet ./...` reports zero issues.
 - [ ] `git diff --check` shows no whitespace or formatting errors.
+- [ ] README/docs links resolve, and no documented command, flag, endpoint, or default contradicts the code.
 - [ ] Acceptance criteria satisfied and verified with truthful execution evidence.
