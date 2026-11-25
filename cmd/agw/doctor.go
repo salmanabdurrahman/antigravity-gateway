@@ -41,8 +41,13 @@ func init() {
 type CheckStatus string
 
 const (
-	StatusOK   CheckStatus = "OK"
+	// StatusOK indicates that the diagnostic check passed without issues.
+	StatusOK CheckStatus = "OK"
+
+	// StatusWarn indicates a non-critical discrepancy or recommendation.
 	StatusWarn CheckStatus = "WARN"
+
+	// StatusFail indicates a critical environment or configuration failure.
 	StatusFail CheckStatus = "FAIL"
 )
 

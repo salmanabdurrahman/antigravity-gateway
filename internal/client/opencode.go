@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,9 +154,7 @@ func SetupOpenCode(ctx context.Context, opts OpenCodeSetupOptions) (*OpenCodeSet
 		modelIDs = append(modelIDs, m.ID)
 		mEntry := make(map[string]any)
 		if old, exists := existingModels[m.ID].(map[string]any); exists {
-			for k, v := range old {
-				mEntry[k] = v
-			}
+			maps.Copy(mEntry, old)
 		}
 		mEntry["name"] = PrettyModelName(m.ID)
 		newModelsMap[m.ID] = mEntry

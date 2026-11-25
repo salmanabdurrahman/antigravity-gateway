@@ -81,6 +81,7 @@ func TestStopCommandWhenNotRunning(t *testing.T) {
 	}
 }
 
+// getFreePort binds an ephemeral TCP listener on 127.0.0.1 to obtain an available port for isolated test servers.
 func getFreePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -260,6 +260,7 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 	s.mu.Unlock()
 
 	if needsPersist && store != nil {
+		// Best-effort storage persistence: updated refresh token is already active in memory.
 		_, _ = store.Upsert(&updatedAccount)
 	}
 

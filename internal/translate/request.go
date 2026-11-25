@@ -153,13 +153,13 @@ type Part struct {
 	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 
 	// InlineData holds binary image data for multimodal vision prompts.
-	InlineData *InlineData `json:"inlineData,omitempty"`
+	InlineData *InlineData `json:"inlineData,omitzero"`
 
 	// FunctionCall contains model tool execution requests.
-	FunctionCall *FunctionCallPart `json:"functionCall,omitempty"`
+	FunctionCall *FunctionCallPart `json:"functionCall,omitzero"`
 
 	// FunctionResponse contains tool execution results provided back to the model.
-	FunctionResponse *FunctionResponse `json:"functionResponse,omitempty"`
+	FunctionResponse *FunctionResponse `json:"functionResponse,omitzero"`
 }
 
 // InlineData holds base64 binary assets for multimodal vision prompts.
@@ -216,7 +216,7 @@ type GeminiRequest struct {
 	Contents []Content `json:"contents"`
 
 	// SystemInstruction contains top-level system guidelines.
-	SystemInstruction *SystemInstruction `json:"systemInstruction,omitempty"`
+	SystemInstruction *SystemInstruction `json:"systemInstruction,omitzero"`
 
 	// GenerationConfig specifies sampling parameters, token ceilings, and thinking configurations.
 	GenerationConfig map[string]any `json:"generationConfig"`

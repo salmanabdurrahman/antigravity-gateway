@@ -41,6 +41,7 @@ func newMockGoogleServer(handler http.HandlerFunc) *mockGoogleServer {
 	return m
 }
 
+// close shuts down the underlying mock HTTP server.
 func (m *mockGoogleServer) close() {
 	m.server.Close()
 }

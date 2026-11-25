@@ -53,7 +53,7 @@ type ModelMetadata struct {
 	Thinking bool `json:"thinking"`
 
 	// ThinkingBudget holds default reasoning budget if configured.
-	ThinkingBudget *int `json:"thinking_budget,omitempty"`
+	ThinkingBudget *int `json:"thinking_budget,omitzero"`
 
 	// Multimodal indicates image input support.
 	Multimodal bool `json:"multimodal"`

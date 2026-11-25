@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -188,9 +189,7 @@ func SetupPi(ctx context.Context, opts PiSetupOptions) (*PiSetupResult, error) {
 		mEntry := make(map[string]any)
 		// Inherit existing custom fields
 		if old, exists := existingModelsMap[m.ID]; exists {
-			for k, v := range old {
-				mEntry[k] = v
-			}
+			maps.Copy(mEntry, old)
 		}
 
 		mEntry["id"] = m.ID

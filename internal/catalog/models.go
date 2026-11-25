@@ -4,6 +4,7 @@ package catalog
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -310,11 +311,7 @@ func SummarizeQuotas(quotas map[string]ModelQuota) QuotaSummary {
 	var summary QuotaSummary
 
 	// Sort model IDs to guarantee deterministic iteration order
-	keys := make([]string, 0, len(quotas))
-	for k := range quotas {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
+	keys := slices.Sorted(maps.Keys(quotas))
 
 	for _, id := range keys {
 		q := quotas[id]

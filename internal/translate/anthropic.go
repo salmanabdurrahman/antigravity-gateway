@@ -29,13 +29,13 @@ type AnthropicRequest struct {
 	MaxTokens int `json:"max_tokens"`
 
 	// Temperature controls sampling randomness.
-	Temperature *float64 `json:"temperature,omitempty"`
+	Temperature *float64 `json:"temperature,omitzero"`
 
 	// TopP controls nucleus sampling.
-	TopP *float64 `json:"top_p,omitempty"`
+	TopP *float64 `json:"top_p,omitzero"`
 
 	// TopK controls top-k sampling.
-	TopK *int `json:"top_k,omitempty"`
+	TopK *int `json:"top_k,omitzero"`
 
 	// StopSequences specifies custom strings where generation stops.
 	StopSequences []string `json:"stop_sequences,omitempty"`
@@ -50,7 +50,7 @@ type AnthropicRequest struct {
 	ToolChoice any `json:"tool_choice,omitempty"`
 
 	// Thinking configures extended reasoning parameters for thinking models.
-	Thinking *AnthropicThinking `json:"thinking,omitempty"`
+	Thinking *AnthropicThinking `json:"thinking,omitzero"`
 
 	// Metadata holds arbitrary client metadata such as user tracking IDs.
 	Metadata map[string]any `json:"metadata,omitempty"`
@@ -83,7 +83,7 @@ type AnthropicThinking struct {
 	Type string `json:"type"`
 
 	// BudgetTokens specifies the maximum reasoning tokens allocated.
-	BudgetTokens int `json:"budget_tokens,omitempty"`
+	BudgetTokens int `json:"budget_tokens,omitzero"`
 }
 
 // AnthropicContentBlock represents a single typed block in an Anthropic message response.

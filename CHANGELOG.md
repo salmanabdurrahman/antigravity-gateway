@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hoisted request translation outside rotator account failover retry loops and added a zero-allocation fast-path to cache control cleaning.
 - Added buffer pooling (`sync.Pool`) and single-line payload fast-paths for SSE stream parsing.
 
+### Refactored
+
+- Upgraded JSON struct tags to Go 1.24+ `omitzero` on boolean, numeric, and pointer struct fields across translation and server packages.
+- Modernized map and slice operations with standard library `maps.Clone`, `maps.Copy`, and `slices.Sorted(maps.Keys(...))`.
+- Completed 100% English doc comment coverage across exported constants, test helpers, and diagnostic status types.
+
 ### Fixed
 
 - Connected upstream quota fractions to active account states during catalog refresh and persisted quota snapshots to `models-cache.json` for live `hybrid` rotation.

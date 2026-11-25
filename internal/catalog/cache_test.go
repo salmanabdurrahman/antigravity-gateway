@@ -20,6 +20,7 @@ import (
 
 // mockAccountRunner implements AccountRunner for testing catalog refresh routines.
 type mockAccountRunner struct {
+	// fn is the injectable execution handler for simulating WithAccount callbacks.
 	fn func(ctx context.Context, handler func(ctx context.Context, token string, state *rotator.AccountState) error) error
 }
 

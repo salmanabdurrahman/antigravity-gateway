@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -313,11 +314,8 @@ func (c *ModelCatalog) Snapshot() (CatalogSnapshot, time.Time) {
 
 	snap := CatalogSnapshot{
 		Models:       slices.Clone(c.snapshot.Models),
-		Quotas:       make(map[string]ModelQuota, len(c.snapshot.Quotas)),
+		Quotas:       maps.Clone(c.snapshot.Quotas),
 		DefaultModel: c.snapshot.DefaultModel,
-	}
-	for k, v := range c.snapshot.Quotas {
-		snap.Quotas[k] = v
 	}
 
 	return snap, c.fetchedAt

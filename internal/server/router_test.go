@@ -24,12 +24,23 @@ import (
 
 // testHarness wires a Server instance, mock upstream server, and test account together for integration testing.
 type testHarness struct {
-	server       *Server
-	rotator      *rotator.Rotator
-	catalog      *catalog.ModelCatalog
+	// server is the active local proxy Server under test.
+	server *Server
+
+	// rotator coordinates multi-account failover for the harness.
+	rotator *rotator.Rotator
+
+	// catalog manages model metadata and quota tracking.
+	catalog *catalog.ModelCatalog
+
+	// mockUpstream simulates Google Cloud Code Assist endpoints.
 	mockUpstream *httptest.Server
-	apiKey       string
-	accEmail     string
+
+	// apiKey is the Bearer key required to authenticate client requests.
+	apiKey string
+
+	// accEmail is the primary Google account email associated with the test account.
+	accEmail string
 }
 
 // setupTestHarness initializes an isolated test environment with temporary stores and mocked endpoints.

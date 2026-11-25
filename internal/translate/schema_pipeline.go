@@ -134,9 +134,7 @@ func MergeAllOfSchemas(schema any) any {
 				subClean := MergeAllOfSchemas(subMap).(map[string]any)
 
 				if pMap, ok := subClean["properties"].(map[string]any); ok {
-					for pk, pv := range pMap {
-						mergedProps[pk] = pv
-					}
+					maps.Copy(mergedProps, pMap)
 				}
 				if rList, ok := subClean["required"].([]any); ok {
 					for _, r := range rList {
