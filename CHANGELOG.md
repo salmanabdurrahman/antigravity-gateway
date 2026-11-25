@@ -7,15 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
+## [0.1.1] - 2026-11-25
 
-- Enforced loopback host validation and cross-site request checks on WebUI dashboard endpoints (`/ui`, `/ui/api/status`, `/ui/api/strategy`) to defend against DNS rebinding attacks.
-- Validated OAuth state parameter in manual redirect URL pastes and prioritized state checks before error callbacks to prevent OAuth CSRF and unauthorized authentication aborts.
-- Redacted API keys and bearer tokens in `agw setup --dry-run` output, and added masked `String()` representations for `Config` and `LocalSession`.
-- Added verified health checking before signalling background daemon processes in `StopDetached`, preventing termination of recycled OS PIDs.
-- Enforced bounded memory reads via `io.LimitReader` on upstream catalog fetching, health probes, test completions, database fallback scans, and SSE stream buffers.
-
-### Performance
+### Changed
 
 - Implemented stale-while-revalidate for `ModelCatalog.Ensure` with non-blocking background refreshes and lowercase $O(1)$ model indexing.
 - Configured dedicated HTTP transports across upstream API and auth clients (`MaxIdleConns: 100`, `MaxIdleConnsPerHost: 32`, `ResponseHeaderTimeout: 60s`, HTTP/2 multiplexing) to eliminate connection churn.
@@ -24,9 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Snapshotted candidate account metrics once per hybrid selection cycle to remove nested lock acquisitions.
 - Hoisted request translation outside rotator account failover retry loops and added a zero-allocation fast-path to cache control cleaning.
 - Added buffer pooling (`sync.Pool`) and single-line payload fast-paths for SSE stream parsing.
-
-### Refactored
-
 - Upgraded JSON struct tags to Go 1.24+ `omitzero` on boolean, numeric, and pointer struct fields across translation and server packages.
 - Modernized map and slice operations with standard library `maps.Clone`, `maps.Copy`, and `slices.Sorted(maps.Keys(...))`.
 - Completed 100% English doc comment coverage across exported constants, test helpers, and diagnostic status types.
@@ -41,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disambiguated global `--config` flag across subcommands and renamed local OpenCode setup flag to `--config-file`.
 - Corrected OpenCode API key inspection in `agw doctor` to check provider settings rather than options.
 - Isolated unit tests from host browser launches and live internet TCP dialing.
+
+### Security
+
+- Enforced loopback host validation and cross-site request checks on WebUI dashboard endpoints (`/ui`, `/ui/api/status`, `/ui/api/strategy`) to defend against DNS rebinding attacks.
+- Validated OAuth state parameter in manual redirect URL pastes and prioritized state checks before error callbacks to prevent OAuth CSRF and unauthorized authentication aborts.
+- Redacted API keys and bearer tokens in `agw setup --dry-run` output, and added masked `String()` representations for `Config` and `LocalSession`.
+- Added verified health checking before signalling background daemon processes in `StopDetached`, preventing termination of recycled OS PIDs.
+- Enforced bounded memory reads via `io.LimitReader` on upstream catalog fetching, health probes, test completions, database fallback scans, and SSE stream buffers.
 
 ## [0.1.0] - 2026-11-16
 
@@ -98,5 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
 - Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
-[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0
