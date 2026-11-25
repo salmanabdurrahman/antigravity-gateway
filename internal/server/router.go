@@ -83,6 +83,12 @@ func (s *Server) readUpstreamHops(
 		if err != nil {
 			return fmt.Errorf("continuing long decode after %d hop(s): %w", hop+1, err)
 		}
+		// A continuation token may be bound to the account that produced it, so a switch is surfaced
+		// explicitly instead of failing silently mid-stream. Only account emails are logged.
+		if firstAccount := first.State.Email(); next.State.Email() != firstAccount {
+			s.logger.Warn("long-decode continuation switched account",
+				"model", upstream, "from", firstAccount, "to", next.State.Email(), "hop", hop+1)
+		}
 		// Closing the previous hop body after its stream is drained is safe and keeps descriptors
 		// bounded across long continuation chains.
 		_ = current.Response.Body.Close()

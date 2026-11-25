@@ -253,8 +253,9 @@ func TestBuildRequestGemini3SkipSignatureAndToolIDs(t *testing.T) {
 	}
 }
 
-// TestBuildRequestGemini2NoToolCallIDOrSkipSignature verifies omitting tool IDs and SkipSignature on Gemini 2.x models.
-func TestBuildRequestGemini2NoToolCallIDOrSkipSignature(t *testing.T) {
+// TestBuildRequestGemini2SkipSignatureWithoutToolCallIDs verifies Gemini 2.x tool replays carry the
+// skip signature sentinel while still omitting tool call IDs, which that generation does not require.
+func TestBuildRequestGemini2SkipSignatureWithoutToolCallIDs(t *testing.T) {
 	req := &ChatRequest{
 		Model: "gemini-2.5-flash",
 		Messages: []ChatMessage{
@@ -279,8 +280,72 @@ func TestBuildRequestGemini2NoToolCallIDOrSkipSignature(t *testing.T) {
 	if modelPart.FunctionCall.ID != "" {
 		t.Errorf("expected empty ID for Gemini 2.5, got: %s", modelPart.FunctionCall.ID)
 	}
-	if modelPart.ThoughtSignature != "" {
-		t.Errorf("expected empty thoughtSignature for Gemini 2.5, got: %s", modelPart.ThoughtSignature)
+	if modelPart.ThoughtSignature != SkipSignature {
+		t.Errorf("expected skip signature on Gemini 2.5 tool replay, got: %q", modelPart.ThoughtSignature)
+	}
+}
+
+// TestBuildRequestGemini2MultipleToolCallsSkipSignature verifies that a multi-call Gemini 2.x turn
+// mirrors the established behavior: only the first function call carries the sentinel, and later
+// calls stay untouched.
+func TestBuildRequestGemini2MultipleToolCallsSkipSignature(t *testing.T) {
+	req := &ChatRequest{
+		Model: "gemini-2.0-flash",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "run both"},
+			{
+				Role: "assistant",
+				ToolCalls: []ChatToolCall{
+					{ID: "c1", Type: "function", Function: ChatFunctionCall{Name: "a", Arguments: `{}`}},
+					{ID: "c2", Type: "function", Function: ChatFunctionCall{Name: "b", Arguments: `{}`}},
+				},
+			},
+			{Role: "tool", ToolCallID: "c1", Content: "one"},
+			{Role: "tool", ToolCallID: "c2", Content: "two"},
+		},
+	}
+
+	geminiReq, err := BuildRequest(req, BuildOptions{Info: catalog.FamilyDefaults(req.Model)})
+	if err != nil {
+		t.Fatalf("BuildRequest failed: %v", err)
+	}
+
+	parts := geminiReq.Contents[1].Parts
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(parts))
+	}
+	if parts[0].ThoughtSignature != SkipSignature {
+		t.Errorf("expected skip signature on the first call, got %q", parts[0].ThoughtSignature)
+	}
+	if parts[1].ThoughtSignature != "" {
+		t.Errorf("expected later calls left untouched, got %q", parts[1].ThoughtSignature)
+	}
+}
+
+// TestNeedsSkipSignature verifies the signature requirement gate covers Gemini 2.x and newer while
+// excluding families that negotiate signatures through their own contract.
+func TestNeedsSkipSignature(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"gemini-2.0-flash", true},
+		{"gemini-2.5-flash", true},
+		{"gemini-2.5-pro", true},
+		{"gemini-3.8-flash-high", true},
+		{"gemini-4-hydrogen-high", true},
+		{"claude-sonnet-4-6", false},
+		{"claude-opus-4-6-thinking", false},
+		{"gpt-oss-120b", false},
+		// Aliases without a generation number keep today's behavior: no sentinel is injected.
+		{"gemini-flash-latest", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		if got := needsSkipSignature(tc.model); got != tc.want {
+			t.Errorf("needsSkipSignature(%q) = %v, want %v", tc.model, got, tc.want)
+		}
 	}
 }
 

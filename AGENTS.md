@@ -16,7 +16,7 @@ Key capabilities:
 - Transparent failover upon encountering HTTP 429 rate limits, parsing Google `resetTime` and absorbing short waits ($\le 20$s).
 - Live model catalog parsing (`v1internal:fetchAvailableModels`) and remaining quota inspection.
 - Bidirectional OpenAI $\leftrightarrow$ Cloud Code Assist SSE translation.
-- Gemini 3 and Claude thought-signature preservation and replay.
+- Gemini 2.x and newer plus Claude thought-signature preservation and replay.
 - Transactional client configuration (`agw setup pi`, `agw setup opencode`) with automatic timestamped backups.
 
 ## 2. Authority & Source of Truth

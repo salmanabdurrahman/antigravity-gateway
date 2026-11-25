@@ -453,12 +453,13 @@ func buildAnthropicAssistantParts(content any, callNames map[string]string, mode
 					Args: input,
 				}
 				part := Part{FunctionCall: fc}
-				// Protocol Quirk: If thoughtSignature is present, preserve it; otherwise supply skip signature
+				// Protocol Quirk: preserve an authentic signature when the client supplies one; otherwise
+				// fall back to the sentinel, which Gemini 2.x and newer require on replayed tool turns.
 				if sig, ok := m["thoughtSignature"].(string); ok && sig != "" {
 					part.ThoughtSignature = sig
 				} else if sig, ok := m["signature"].(string); ok && sig != "" {
 					part.ThoughtSignature = sig
-				} else if major := GeminiMajor(model); major != nil && *major >= 3 {
+				} else if needsSkipSignature(model) {
 					part.ThoughtSignature = SkipSignature
 				}
 				parts = append(parts, part)
@@ -613,7 +614,7 @@ func ConvertGoogleToAnthropicResponse(googleResp map[string]any, model string) (
 		} else if txt, ok := part["text"].(string); ok {
 			// A signature on a text part or a tool call belongs to the reasoning block that produced
 			// it; attaching it there keeps the signature replayable on the next turn instead of
-			// silently dropping it (Gemini 3+ rejects unsigned reasoning turns with HTTP 400).
+			// silently dropping it (Gemini 2.x and newer reject unsigned reasoning turns with HTTP 400).
 			applySignatureToLastThinking(blocks, sig)
 			if txt != "" || sig == "" {
 				blocks = append(blocks, AnthropicContentBlock{
@@ -790,7 +791,7 @@ func (t *AnthropicStreamTranslator) outputTokens() int {
 //
 // Anthropic replays reasoning signatures through thinking blocks, so the signature is attached to
 // the most recent thinking block; when no thinking block exists yet it is held pending for the next
-// one. Dropping the signature makes Gemini 3+ reject the following turn with HTTP 400.
+// one. Dropping the signature makes Gemini 2.x and newer reject the following turn with HTTP 400.
 func (t *AnthropicStreamTranslator) captureSignature(sig string) {
 	if sig == "" {
 		return

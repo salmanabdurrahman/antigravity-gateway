@@ -921,3 +921,76 @@ func TestBuildAnthropicRequestClampsMaxTokens(t *testing.T) {
 		t.Errorf("expected maxOutputTokens clamped to 64000, got %v", geminiReq.GenerationConfig["maxOutputTokens"])
 	}
 }
+
+// TestBuildAnthropicRequestGemini2SkipSignature verifies that replayed Gemini 2.x tool turns receive
+// the skip signature sentinel, authentic client signatures are preserved, and non-Gemini families are
+// never given the sentinel.
+func TestBuildAnthropicRequestGemini2SkipSignature(t *testing.T) {
+	buildToolTurn := func(model string, toolUse map[string]any) Part {
+		t.Helper()
+		req := &AnthropicRequest{
+			Model:     model,
+			MaxTokens: 256,
+			Messages: []AnthropicMessage{
+				{Role: "user", Content: "call the tool"},
+				{Role: "assistant", Content: []any{toolUse}},
+				{Role: "user", Content: []any{
+					map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+				}},
+			},
+		}
+
+		geminiReq, err := BuildAnthropicRequest(req, BuildOptions{Info: catalog.CatalogModel{ID: model, MaxOutputTokens: 64000}})
+		if err != nil {
+			t.Fatalf("BuildAnthropicRequest(%s) failed: %v", model, err)
+		}
+
+		for _, content := range geminiReq.Contents {
+			for _, part := range content.Parts {
+				if part.FunctionCall != nil {
+					return part
+				}
+			}
+		}
+		t.Fatalf("BuildAnthropicRequest(%s) produced no function call part", model)
+		return Part{}
+	}
+
+	t.Run("unsigned gemini 2.x replay gets the sentinel", func(t *testing.T) {
+		part := buildToolTurn("gemini-2.5-flash", map[string]any{
+			"type": "tool_use", "id": "toolu_1", "name": "capture", "input": map[string]any{},
+		})
+		if part.ThoughtSignature != SkipSignature {
+			t.Errorf("expected skip signature for gemini-2.5-flash, got %q", part.ThoughtSignature)
+		}
+	})
+
+	t.Run("authentic signature is preserved", func(t *testing.T) {
+		part := buildToolTurn("gemini-2.5-flash", map[string]any{
+			"type": "tool_use", "id": "toolu_1", "name": "capture", "input": map[string]any{},
+			"thoughtSignature": "sig_authentic",
+		})
+		if part.ThoughtSignature != "sig_authentic" {
+			t.Errorf("expected authentic signature preserved, got %q", part.ThoughtSignature)
+		}
+	})
+
+	t.Run("legacy signature field is preserved", func(t *testing.T) {
+		part := buildToolTurn("gemini-2.5-flash", map[string]any{
+			"type": "tool_use", "id": "toolu_1", "name": "capture", "input": map[string]any{},
+			"signature": "sig_legacy",
+		})
+		if part.ThoughtSignature != "sig_legacy" {
+			t.Errorf("expected legacy signature preserved, got %q", part.ThoughtSignature)
+		}
+	})
+
+	t.Run("claude replay stays unsigned", func(t *testing.T) {
+		part := buildToolTurn("claude-sonnet-4-6", map[string]any{
+			"type": "tool_use", "id": "toolu_1", "name": "capture", "input": map[string]any{},
+		})
+		if part.ThoughtSignature != "" {
+			t.Errorf("expected no sentinel for claude-sonnet-4-6, got %q", part.ThoughtSignature)
+		}
+	})
+}

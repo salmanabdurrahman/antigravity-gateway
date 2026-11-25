@@ -11,7 +11,7 @@ Antigravity Gateway (`agw`) is a zero-dependency, single-binary Go reverse proxy
 
 - **Dual OpenAI & Anthropic Compatible Local Endpoints**: Exposes `/v1/chat/completions` (OpenAI format) and `/v1/messages` (Anthropic format) bounded strictly to local loopback (`127.0.0.1:51400`).
 - **Multi-Account Failover & Rotation**: Manages multiple Google Antigravity accounts locally with configurable strategies (`sticky`, `round-robin`, or `hybrid` with health scores, token bucket burst throttling, and proactive quota protection).
-- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 3 and Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), categorical thinking levels, thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header plus third-party agent identity sanitization.
+- **Protocol Fidelity**: Handles thought-signature preservation and replay for Gemini 2.x and newer plus Claude models, including required interleaved thinking headers, multi-phase tool schema sanitization ($ref hints, union flattening, array repair), categorical thinking levels, thinking budget clamping, interrupted tool-loop recovery, proactive `cache_control` stripping, and billing header plus third-party agent identity sanitization.
 - **Corporate Proxy & VPN Support**: Automatically honors standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for outbound API communication.
 - **Secure Local Configuration**: Stores sensitive credentials in `~/.agw/` with strict POSIX permissions (`0700` directories, `0600` files) and atomic write guarantees.
 - **Zero Runtime Dependencies**: Compiled into a single self-contained binary built on Go 1.24+ standard library and Cobra CLI.
@@ -26,7 +26,7 @@ A benchmark using `gemini-3.8-flash` on the same machine highlights key architec
 | **Memory Footprint (RSS)**      | **~19 MB**                                                       | **~135 MB** (7x higher RAM footprint)       |
 | **Startup Latency**             | Instant (< 5 ms)                                                 | ~2 – 4 seconds                              |
 | **Network Security**            | **Strict Loopback (`127.0.0.1:51400`)**                          | `0.0.0.0` (Exposed to local LAN by default) |
-| **Gemini 3 Thought-Signatures** | **Lossless Preservation (`pga.v1` format)**                      | Stripped / normalized                       |
+| **Gemini Thought-Signatures**   | **Lossless Preservation (`pga.v1` format)**                      | Stripped / normalized                       |
 | **Multi-Turn Tool Calling**     | **100% Reliable** (`skip_thought_signature_validator`)           | Prone to Google HTTP 400 on turn 2+         |
 | **Claude Interleaved Thinking** | Automatic `anthropic-beta` header injection                      | Adapter-dependent                           |
 | **Client Auto-Setup**           | Transactional CLI setup (`agw setup pi` / `opencode` / `claude`) | Manual client configuration                 |
@@ -397,7 +397,7 @@ The gateway transparently translates between OpenAI Chat Completions requests an
 
 - **Multimodal Support**: Maps OpenAI base64 `data:` URLs directly into Cloud Code `inlineData`.
 - **Tool Schema Defenses**: Converts OpenAI function parameters for Gemini (`parametersJsonSchema`) and Claude (`parameters`), while stripping disallowed schema attributes (`$ref`, `$defs`, `$schema`, unsupported unions). Dynamically detects HTTP 400 schema rejections to fall back to legacy `parameters` mode.
-- **Thought Signature & Replay**: Encodes upstream thinking tokens, steps, and Gemini 3/Claude cryptographic `thoughtSignature` data into OpenAI `reasoning_details`. Replaces missing signatures on tool re-execution with `skip_thought_signature_validator` to avoid upstream tool validation failures.
+- **Thought Signature & Replay**: Encodes upstream thinking tokens, steps, and Gemini/Claude cryptographic `thoughtSignature` data into OpenAI `reasoning_details`. Replaces missing signatures on tool re-execution with `skip_thought_signature_validator` for every Gemini generation that validates them (2.x and newer) to avoid upstream tool validation failures, while authentic client signatures are always preserved.
 - **Streaming SSE Engine**: Streams `v1internal:streamGenerateContent?alt=sse` chunks to OpenAI SSE chunks (`choices[0].delta.content`, `choices[0].delta.reasoning_content`, and `choices[0].delta.tool_calls`), with buffered scanner capacity up to 10 MB to safely handle massive code diffs and thinking blocks.
 
 ## Configuration & Environment
@@ -472,7 +472,7 @@ When rate limits occur:
 
 Account subscription tiers select the endpoint order: personal (free/Plus/Pro) accounts try `daily-cloudcode-pa.googleapis.com` first, while business and enterprise accounts try `cloudcode-pa.googleapis.com` first. A custom `endpoints` array in `config.json` keeps its configured order; the standard default pair is the only list that gets tier-optimized.
 
-Long Gemini 4 outputs are chained transparently: when upstream stops a candidate with `finishReason: CONTINUATION` and a `continuationToken`, `agw` re-sends the identical request payload with only the token added, for a bounded number of hops, and merges every segment into one client response. Per-model output ceilings are also respected, so `max_tokens`/`max_completion_tokens` requests above the model limit are clamped instead of failing upstream validation.
+Long Gemini 4 outputs are chained transparently: when upstream stops a candidate with `finishReason: CONTINUATION` and a `continuationToken`, `agw` re-sends the identical request payload with only the token added, for a bounded number of hops, and merges every segment into one client response. Continuation hops are dispatched through the account rotator, so the `sticky` strategy keeps them on the original account while `round-robin`/`hybrid` may switch; a switch is logged as a warning because an upstream token can be bound to the account that produced it. Per-model output ceilings are also respected, so `max_tokens`/`max_completion_tokens` requests above the model limit are clamped instead of failing upstream validation.
 
 `host` accepts IPv4 and IPv6 loopback addresses; non-loopback values are coerced back to `127.0.0.1`. IPv6 literals are bracketed everywhere the daemon binds or builds a URL, so `host: "::1"` yields `[::1]:51400`.
 

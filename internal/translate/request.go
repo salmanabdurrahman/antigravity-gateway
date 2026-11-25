@@ -19,9 +19,24 @@ import (
 // SkipSignature is the documented fallback signature injected for functionCall parts
 // when an assistant turn lacks an authentic Gemini thoughtSignature.
 //
-// Protocol Quirk: Gemini 3+ rejects tool turns with HTTP 400 if thoughtSignature is omitted.
-// Injecting "skip_thought_signature_validator" bypasses validation when replaying foreign or client-stripped turns.
+// Protocol Quirk: Google validates function call signatures for Gemini 2.x and every newer
+// generation, returning HTTP 400 when a replayed tool turn omits one. Injecting
+// "skip_thought_signature_validator" bypasses that validation when replaying foreign or
+// client-stripped turns.
 const SkipSignature = "skip_thought_signature_validator"
+
+// needsSkipSignature reports whether a replayed functionCall turn must carry a thoughtSignature for
+// the given model.
+//
+// Protocol Quirk: the validation is not limited to Gemini 3+. Live verification against
+// gemini-2.5-flash returns HTTP 400 ("Function call is missing a thought_signature in functionCall
+// parts") for an unsigned tool replay and HTTP 200 once the sentinel is present, so every Gemini
+// generation from 2.x onwards needs it. Claude and gpt-oss models negotiate signatures through their
+// own contract and are excluded by the Gemini-only match.
+func needsSkipSignature(model string) bool {
+	major := GeminiMajor(model)
+	return major != nil && *major >= 2
+}
 
 var (
 	cleanIDRegex      = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
@@ -813,10 +828,9 @@ func buildModelParts(msg ChatMessage, model string) []Part {
 		}
 	}
 
-	// Protocol Quirk: Gemini 3+ strictly validates signatures on the first tool call of a turn.
+	// Protocol Quirk: Gemini 2.x and newer strictly validate signatures on the first tool call of a turn.
 	// When absent (e.g. from foreign model, or client stripped reasoning_details), inject SkipSignature.
-	major := GeminiMajor(model)
-	if major != nil && *major >= 3 {
+	if needsSkipSignature(model) {
 		for i := range parts {
 			if parts[i].FunctionCall != nil {
 				if parts[i].ThoughtSignature == "" {
