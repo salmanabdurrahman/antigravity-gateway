@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-25
+
+### Fixed
+
+- Explicit `max_tokens` / `max_completion_tokens` and Anthropic `max_tokens` now bound total generation instead of being expanded to leave reasoning headroom.
+- Reasoning budgets shrink to fit an explicit output cap and thinking is disabled when the cap falls below the model minimum (1024 tokens for Claude), avoiding upstream HTTP 400 budget validation errors.
+- `tool_choice: "none"` omits tool declarations, because upstream models could still invoke a declared tool even with `functionCallingConfig` mode `NONE`.
+- Long-decode continuation is skipped for explicitly capped requests, which previously failed the follow-up hop with HTTP 400 because `maxOutputTokens` accumulates across continuation requests.
+
+### Changed
+
+- Capped OpenAI requests finish with `finish_reason: "length"`, and capped Anthropic requests finish with `stop_reason: "max_tokens"`. Long-decode chaining therefore requires omitting the cap on `/v1/chat/completions` and does not apply to `/v1/messages`.
+- Documented hard output caps, tool choice enforcement, and the migration note in the README.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added
@@ -143,7 +157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
 - Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
-[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/salmanabdurrahman/antigravity-gateway/releases/tag/v0.1.0

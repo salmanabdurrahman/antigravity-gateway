@@ -24,11 +24,11 @@ fi
 # Determine release version
 VERSION_INPUT="${1:-${VERSION:-}}"
 if [ -z "$VERSION_INPUT" ]; then
-    # Fallback to git tag if present, else fallback to 0.2.0
+    # Fallback to git tag if present, else fallback to 0.2.1
     if git rev-parse --git-dir > /dev/null 2>&1; then
-        VERSION_INPUT=$(git describe --tags --exact-match 2>/dev/null || echo "0.2.0")
+        VERSION_INPUT=$(git describe --tags --exact-match 2>/dev/null || echo "0.2.1")
     else
-        VERSION_INPUT="0.2.0"
+        VERSION_INPUT="0.2.1"
     fi
 fi
 
