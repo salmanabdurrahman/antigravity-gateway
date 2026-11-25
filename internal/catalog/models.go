@@ -624,17 +624,64 @@ func FormatResetTime(resetTime string, now time.Time) string {
 	if resetTime == "" {
 		return "Ready"
 	}
-	t, err := time.Parse(time.RFC3339, resetTime)
+	t, err := parseResetTimestamp(resetTime)
 	if err != nil {
-		t, err = time.Parse(time.RFC3339Nano, resetTime)
-		if err != nil {
-			return resetTime
-		}
+		return resetTime
 	}
 	if !t.After(now) {
 		return "Ready"
 	}
 	return t.UTC().Format("15:04 UTC")
+}
+
+// FormatResetCountdown formats an RFC3339 reset time string with a relative countdown alongside
+// the UTC clock time (and calendar date when more than 24 hours away), or returns "Ready" if empty
+// or already in the past.
+func FormatResetCountdown(resetTime string, now time.Time) string {
+	if resetTime == "" {
+		return "Ready"
+	}
+	t, err := parseResetTimestamp(resetTime)
+	if err != nil {
+		return resetTime
+	}
+	if !t.After(now) {
+		return "Ready"
+	}
+
+	diff := t.Sub(now)
+	utc := t.UTC()
+	if diff < time.Minute {
+		return fmt.Sprintf("<1m (%s)", utc.Format("15:04 UTC"))
+	}
+	if diff < 24*time.Hour {
+		hours := int(diff.Hours())
+		mins := int(diff.Minutes()) % 60
+		switch {
+		case hours > 0 && mins > 0:
+			return fmt.Sprintf("in %dh %dm (%s)", hours, mins, utc.Format("15:04 UTC"))
+		case hours > 0:
+			return fmt.Sprintf("in %dh (%s)", hours, utc.Format("15:04 UTC"))
+		default:
+			return fmt.Sprintf("in %dm (%s)", mins, utc.Format("15:04 UTC"))
+		}
+	}
+
+	days := int(diff.Hours()) / 24
+	remHours := int(diff.Hours()) % 24
+	if remHours > 0 {
+		return fmt.Sprintf("in %dd %dh (%s)", days, remHours, utc.Format("Jan 02 15:04 UTC"))
+	}
+	return fmt.Sprintf("in %dd (%s)", days, utc.Format("Jan 02 15:04 UTC"))
+}
+
+// parseResetTimestamp parses an upstream RFC3339 or RFC3339Nano reset timestamp.
+func parseResetTimestamp(resetTime string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, resetTime)
+	if err != nil {
+		return time.Parse(time.RFC3339Nano, resetTime)
+	}
+	return t, nil
 }
 
 // FormatQuota formats a quota fraction pointer as a percentage string (e.g. "85%"), or "100%" if nil.

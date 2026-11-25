@@ -101,7 +101,7 @@ All documentation and comments in this repository MUST be written in clear techn
 
 Follow the standard Go project layout (`golang-standards/project-layout`):
 
-- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands (`root.go`, `start.go`, `stop.go`, `login.go`, `logout.go`, `accounts.go`, `models.go`, `setup.go`, `doctor.go`, `update.go`, `version.go`). No business logic.
+- `cmd/agw/`: Minimal entrypoints and Cobra CLI commands (`root.go`, `start.go`, `status.go`, `stop.go`, `login.go`, `logout.go`, `accounts.go`, `quota.go`, `models.go`, `setup.go`, `doctor.go`, `update.go`, `version.go`). No business logic.
 - `internal/`: All core logic belongs under `internal/` packages:
   - `internal/config`: Paths (`paths.go`), defaults and env overrides (`config.go`), loopback address helpers (`addr.go`), upstream headers (`headers.go`), HTTP transport (`transport.go`).
   - `internal/auth`: OAuth PKCE (`oauth.go`, `pkce.go`, `callback.go`), token refresh (`token.go`), companion project discovery (`discovery.go`), IDE/CLI session detection (`local_detect.go`), account persistence (`store.go`).

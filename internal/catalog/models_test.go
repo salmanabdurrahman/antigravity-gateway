@@ -207,6 +207,20 @@ func TestSummarizeQuotasAndFormatting(t *testing.T) {
 	if emptyStr != "Ready" {
 		t.Errorf("expected 'Ready' for empty reset time, got %q", emptyStr)
 	}
+
+	// Countdown formatting across <1m, <24h, and >=24h horizons
+	if got := FormatResetCountdown("2026-11-10T11:00:25Z", now); got != "<1m (11:00 UTC)" {
+		t.Errorf("sub-minute countdown = %q, want %q", got, "<1m (11:00 UTC)")
+	}
+	if got := FormatResetCountdown("2026-11-10T12:30:00Z", now); got != "in 1h 30m (12:30 UTC)" {
+		t.Errorf("hours countdown = %q, want %q", got, "in 1h 30m (12:30 UTC)")
+	}
+	if got := FormatResetCountdown("2026-11-13T14:00:00Z", now); got != "in 3d 3h (Nov 13 14:00 UTC)" {
+		t.Errorf("multi-day countdown = %q, want %q", got, "in 3d 3h (Nov 13 14:00 UTC)")
+	}
+	if got := FormatResetCountdown("2026-11-10T10:00:00Z", now); got != "Ready" {
+		t.Errorf("past countdown = %q, want 'Ready'", got)
+	}
 }
 
 // TestIsListedChatModelExcludesDisabledPlaceholders verifies retired `<model>-disabled` identifiers

@@ -161,6 +161,9 @@ func TestHealthAndAccountsEndpoints(t *testing.T) {
 	if len(accResp.Accounts) != 1 || accResp.Accounts[0].Email != harness.accEmail {
 		t.Errorf("unexpected accounts response: %+v", accResp)
 	}
+	if accResp.Strategy != string(harness.server.rotator.Strategy()) {
+		t.Errorf("expected accounts strategy %q, got %q", harness.server.rotator.Strategy(), accResp.Strategy)
+	}
 }
 
 // TestModelsEndpoint verifies /v1/models listing and integration with catalog cache.

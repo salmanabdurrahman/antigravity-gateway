@@ -176,6 +176,9 @@ type ModelListResponse struct {
 
 // AccountsResponse represents the response containing safe account snapshots.
 type AccountsResponse struct {
+	// Strategy is the currently active rotation strategy in the running daemon.
+	Strategy string `json:"strategy,omitempty"`
+
 	// Accounts enumerates non-sensitive operational states for configured accounts.
 	Accounts []rotator.AccountSnapshot `json:"accounts"`
 }
@@ -308,10 +311,11 @@ func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
 	sendJSONError(w, http.StatusNotFound, fmt.Sprintf("The model '%s' does not exist", requested), 0)
 }
 
-// handleAccounts returns non-secret account diagnostics, request metrics, and cooldown states.
+// handleAccounts returns non-secret account diagnostics, active strategy, request metrics, and cooldown states.
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	snapshots := s.rotator.Pool().Snapshots()
 	sendJSON(w, http.StatusOK, AccountsResponse{
+		Strategy: string(s.rotator.Strategy()),
 		Accounts: snapshots,
 	})
 }

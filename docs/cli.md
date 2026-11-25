@@ -14,8 +14,10 @@ Available Commands:
   login       Authenticate a Google Antigravity account via OAuth PKCE
   logout      Remove a Google account from the local account store
   models      Inspect available chat models and token limits
+  quota       Inspect live rolling (5h), weekly, and per-model account quotas
   setup       Configure AI coding agents (Pi Coding Agent, OpenCode, Claude Code CLI)
   start       Start the local OpenAI-compatible gateway reverse proxy
+  status      Show gateway daemon status, active strategy, and runtime metrics
   stop        Stop the running background gateway daemon
   update      Update the gateway executable in place from GitHub Releases (alias: upgrade)
   version     Print the semantic version of agw
@@ -51,20 +53,57 @@ An Antigravity CLI (`agy`) token file can be imported explicitly through `AGW_AG
 
 ## 2. `agw accounts`
 
-Lists configured accounts with their linked Cloud Code companion projects, cooldown state, and request counters.
+Lists configured accounts with their linked Cloud Code companion projects, normalized subscription tiers, credential sources (`oauth` or `local_desktop`), and status.
 
 ```bash
 agw accounts
+agw accounts --check
+agw accounts --check --json
 ```
 
-| Flag          | Purpose                                                                        |
-| :------------ | :----------------------------------------------------------------------------- |
-| `--check`     | Query live upstream quota remaining (Gemini, Claude, reset time) per account.  |
-| `--re-enable` | Re-enable disabled accounts whose credentials still work (requires `--check`). |
+| Flag          | Purpose                                                                                         |
+| :------------ | :---------------------------------------------------------------------------------------------- |
+| `--check`     | Query live upstream rolling (5h), weekly, Gemini/Claude family quotas, and reset countdowns.    |
+| `--re-enable` | Re-enable disabled accounts whose credentials still work (requires `--check`).                  |
+| `--json`      | Output redacted account metadata (and live quota details when combined with `--check`) as JSON. |
 
-`--check` never re-enables accounts on its own: a disabled account whose credentials still work is reported as disabled with a hint, and clearing that state requires `--check --re-enable`. The only state the inspection records by itself is a revoked refresh token, which is marked disabled so later requests skip it until you log in again. The command exits non-zero when the configuration cannot be loaded, so broken configuration fails scripts instead of printing a status column.
+`--check` queries accounts concurrently in a bounded pool and never re-enables disabled accounts on its own: a disabled account whose credentials still work is reported as disabled with a hint, and clearing that state requires `--check --re-enable`. The only state the inspection records by itself is a revoked refresh token, which is marked disabled so later requests skip it until you log in again. The command exits non-zero when the configuration cannot be loaded, so broken configuration fails scripts instead of printing a status column.
 
-## 3. `agw logout`
+## 3. `agw quota`
+
+Inspects live upstream quota windows across all configured accounts, separating the rolling 5-hour allowance from the weekly allowance and highlighting any constrained models (`<100%`).
+
+```bash
+agw quota
+agw quota --models
+agw quota --watch --interval 30s
+agw quota --json
+```
+
+| Flag             | Purpose                                                                               |
+| :--------------- | :------------------------------------------------------------------------------------ |
+| `-m`, `--models` | Show the complete per-model quota breakdown under each account (including 100% ones). |
+| `--json`         | Output structured quota details as JSON.                                              |
+| `-w`, `--watch`  | Continuously refresh quota status in the terminal until interrupted (`Ctrl+C`).       |
+| `--interval`     | Refresh interval when `--watch` is enabled (default `30s`, minimum `5s`).             |
+| `--re-enable`    | Re-enable disabled accounts whose credentials still work during the check.            |
+
+## 4. `agw status`
+
+Probes the local gateway daemon (`/health` and authenticated `/v1/accounts`) to report whether the daemon is running, its PID, active rotation strategy, cached catalog count, and per-account runtime request/429/cooldown metrics.
+
+```bash
+agw status
+agw status --port 51400
+agw status --json
+```
+
+| Flag           | Purpose                                                               |
+| :------------- | :-------------------------------------------------------------------- |
+| `-p`, `--port` | Gateway HTTP port to inspect (default from `config.json` or `51400`). |
+| `--json`       | Output daemon status and runtime metrics as JSON.                     |
+
+## 5. `agw logout`
 
 ```bash
 agw logout user@example.com
@@ -72,7 +111,7 @@ agw logout user@example.com
 
 Removes the account's credentials and project mapping from `~/.agw/accounts.json`.
 
-## 4. `agw models`
+## 6. `agw models`
 
 ```bash
 agw models list            # instant, served from ~/.agw/models-cache.json
@@ -83,7 +122,7 @@ agw models list --refresh  # force a live upstream catalog refresh
 
 Catalog parsing follows the capability metadata returned by `fetchAvailableModels`: `agentModelSorts` and `tieredModelIds` override name-based heuristics, `apiProvider`/`modelProvider` exclude non-conversational entries, and `<model>-disabled` placeholders are never listed. Gemini 4 Neon reports its documented 512K context window. When setup runs fully offline, `agw` falls back to a bundled manifest covering Gemini 4 (Neon, Carbon, Hydrogen) and Claude 5.5 instead of retired identifiers.
 
-## 5. `agw start`
+## 7. `agw start`
 
 Runs the gateway reverse proxy on `127.0.0.1:51400`.
 
@@ -105,7 +144,7 @@ Detached launchers forward every command-line override (`--strategy`, `--port`, 
 
 Before spawning, `agw start` probes `/health` on the configured port. If an orphaned daemon answers, the command reports it and restores the missing PID file instead of launching a second process that cannot bind. A listener that does not identify itself as `antigravity-gateway` is never touched.
 
-## 6. `agw stop`
+## 8. `agw stop`
 
 ```bash
 agw stop
@@ -113,7 +152,7 @@ agw stop
 
 Terminates the running daemon gracefully via `SIGTERM`. If `~/.agw/agw.pid` is missing or stale, `agw stop` rediscovers the daemon through its `/health` identity probe on the port recorded in the configuration and resolves the owning process from the operating system socket table. Because discovery uses the configured port, keep `port` in the configuration in sync when running on a custom `--port`.
 
-## 7. `agw update`
+## 9. `agw update`
 
 Replaces the current executable with a newer release, atomically, in place.
 
@@ -134,7 +173,7 @@ agw update --no-restart     # leave a running daemon stopped
 
 A running daemon is stopped before the executable is replaced, and the restart preserves the `--config` path the daemon was launched with. If the stop request is refused or the daemon keeps answering `/health`, the upgrade aborts instead of swapping the binary underneath a live process; `--force` overrides that guard. Release metadata, archives, and checksums must be served over HTTPS (plain HTTP is accepted only for loopback mirrors), HTTPS-to-HTTP redirect downgrades are rejected, archives must contain `agw` as a regular file (symlinks and directories are refused), and extraction is size-capped. `agw upgrade` is an alias.
 
-## 8. `agw setup`
+## 10. `agw setup`
 
 Configures an AI coding agent to use the local gateway. Every subcommand creates a timestamped atomic backup (`*.bak-<timestamp>`) before writing, and by default performs a 1-token test completion to verify end-to-end connectivity.
 
@@ -176,7 +215,7 @@ Configures Claude Code CLI to talk to the Anthropic Messages endpoint (`/v1/mess
 
 An `--api-key` value that does not match `agw_` plus 64 hexadecimal characters fails before any client file is written. To keep an intentionally custom key, edit `api_key` in `config.json` and the client files directly; `agw doctor` reports when a stored key no longer matches the generated format.
 
-## 9. `agw doctor`
+## 11. `agw doctor`
 
 ```bash
 agw doctor
@@ -190,6 +229,6 @@ Runs an end-to-end environment audit:
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
-## 10. `agw version`
+## 12. `agw version`
 
 Prints the semantic version embedded at build time (for example `agw version 0.2.1`).

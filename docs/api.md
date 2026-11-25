@@ -4,14 +4,14 @@ The gateway exposes OpenAI Chat Completions and Anthropic Messages on local loop
 
 ## 1. Endpoints
 
-| Method & Route              | Purpose                                                                | Authentication                     |
-| :-------------------------- | :--------------------------------------------------------------------- | :--------------------------------- |
-| `GET /health`               | Liveness probe: gateway name, version, active account count            | None (loopback authority required) |
-| `GET /v1/models`            | OpenAI-compatible model listing with context windows and capabilities  | Bearer token                       |
-| `GET /v1/models/{id}`       | Single model descriptor by identifier or alias, OpenAI 404 otherwise   | Bearer token                       |
-| `POST /v1/chat/completions` | OpenAI-compatible chat completions, streaming or buffered              | Bearer token                       |
-| `POST /v1/messages`         | Anthropic Messages API for Claude Code CLI and compatible clients      | `x-api-key` or Bearer              |
-| `GET /v1/accounts`          | Redacted account diagnostics, cooldowns, and request metrics          | Bearer token                       |
+| Method & Route              | Purpose                                                               | Authentication                     |
+| :-------------------------- | :-------------------------------------------------------------------- | :--------------------------------- |
+| `GET /health`               | Liveness probe: gateway name, version, active account count           | None (loopback authority required) |
+| `GET /v1/models`            | OpenAI-compatible model listing with context windows and capabilities | Bearer token                       |
+| `GET /v1/models/{id}`       | Single model descriptor by identifier or alias, OpenAI 404 otherwise  | Bearer token                       |
+| `POST /v1/chat/completions` | OpenAI-compatible chat completions, streaming or buffered             | Bearer token                       |
+| `POST /v1/messages`         | Anthropic Messages API for Claude Code CLI and compatible clients     | `x-api-key` or Bearer              |
+| `GET /v1/accounts`          | Redacted account diagnostics, active strategy, cooldowns, and metrics | Bearer token                       |
 | `GET /`                     | Health payload (alias of `GET /health`)                               | None (loopback authority required) |
 
 Errors use a single envelope across endpoints:

@@ -63,10 +63,12 @@ Deeper design notes: [Architecture Overview](docs/architecture.md).
 | Command                          | Purpose                                                        |
 | :------------------------------- | :------------------------------------------------------------- |
 | `agw login`                      | Google OAuth PKCE login (`--no-browser`, `--local`)            |
-| `agw accounts [--check]`         | List accounts, project IDs, cooldowns, live quota              |
+| `agw accounts [--check]`         | List accounts, tiers, sources, live quota (`--json`)           |
+| `agw quota [--models] [--watch]` | Inspect rolling (5h), weekly, and per-model quota usage        |
 | `agw logout <email>`             | Remove an account from the local store                         |
 | `agw models list [--refresh]`    | Inspect catalog models, context windows, output limits         |
 | `agw start [--detach]`           | Run the gateway (`--strategy`, `--port`, `--config`)           |
+| `agw status`                     | Show daemon state, active strategy, and runtime account stats  |
 | `agw stop`                       | Stop the daemon, rediscovering it from `/health` if needed     |
 | `agw setup <pi/opencode/claude>` | Transactional client configuration with backups + verification |
 | `agw doctor`                     | Ports, permissions, accounts, upstream reachability, clients   |
