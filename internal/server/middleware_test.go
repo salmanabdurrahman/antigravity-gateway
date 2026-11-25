@@ -158,3 +158,20 @@ func TestLoggingMiddleware(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusTeapot, rec.Code)
 	}
 }
+
+// TestSendJSONErrorForbiddenType verifies HTTP 403 maps to an OpenAI permission_error payload.
+func TestSendJSONErrorForbiddenType(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sendJSONError(rec, http.StatusForbidden, "Google permanently disabled account@example.com", 0)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403", rec.Code)
+	}
+	var payload APIErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&payload); err != nil {
+		t.Fatalf("decoding error payload: %v", err)
+	}
+	if payload.Error.Type != "permission_error" {
+		t.Errorf("error type = %q; want permission_error", payload.Error.Type)
+	}
+}

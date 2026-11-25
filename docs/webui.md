@@ -61,7 +61,7 @@ Response `200 application/json`:
 }
 ```
 
-Field naming follows the source structs: account snapshots use `snake_case` (`project_id`, `rate_limits`, `last_used`, `cooldowns`, `last_error`) while catalog models and quotas use `camelCase` (`displayName`, `contextWindow`, `maxOutputTokens`, `remainingFraction`, `resetTime`). Optional fields are omitted when empty: `health` is only present once the tracker has a score, `last_used`/`last_error` only after the first dispatch or failure, and `quotas` only when upstream reported quota data.
+Field naming follows the source structs: account snapshots use `snake_case` (`project_id`, `rate_limits`, `last_used`, `cooldowns`, `last_error`) while catalog models and quotas use `camelCase` (`displayName`, `contextWindow`, `maxOutputTokens`, `remainingFraction`, `resetTime`). A quota entry may include an optional `weekly` object with its own `remainingFraction` and `resetTime` when upstream reports a separate weekly allowance. Optional fields are omitted when empty: `health` is only present once the tracker has a score, `last_used`/`last_error` only after the first dispatch or failure, and `quotas` only when upstream reported quota data.
 
 Fields are additive: clients must ignore unknown keys. The endpoint performs a best-effort catalog refresh, so the first request after a daemon start may take slightly longer than subsequent ones.
 

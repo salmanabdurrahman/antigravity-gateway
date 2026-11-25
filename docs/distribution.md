@@ -172,14 +172,14 @@ All runtime states, cached models, logs, and credentials reside in the user's ho
 
 #### Directory & File Permission Security Contract
 
-| Path                       | Purpose                                                      | Permissions           | Management                                                                                               |
-| :------------------------- | :----------------------------------------------------------- | :-------------------- | :------------------------------------------------------------------------------------------------------- |
-| `~/.agw/`                  | Base configuration directory                                 | `0700` (`drwx------`) | Created on first run; restricted to current user.                                                        |
-| `~/.agw/config.json`       | Proxy daemon settings, port, local API key, strategy, quotas | `0600` (`-rw-------`) | Created on first run with generated API key; atomic write; runtime updates patch only the changed field. |
-| `~/.agw/accounts.json`     | Stored OAuth tokens, imported desktop tokens, and projects   | `0600` (`-rw-------`) | Written upon `agw login` / `agw login --local` / `agw logout`; atomic write.                             |
-| `~/.agw/models-cache.json` | Cached upstream model catalog and quotas                     | `0600` (`-rw-------`) | Auto-updated on startup or manual refresh.                                                               |
-| `~/.agw/agw.pid`           | Process ID of the running daemon                             | `0600` (`-rw-------`) | Written once the daemon is listening; removed on shutdown.                                               |
-| `~/.agw/agw.log`           | Background daemon standard output & error                    | `0600` (`-rw-------`) | Appended during detached daemon execution.                                                               |
+| Path                       | Purpose                                                       | Permissions           | Management                                                                                               |
+| :------------------------- | :------------------------------------------------------------ | :-------------------- | :------------------------------------------------------------------------------------------------------- |
+| `~/.agw/`                  | Base configuration directory                                  | `0700` (`drwx------`) | Created on first run; restricted to current user.                                                        |
+| `~/.agw/config.json`       | Proxy daemon settings, port, local API key, strategy, quotas  | `0600` (`-rw-------`) | Created on first run with generated API key; atomic write; runtime updates patch only the changed field. |
+| `~/.agw/accounts.json`     | Stored OAuth tokens, imported desktop tokens, projects, tiers | `0600` (`-rw-------`) | Written upon `agw login` / `agw login --local` / `agw logout`; atomic write.                             |
+| `~/.agw/models-cache.json` | Cached model catalog, quotas, and 5h/weekly windows           | `0600` (`-rw-------`) | Auto-updated on startup or manual refresh.                                                               |
+| `~/.agw/agw.pid`           | Process ID of the running daemon                              | `0600` (`-rw-------`) | Written once the daemon is listening; removed on shutdown.                                               |
+| `~/.agw/agw.log`           | Background daemon standard output & error                     | `0600` (`-rw-------`) | Appended during detached daemon execution.                                                               |
 
 ## 5. Lifecycle & Upgrade Contract
 

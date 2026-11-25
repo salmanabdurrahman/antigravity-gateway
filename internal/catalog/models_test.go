@@ -208,3 +208,126 @@ func TestSummarizeQuotasAndFormatting(t *testing.T) {
 		t.Errorf("expected 'Ready' for empty reset time, got %q", emptyStr)
 	}
 }
+
+// TestIsListedChatModelExcludesDisabledPlaceholders verifies retired `<model>-disabled` identifiers
+// are never advertised as usable chat models.
+func TestIsListedChatModelExcludesDisabledPlaceholders(t *testing.T) {
+	for _, id := range []string{"gemini-4-argon-disabled", "claude-sonnet-4-6-DISABLED"} {
+		if IsListedChatModel(id) {
+			t.Errorf("expected disabled placeholder %q to be filtered", id)
+		}
+	}
+}
+
+// TestFamilyDefaultsGemini4Neon verifies the documented 512K context window for Gemini 4 Neon while
+// other Gemini families keep their 1M default.
+func TestFamilyDefaultsGemini4Neon(t *testing.T) {
+	neon := FamilyDefaults("gemini-4-neon")
+	if neon.ContextWindow != 524288 {
+		t.Errorf("gemini-4-neon context window = %d; want 524288", neon.ContextWindow)
+	}
+	if neon.MaxOutputTokens != 65536 || !neon.Thinking || !neon.Images {
+		t.Errorf("unexpected gemini-4-neon defaults: %+v", neon)
+	}
+
+	carbon := FamilyDefaults("gemini-4-carbon")
+	if carbon.ContextWindow != 1048576 {
+		t.Errorf("gemini-4-carbon context window = %d; want 1048576", carbon.ContextWindow)
+	}
+}
+
+// TestParseCatalogUsesApiMetadata verifies that disabled placeholders and non-chat providers are
+// filtered while agentModelSorts / tieredModelIds override name heuristics and drive the default model.
+func TestParseCatalogUsesApiMetadata(t *testing.T) {
+	payload := []byte(`{
+		"models": {
+			"gemini-4-argon-disabled": {"maxTokens": 1048576},
+			"chat_123": {"maxTokens": 4096},
+			"gemini-4-neon": {"maxTokens": 1048576, "supportsThinking": true},
+			"gemini-3.5-flash": {"maxTokens": 1048576},
+			"custom-serving-model": {"maxTokens": 8192, "modelProvider": "embedding"},
+			"claude-sonnet-5-5-high": {
+				"maxTokens": 1000000,
+				"quotaInfo": {
+					"remainingFraction": 0.9,
+					"resetTime": "2026-12-01T00:00:00Z",
+					"weeklyQuotaInfo": {"remainingFraction": 0.4, "resetTime": "2026-12-02T00:00:00Z"}
+				}
+			}
+		},
+		"agentModelSorts": [{"modelIds": ["gemini-3.5-flash", "chat_123"]}],
+		"tieredModelIds": ["gemini-4-neon"],
+		"defaultAgentModelId": "gemini-4-argon-disabled"
+	}`)
+
+	snap, err := ParseCatalog(payload)
+	if err != nil {
+		t.Fatalf("ParseCatalog failed: %v", err)
+	}
+
+	byID := make(map[string]CatalogModel, len(snap.Models))
+	for _, model := range snap.Models {
+		byID[model.ID] = model
+	}
+
+	if _, ok := byID["gemini-4-argon-disabled"]; ok {
+		t.Error("disabled placeholder must be filtered")
+	}
+	if _, ok := byID["custom-serving-model"]; ok {
+		t.Error("non-chat provider model must be filtered")
+	}
+	if _, ok := byID["chat_123"]; ok {
+		t.Error("advertised internal chat tool must stay filtered")
+	}
+	if _, ok := byID["gemini-3.5-flash"]; !ok {
+		t.Error("agentModelSorts must override the Gemini 3.5 name heuristic")
+	}
+	neon, ok := byID["gemini-4-neon"]
+	if !ok {
+		t.Fatal("expected gemini-4-neon in catalog")
+	}
+	if neon.ContextWindow != 524288 {
+		t.Errorf("gemini-4-neon context = %d; want 524288", neon.ContextWindow)
+	}
+	if snap.DefaultModel != "gemini-3.5-flash" {
+		t.Errorf("default model = %q; want gemini-3.5-flash from agentModelSorts", snap.DefaultModel)
+	}
+
+	quota, ok := snap.Quotas["claude-sonnet-5-5-high"]
+	if !ok || quota.Weekly == nil || quota.Weekly.RemainingFraction == nil {
+		t.Fatalf("expected weekly quota window, got %+v", quota)
+	}
+	if *quota.Weekly.RemainingFraction != 0.4 {
+		t.Errorf("weekly fraction = %v; want 0.4", *quota.Weekly.RemainingFraction)
+	}
+}
+
+// TestFallbackModelsBundledManifest verifies the embedded offline manifest ships Gemini 4 and
+// Claude 5.5 entries with correct Neon limits.
+func TestFallbackModelsBundledManifest(t *testing.T) {
+	models := FallbackModels()
+	if len(models) < 4 {
+		t.Fatalf("expected bundled fallback manifest, got %d models", len(models))
+	}
+
+	byID := make(map[string]CatalogModel, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+
+	neon, ok := byID["gemini-4-neon"]
+	if !ok || neon.ContextWindow != 524288 {
+		t.Errorf("fallback manifest missing gemini-4-neon 512K entry: %+v", neon)
+	}
+	for _, id := range []string{"gemini-4-carbon", "gemini-4-hydrogen-sonar", "claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
+		if _, ok := byID[id]; !ok {
+			t.Errorf("fallback manifest missing %q", id)
+		}
+	}
+
+	// Callers must never mutate the shared memoized manifest.
+	models[0].ID = "mutated"
+	if FallbackModels()[0].ID == "mutated" {
+		t.Error("FallbackModels must return a defensive copy")
+	}
+}

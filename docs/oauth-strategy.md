@@ -4,7 +4,7 @@ This document defines the authorized OAuth 2.0 client strategy, consent-screen r
 
 ## 1. Overview & Architectural Role
 
-Antigravity Gateway acts as a local OpenAI-compatible reverse proxy (`http://127.0.0.1:51400/v1`) that routes requests to Google Cloud Code Assist upstream endpoints (`https://cloudcode-pa.googleapis.com/v1internal:*`).
+Antigravity Gateway acts as a local OpenAI-compatible reverse proxy (`http://127.0.0.1:51400/v1`) that routes requests to Google Cloud Code Assist upstream endpoints (`/v1internal:*` on the daily or production Cloud Code host, ordered by account tier).
 
 To access these endpoints on behalf of an authenticated developer, the gateway must obtain valid Google OAuth 2.0 credentials and associate them with a companion Google Cloud project (`cloudaicompanionProject`) provisioned for the user.
 
@@ -88,4 +88,4 @@ Before publishing and distributing binary releases:
 
 1. Ensure the default client remains active and valid on Google Cloud Console.
 2. Verify that PKCE parameters and loopback redirect URIs continue to match Google's latest desktop app specifications.
-3. Verify that upstream endpoint fallbacks (`daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com`) remain accessible with issued access tokens.
+3. Verify that upstream endpoint fallbacks (`daily-cloudcode-pa.googleapis.com` and `cloudcode-pa.googleapis.com`) remain accessible with issued access tokens. Personal tiers try the daily endpoint first; business and enterprise tiers try the production endpoint first, while an explicit `endpoints` list in `config.json` is kept in its configured order.

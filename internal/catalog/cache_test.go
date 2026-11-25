@@ -217,9 +217,10 @@ func TestModelCatalogStaleWhileRevalidateNonBlocking(t *testing.T) {
 
 	refreshStarted := make(chan struct{})
 	refreshDone := make(chan struct{})
+	var startedOnce sync.Once
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(refreshStarted)
+		startedOnce.Do(func() { close(refreshStarted) })
 		<-refreshDone
 		w.Header().Set("Content-Type", "application/json")
 		resp := rawCatalogResponse{
@@ -285,5 +286,41 @@ func TestModelCatalogStaleWhileRevalidateNonBlocking(t *testing.T) {
 	// Verify refreshed model is now present
 	if _, ok := cat.Get("gemini-refreshed"); !ok {
 		t.Error("expected refreshed model to be present after background refresh")
+	}
+}
+
+// TestModelCatalogRefreshDoesNotCommitCanceledPartial verifies a canceled or timed-out multi-account
+// refresh never persists a partial catalog as fresh.
+func TestModelCatalogRefreshDoesNotCommitCanceledPartial(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), "models-cache.json")
+	runner := &mockIteratorRunner{
+		states: []*rotator.AccountState{
+			rotator.NewAccountState(&auth.Account{Email: "a@example.com", ProjectID: "a"}),
+			rotator.NewAccountState(&auth.Account{Email: "b@example.com", ProjectID: "b"}),
+		},
+	}
+	cat := NewModelCatalog(&config.Config{Endpoints: []string{"http://127.0.0.1:1"}}, runner, cacheFile, nil)
+
+	seededAt := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	cat.mu.Lock()
+	cat.snapshot.Models = []CatalogModel{{ID: "gemini-existing"}}
+	cat.snapshot.DefaultModel = "gemini-existing"
+	cat.fetchedAt = seededAt
+	cat.rebuildIndexLocked()
+	cat.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if err := cat.Refresh(ctx); err == nil {
+		t.Fatal("expected canceled refresh to fail")
+	}
+
+	snap, fetchedAt := cat.Snapshot()
+	if len(snap.Models) != 1 || snap.Models[0].ID != "gemini-existing" {
+		t.Errorf("canceled refresh must not replace the snapshot: %+v", snap.Models)
+	}
+	if !fetchedAt.Equal(seededAt) {
+		t.Errorf("canceled refresh must not advance fetchedAt, got %v", fetchedAt)
 	}
 }

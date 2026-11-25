@@ -21,13 +21,20 @@ const DefaultFetchTimeout = 15 * time.Second
 // FetchCatalog queries Google Cloud Code Assist (v1internal:fetchAvailableModels) across configured
 // endpoints to retrieve the live model catalog and quota metrics for a project.
 func FetchCatalog(ctx context.Context, cfg *config.Config, httpClient *http.Client, accessToken string, projectID string) (*CatalogSnapshot, error) {
+	return FetchCatalogForTier(ctx, cfg, httpClient, accessToken, projectID, "")
+}
+
+// FetchCatalogForTier queries the model catalog using the endpoint order appropriate for the account
+// tier. Personal accounts prefer the daily endpoint, while business and enterprise accounts prefer
+// the production endpoint unless the operator supplied an explicit endpoint list.
+func FetchCatalogForTier(ctx context.Context, cfg *config.Config, httpClient *http.Client, accessToken string, projectID string, tier string) (*CatalogSnapshot, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: DefaultFetchTimeout}
 	}
 
 	endpoints := config.DefaultEndpoints()
-	if cfg != nil && len(cfg.Endpoints) > 0 {
-		endpoints = cfg.Endpoints
+	if cfg != nil {
+		endpoints = cfg.EndpointsForTier(tier)
 	}
 
 	reqPayload, err := json.Marshal(map[string]string{
@@ -80,8 +87,9 @@ func FetchCatalog(ctx context.Context, cfg *config.Config, httpClient *http.Clie
 		}
 
 		lastErr = fmt.Errorf("listing models failed on %s (HTTP %d): %s", endpoint, resp.StatusCode, errMsg)
-		// 403 (Forbidden) and 404 (Not Found) may occur when endpoint does not serve this service; try next endpoint
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+		// Endpoint-scoped failures fall back to the next endpoint, matching Rotator.post behavior:
+		// 5xx errors, 403, and 404 can all mean this endpoint does not serve the account's region or tier.
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 			continue
 		}
 

@@ -24,9 +24,6 @@ const (
 	// TokenSkewMargin is the proactive refresh margin (2 minutes) to ensure access tokens do not expire mid-flight.
 	TokenSkewMargin = 2 * time.Minute
 
-	// MaxWaitDuration is the maximum wait time (20s) agw will absorb when all accounts are temporarily cooling down.
-	MaxWaitDuration = 20 * time.Second
-
 	// FileCheckInterval throttles disk stat checks to at most once every 2 seconds.
 	FileCheckInterval = 2 * time.Second
 )
@@ -62,6 +59,10 @@ type AccountState struct {
 
 	// rateLimits tracks the cumulative count of HTTP 429 rate limit responses received by this account.
 	rateLimits atomic.Int64
+
+	// rateLimitStreak tracks consecutive HTTP 429 responses, driving progressive backoff when upstream
+	// omits an explicit retry delay. It resets on the next successful completion.
+	rateLimitStreak atomic.Int64
 
 	// bucket coordinates token bucket burst rate limiting.
 	bucket *TokenBucket
@@ -119,6 +120,26 @@ func (s *AccountState) ProjectID() string {
 		return ""
 	}
 	return s.account.ProjectID
+}
+
+// Tier returns the normalized subscription tier used for upstream endpoint ordering.
+func (s *AccountState) Tier() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.account == nil {
+		return ""
+	}
+	return s.account.Tier
+}
+
+// NextRateLimitStreak increments and returns the consecutive rate-limit counter.
+func (s *AccountState) NextRateLimitStreak() int64 {
+	return s.rateLimitStreak.Add(1)
+}
+
+// ResetRateLimitStreak clears consecutive rate-limit tracking after a successful completion.
+func (s *AccountState) ResetRateLimitStreak() {
+	s.rateLimitStreak.Store(0)
 }
 
 // Usable checks if the account holds credentials and is not disabled.
@@ -184,6 +205,14 @@ func (s *AccountState) SetQuotaFraction(model string, fraction float64) {
 		s.quotaFractions = make(map[string]float64)
 	}
 	s.quotaFractions[model] = max(0.0, min(1.0, fraction))
+}
+
+// ResetQuotaFraction removes a model's cached quota fraction after a confirmed successful request,
+// so a zero recorded during an earlier 429 cannot park the account for that model indefinitely.
+func (s *AccountState) ResetQuotaFraction(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.quotaFractions, model)
 }
 
 // ClearAccessToken invalidates the cached access token, forcing refresh on the next request.
@@ -273,10 +302,12 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 	email := ""
 	projectID := ""
 	disabled := false
+	tier := ""
 	if s.account != nil {
 		email = s.account.Email
 		projectID = s.account.ProjectID
 		disabled = s.account.Disabled
+		tier = s.account.Tier
 	}
 	lastErr := s.lastError
 	lastUsedStr := ""
@@ -293,6 +324,7 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 	return AccountSnapshot{
 		Email:      email,
 		ProjectID:  projectID,
+		Tier:       tier,
 		Disabled:   disabled,
 		Cooldowns:  activeCooldowns,
 		Requests:   s.requests.Load(),
@@ -309,6 +341,9 @@ type AccountSnapshot struct {
 
 	// ProjectID is the assigned Cloud Code companion project ID.
 	ProjectID string `json:"project_id"`
+
+	// Tier is the normalized subscription tier used for endpoint ordering.
+	Tier string `json:"tier,omitempty"`
 
 	// Disabled indicates whether the account is temporarily excluded from rotation.
 	Disabled bool `json:"disabled"`

@@ -231,3 +231,65 @@ func TestDiscoverProjectNoProjectError(t *testing.T) {
 		t.Errorf("expected ErrNoCompanionProject, got %v", err)
 	}
 }
+
+// TestTierFromLoadCodeAssist verifies normalization of subscription tier metadata reported by
+// loadCodeAssist across consumer, business, and enterprise payload shapes.
+func TestTierFromLoadCodeAssist(t *testing.T) {
+	tests := []struct {
+		name string
+		data map[string]any
+		want string
+	}{
+		{
+			name: "current tier enterprise",
+			data: map[string]any{
+				"currentTier": map[string]any{"id": "tier-enterprise-standard", "name": "Enterprise"},
+			},
+			want: "enterprise",
+		},
+		{
+			name: "paid tier workspace business",
+			data: map[string]any{
+				"paidTier": map[string]any{"id": "workspace-business", "displayName": "Google Workspace"},
+			},
+			want: "business",
+		},
+		{
+			name: "allowed tiers default consumer",
+			data: map[string]any{
+				"allowedTiers": []any{
+					map[string]any{"id": "tier-premium"},
+				},
+			},
+			want: "personal",
+		},
+		{
+			name: "paid tier wins over consumer current tier",
+			data: map[string]any{
+				"currentTier": map[string]any{"id": "tier-free"},
+				"paidTier":    map[string]any{"id": "tier-enterprise-standard"},
+			},
+			want: "enterprise",
+		},
+		{
+			name: "unknown tier",
+			data: map[string]any{
+				"currentTier": map[string]any{"id": "tier-experimental"},
+			},
+			want: "",
+		},
+		{
+			name: "nil payload",
+			data: nil,
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := TierFromLoadCodeAssist(tc.data); got != tc.want {
+				t.Errorf("TierFromLoadCodeAssist() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}

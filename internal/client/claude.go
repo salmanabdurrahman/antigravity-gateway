@@ -15,7 +15,7 @@ import (
 )
 
 // DefaultClaudeModel specifies the primary model configured for Claude Code CLI.
-const DefaultClaudeModel = "claude-sonnet-4-6"
+const DefaultClaudeModel = "claude-sonnet-5-5-high"
 
 // ClaudeSetupOptions encapsulates parameters for configuring Claude Code CLI (~/.claude/settings.json).
 type ClaudeSetupOptions struct {
@@ -102,7 +102,7 @@ func SetupClaude(ctx context.Context, opts ClaudeSetupOptions) (*ClaudeSetupResu
 	envMap["ANTHROPIC_BASE_URL"] = gatewayURL
 	envMap["ANTHROPIC_AUTH_TOKEN"] = apiKey
 	envMap["ANTHROPIC_MODEL"] = model
-	envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "claude-opus-4-6-thinking"
+	envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "claude-opus-5-5-high"
 	envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
 	envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
 	envMap["CLAUDE_CODE_SUBAGENT_MODEL"] = model

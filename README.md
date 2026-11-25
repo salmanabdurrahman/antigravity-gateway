@@ -213,6 +213,8 @@ agw models list
 
 _(Loads from `~/.agw/models-cache.json` for instant offline responses. Pass `--refresh` to force a live upstream catalog refresh)._
 
+Catalog parsing follows the capability metadata returned by `fetchAvailableModels`: `agentModelSorts` and `tieredModelIds` override name-based heuristics, `apiProvider`/`modelProvider` exclude non-conversational entries, and `<model>-disabled` placeholders are never listed. Gemini 4 Neon reports its documented 512K context window. When setup runs fully offline, `agw` falls back to a bundled manifest covering Gemini 4 (Neon, Carbon, Hydrogen) and Claude 5.5 instead of retired identifiers.
+
 #### Upstream Model Aliases
 
 The gateway maps user-friendly public model aliases to Google's internal Cloud Code Assist identifiers automatically:
@@ -329,7 +331,7 @@ agw setup claude
 
 Optional flags:
 
-- `--model`: Primary model configured for Claude CLI (default: `claude-sonnet-4-6`)
+- `--model`: Primary model configured for Claude CLI (default: `claude-sonnet-5-5-high`)
 - `--no-verify`: Skip 1-token connectivity test probe
 - `--dry-run`: Preview generated JSON without writing to disk
 - `--settings`: Custom settings file path (defaults to `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR`)
@@ -374,7 +376,7 @@ curl -s http://127.0.0.1:51400/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $API_KEY" \
   -d '{
-    "model": "gemini-3.8-flash-high",
+    "model": "gemini-4-hydrogen-high",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 50
   }' | jq .
@@ -397,10 +399,18 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 | :------------------------- | :------------------------------------------------------------------------------------------- | :--------------- |
 | `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy, quota threshold, model mapping | `0600`           |
 | `~/.agw/accounts.json`     | Stored Google account tokens and companion project mappings                                  | `0600`           |
-| `~/.agw/models-cache.json` | Cached model catalog and token limits                                                        | `0600`           |
+| `~/.agw/models-cache.json` | Cached model catalog, token limits, and rolling/weekly quota windows                         | `0600`           |
 | `~/.agw/agw.pid`           | Running daemon process ID (written once listening)                                           | `0600`           |
 
 `config.json` is the single source of truth for gateway settings. Runtime mutations rewrite only the field being changed after re-reading the file first, so a running daemon never persists stale or partial state over your API key, endpoints, or model mapping. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
+
+Operational thresholds are tunable without code changes:
+
+| Key                        | Default | Range    | Purpose                                                                                         |
+| :------------------------- | :------ | :------- | :---------------------------------------------------------------------------------------------- |
+| `max_wait_seconds`         | `20`    | `1-120`  | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.       |
+| `default_cooldown_seconds` | `60`    | `1-3600` | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x. |
+| `empty_stream_retries`     | `2`     | `1-5`    | Extra attempts when Google closes a stream before emitting any content.                         |
 
 ### Environment Overrides
 
@@ -414,6 +424,7 @@ The gateway configuration directory defaults to `~/.agw` and can be overridden v
 - `AGW_ANTIGRAVITY_CHANGELIST`: Piper changelist (`cl`) token paired with the Hub version in the default User-Agent. Known Hub releases resolve their own changelist automatically; set this to pin an unmapped build (default: `1023160026`).
 
 Default upstream requests identify as `antigravity/hub/<version> (aidev_client; os_type=<os>; arch=<arch>; cl=<changelist>)`. Override the whole header with `AGW_USER_AGENT` when proxying a different client identity.
+
 - `PI_AGENT_DIR`: Custom Pi Coding Agent configuration directory (default: `~/.pi/agent`).
 - `OPENCODE_CONFIG`: Custom OpenCode configuration file path (default: `~/.config/opencode/opencode.json`).
 
@@ -433,7 +444,7 @@ You can define custom model aliases in `~/.agw/config.json` via the `model_mappi
 {
   "model_mapping": {
     "gemini-4-argon": "gemini-4-argon-high",
-    "claude-custom": "claude-sonnet-4-6"
+    "claude-custom": "claude-sonnet-5-5-high"
   }
 }
 ```
@@ -442,11 +453,15 @@ When rate limits occur:
 
 - Upstream `resetTime` (RFC3339) or `retryDelay` is parsed to calculate exact cooldown duration (defaults to 60s).
 - A bare `429 RESOURCE_EXHAUSTED` without `details[]`, retry metadata, or `Retry-After` is treated as a request-scoped prompt rejection: healthy accounts are never cooled, third-party agent identity lines are scrubbed from system instructions, and the request is retried once with the system instruction moved into the first user turn before the HTTP 400 is surfaced.
-- **Per-Model Cooldown Isolation**: An account rate-limited on `gemini-3.8-flash` remains fully available to serve other non-cooling models (e.g. `claude-sonnet-4-6` or `gpt-oss-120b`).
+- Repeated 429 responses without retry metadata escalate progressively (`60s -> 5m -> 30m -> 2h`) and zero the affected model's quota fraction so hybrid scoring stops preferring the throttled account.
+- **Per-Model Cooldown Isolation**: An account rate-limited on one model remains fully available to serve other non-cooling models (e.g. Claude or GPT-OSS models).
 - The account is put on cooldown for that model and requests immediately fail over to the next available account.
-- If all accounts are cooling and the wait duration is $\le 20$s, `agw` absorbs the wait transparently before serving the request.
-- If the wait duration exceeds 20s, `agw` returns HTTP 429 with the exact seconds in the `Retry-After` header.
+- If all accounts are cooling and the wait duration is $\le$ `max_wait_seconds`, `agw` absorbs the wait transparently before serving the request.
+- If the wait duration exceeds the configured limit, `agw` returns HTTP 429 with the exact seconds in the `Retry-After` header.
 - Secondary endpoint and healthy account fallbacks are automatically exercised upon upstream 5xx server errors.
+- HTTP 403 bodies that indicate a permanent terms-of-service suspension (`has been disabled`, `violation of terms of service`, `VALIDATION_REQUIRED`) disable the account persistently with the upstream reason instead of looping it back through 30-minute cooldowns. Transient 403s still cool down and fail over.
+
+Account subscription tiers select the endpoint order: personal (free/Plus/Pro) accounts try `daily-cloudcode-pa.googleapis.com` first, while business and enterprise accounts try `cloudcode-pa.googleapis.com` first. A custom `endpoints` array in `config.json` keeps its configured order; the standard default pair is the only list that gets tier-optimized.
 
 ## Development & Verification
 

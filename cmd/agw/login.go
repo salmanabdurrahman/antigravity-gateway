@@ -168,7 +168,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 	}
 
 	cmd.Println("Discovering Cloud Code companion project...")
-	projectID, err := auth.DiscoverProject(ctx, cfg, tokens.AccessToken)
+	projectID, tier, err := auth.DiscoverProjectAndTier(ctx, cfg, tokens.AccessToken)
 	if err != nil {
 		return fmt.Errorf("discovering companion project: %w", err)
 	}
@@ -182,6 +182,7 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		Email:        email,
 		RefreshToken: tokens.RefreshToken,
 		ProjectID:    projectID,
+		Tier:         tier,
 		AddedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 

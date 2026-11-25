@@ -184,6 +184,8 @@ func sendJSONError(w http.ResponseWriter, status int, message string, retryAfter
 		errType = "rate_limit_error"
 	case status == http.StatusUnauthorized:
 		errType = "authentication_error"
+	case status == http.StatusForbidden:
+		errType = "permission_error"
 	case status >= http.StatusInternalServerError:
 		errType = "server_error"
 	}

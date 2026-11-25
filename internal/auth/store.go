@@ -40,6 +40,11 @@ type Account struct {
 	// ProjectID is the Google Cloud Code companion project identifier hosting quota resources.
 	ProjectID string `json:"project_id"`
 
+	// Tier records the normalized subscription tier (personal, business, enterprise) resolved during
+	// login. It drives upstream endpoint ordering because paid tiers are served by the production
+	// Cloud Code endpoint while consumer tiers use the daily endpoint first.
+	Tier string `json:"tier,omitempty"`
+
 	// AddedAt records the RFC 3339 timestamp when this account was authenticated.
 	AddedAt string `json:"added_at"`
 

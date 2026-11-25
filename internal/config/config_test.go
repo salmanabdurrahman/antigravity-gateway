@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDefaultConfig verifies that DefaultConfig initializes all mandatory fields,
@@ -387,5 +388,88 @@ func TestConfigStringRedaction(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "test-client-id") {
 		t.Errorf("Config.String() missing ClientID: %s", rendered)
+	}
+}
+
+// TestEndpointsForTierOrdering verifies tier-aware endpoint preference while preserving explicit
+// operator-supplied endpoint lists.
+func TestEndpointsForTierOrdering(t *testing.T) {
+	cfg := DefaultConfig()
+
+	personal := cfg.EndpointsForTier(TierPersonal)
+	if len(personal) != 2 || personal[0] != "https://daily-cloudcode-pa.googleapis.com" {
+		t.Errorf("personal endpoints = %v; want daily endpoint first", personal)
+	}
+
+	business := cfg.EndpointsForTier(TierBusiness)
+	if len(business) != 2 || business[0] != "https://cloudcode-pa.googleapis.com" {
+		t.Errorf("business endpoints = %v; want production endpoint first", business)
+	}
+
+	enterprise := cfg.EndpointsForTier(TierEnterprise)
+	if len(enterprise) != 2 || enterprise[0] != "https://cloudcode-pa.googleapis.com" {
+		t.Errorf("enterprise endpoints = %v; want production endpoint first", enterprise)
+	}
+
+	custom := &Config{Endpoints: []string{"https://custom-b.example", "https://custom-a.example"}}
+	overridden := custom.EndpointsForTier(TierEnterprise)
+	if len(overridden) != 2 || overridden[0] != "https://custom-b.example" {
+		t.Errorf("explicit endpoints must keep their order, got %v", overridden)
+	}
+}
+
+// TestConfigDurationDefaults verifies the configurable rotator thresholds expose safe defaults and
+// honor explicit values.
+func TestConfigDurationDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	if got := cfg.MaxWaitDuration(); got != 20*time.Second {
+		t.Errorf("MaxWaitDuration() = %v; want 20s", got)
+	}
+	if got := cfg.CooldownDuration(); got != 60*time.Second {
+		t.Errorf("CooldownDuration() = %v; want 60s", got)
+	}
+	if got := cfg.EmptyStreamRetryCount(); got != 2 {
+		t.Errorf("EmptyStreamRetryCount() = %d; want 2", got)
+	}
+
+	tuned := &Config{MaxWaitSeconds: 5, DefaultCooldownSeconds: 30, EmptyStreamRetries: 4}
+	if got := tuned.MaxWaitDuration(); got != 5*time.Second {
+		t.Errorf("tuned MaxWaitDuration() = %v; want 5s", got)
+	}
+	if got := tuned.CooldownDuration(); got != 30*time.Second {
+		t.Errorf("tuned CooldownDuration() = %v; want 30s", got)
+	}
+	if got := tuned.EmptyStreamRetryCount(); got != 4 {
+		t.Errorf("tuned EmptyStreamRetryCount() = %d; want 4", got)
+	}
+
+	capped := &Config{MaxWaitSeconds: 86400, DefaultCooldownSeconds: 999999, EmptyStreamRetries: 1000}
+	if got := capped.MaxWaitDuration(); got != MaxWaitLimitSeconds*time.Second {
+		t.Errorf("capped MaxWaitDuration() = %v; want %v", got, MaxWaitLimitSeconds*time.Second)
+	}
+	if got := capped.CooldownDuration(); got != CooldownLimitSeconds*time.Second {
+		t.Errorf("capped CooldownDuration() = %v; want %v", got, CooldownLimitSeconds*time.Second)
+	}
+	if got := capped.EmptyStreamRetryCount(); got != EmptyStreamRetryLimit {
+		t.Errorf("capped EmptyStreamRetryCount() = %d; want %d", got, EmptyStreamRetryLimit)
+	}
+}
+
+// TestNormalizeAccountTier verifies normalization of upstream subscription identifiers.
+func TestNormalizeAccountTier(t *testing.T) {
+	tests := map[string]string{
+		"":                    "",
+		"tier-free":           TierPersonal,
+		"Free Tier":           TierPersonal,
+		"tier-premium":        TierPersonal,
+		"Google Workspace":    TierBusiness,
+		"business-standard":   TierBusiness,
+		"enterprise-standard": TierEnterprise,
+		"unknown-product":     "",
+	}
+	for raw, want := range tests {
+		if got := NormalizeAccountTier(raw); got != want {
+			t.Errorf("NormalizeAccountTier(%q) = %q; want %q", raw, got, want)
+		}
 	}
 }

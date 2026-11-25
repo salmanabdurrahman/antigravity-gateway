@@ -30,6 +30,10 @@ type PickResult struct {
 
 	// NoAcct is true when no usable or enabled accounts exist in the pool.
 	NoAcct bool
+
+	// TokenConsumed reports whether the hybrid strategy charged a token bucket for this pick.
+	// Callers must only refund when this is true, so an empty bucket cannot be inflated by refunds.
+	TokenConsumed bool
 }
 
 // Picker selects candidate accounts from an AccountState slice based on rotation strategy and cooldowns.
@@ -320,8 +324,8 @@ func (p *Picker) pickHybrid(model string, states []*AccountState, skip map[*Acco
 	})
 
 	best := candidates[0].state
-	_ = best.TokenBucket().Consume(now)
+	consumed := best.TokenBucket().Consume(now)
 	best.SetLastUsed(now)
 
-	return PickResult{State: best}
+	return PickResult{State: best, TokenConsumed: consumed}
 }

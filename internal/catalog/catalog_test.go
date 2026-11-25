@@ -150,3 +150,39 @@ func TestFetchCatalogContextCanceled(t *testing.T) {
 		t.Fatal("expected error on canceled context")
 	}
 }
+
+// TestFetchCatalogFallbackOn5xx verifies catalog retrieval falls back to the next endpoint on a
+// transient server error, matching the rotator's endpoint failover behavior.
+func TestFetchCatalogFallbackOn5xx(t *testing.T) {
+	firstCalled := false
+	secondCalled := false
+
+	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalled = true
+		http.Error(w, `{"error":{"message":"backend unavailable"}}`, http.StatusServiceUnavailable)
+	}))
+	defer ts1.Close()
+
+	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(rawCatalogResponse{
+			Models: map[string]rawModelInfo{
+				"gemini-4-neon": {},
+			},
+		})
+	}))
+	defer ts2.Close()
+
+	cfg := &config.Config{Endpoints: []string{ts1.URL, ts2.URL}}
+	snap, err := FetchCatalog(t.Context(), cfg, ts1.Client(), "token", "project")
+	if err != nil {
+		t.Fatalf("FetchCatalog failed: %v", err)
+	}
+	if !firstCalled || !secondCalled {
+		t.Fatalf("expected both endpoints queried, first=%v second=%v", firstCalled, secondCalled)
+	}
+	if len(snap.Models) != 1 || snap.Models[0].ID != "gemini-4-neon" {
+		t.Fatalf("unexpected models: %+v", snap.Models)
+	}
+}

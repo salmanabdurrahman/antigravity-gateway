@@ -281,7 +281,7 @@ func ImportLocalSession(ctx context.Context, cfg *config.Config, store *Store) (
 		}
 	}
 
-	projectID, discErr := DiscoverProject(ctx, cfg, sess.APIKey)
+	projectID, tier, discErr := DiscoverProjectAndTier(ctx, cfg, sess.APIKey)
 	if discErr != nil || projectID == "" {
 		projectID = "rising-fact-p41fc" // Default fallback project
 	}
@@ -292,6 +292,7 @@ func ImportLocalSession(ctx context.Context, cfg *config.Config, store *Store) (
 		AccessToken:      sess.APIKey,
 		CredentialSource: CredentialSourceLocalDesktop,
 		ProjectID:        projectID,
+		Tier:             tier,
 		AddedAt:          now,
 	}
 

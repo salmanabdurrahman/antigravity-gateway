@@ -84,6 +84,9 @@ type Rotator struct {
 
 	// maxWait is the maximum cooldown wait duration agw will absorb before failing.
 	maxWait time.Duration
+
+	// cooldown is the base 429 backoff applied when upstream omits an explicit retry delay.
+	cooldown time.Duration
 }
 
 // NewRotator creates a configured Rotator coordinating accounts from the provided pool.
@@ -107,15 +110,23 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 		pool.SetHealthTracker(picker.HealthTracker())
 	}
 
+	maxWait := config.DefaultConfig().MaxWaitDuration()
+	cooldown := config.DefaultConfig().CooldownDuration()
+	if cfg != nil {
+		maxWait = cfg.MaxWaitDuration()
+		cooldown = cfg.CooldownDuration()
+	}
+
 	return &Rotator{
-		pool:    pool,
-		picker:  picker,
-		cfg:     cfg,
-		client:  config.DefaultHTTPClient(0), // Stream requests can be long-running
-		logger:  logger,
-		nowFn:   nowFn,
-		sleepFn: defaultSleep,
-		maxWait: MaxWaitDuration,
+		pool:     pool,
+		picker:   picker,
+		cfg:      cfg,
+		client:   config.DefaultHTTPClient(0), // Stream requests can be long-running
+		logger:   logger,
+		nowFn:    nowFn,
+		sleepFn:  defaultSleep,
+		maxWait:  maxWait,
+		cooldown: cooldown,
 	}
 }
 
@@ -136,6 +147,35 @@ func (r *Rotator) SetMaxWait(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.maxWait = d
+}
+
+// progressiveCooldown returns the backoff for the given consecutive rate-limit streak.
+// Google does not always include RetryInfo, so repeated 429 responses escalate
+// 60s -> 5m -> 30m -> 2h instead of hammering the endpoint every minute.
+func (r *Rotator) progressiveCooldown(streak int64) time.Duration {
+	r.mu.RLock()
+	base := r.cooldown
+	r.mu.RUnlock()
+	if base <= 0 {
+		base = DefaultCooldownDuration
+	}
+
+	multipliers := []time.Duration{1, 5, 30, 120}
+	tier := min(max(streak, 1), int64(len(multipliers))) - 1
+	return base * multipliers[tier]
+}
+
+// refundToken returns a hybrid token-bucket token consumed during account selection. Sticky and
+// round-robin strategies never consume a token, so refunding unconditionally would inflate their
+// buckets beyond capacity.
+func (r *Rotator) refundToken(state *AccountState, charged bool) {
+	if state == nil || !charged {
+		return
+	}
+	if r.Strategy() != StrategyHybrid {
+		return
+	}
+	state.TokenBucket().Refund()
 }
 
 // SetHTTPClient configures a custom HTTP client (useful for unit testing with httptest).
@@ -240,6 +280,59 @@ func (r *Rotator) WithAccount(ctx context.Context, fn func(ctx context.Context, 
 	}
 }
 
+// ForEachAccount executes fn against every usable account, collecting errors instead of stopping at
+// the first success. Catalog refresh uses it to aggregate per-account quotas; callers that only need
+// one account should keep using WithAccount.
+func (r *Rotator) ForEachAccount(ctx context.Context, fn func(ctx context.Context, token string, state *AccountState) error) error {
+	if r == nil {
+		return errors.New("rotator is nil")
+	}
+	if err := r.pool.RefreshIfChanged(); err != nil {
+		r.logger.Warn("failed checking accounts file reload", "error", err)
+	}
+
+	states := slices.DeleteFunc(slices.Clone(r.pool.States()), func(s *AccountState) bool {
+		return !s.Usable()
+	})
+	if len(states) == 0 {
+		return &RotatorError{
+			StatusCode:   http.StatusServiceUnavailable,
+			ErrorMessage: "No usable Google accounts. Run: agw login",
+		}
+	}
+
+	var errs []error
+	executed := 0
+	for _, s := range states {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		token, err := s.Token(ctx, r.cfg, r.nowFn)
+		if err != nil {
+			var oauthErr *auth.OAuthError
+			if errors.As(err, &oauthErr) && oauthErr.InvalidGrant {
+				_ = r.pool.DisableAccount(s.Email(), "refresh token revoked")
+			}
+			errs = append(errs, fmt.Errorf("account %s token refresh: %w", s.Email(), err))
+			continue
+		}
+
+		executed++
+		if err := fn(ctx, token, s); err != nil {
+			errs = append(errs, fmt.Errorf("account %s: %w", s.Email(), err))
+		}
+	}
+
+	if executed == 0 && len(errs) == 0 {
+		return &RotatorError{
+			StatusCode:   http.StatusServiceUnavailable,
+			ErrorMessage: "No usable Google account could execute the operation",
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Generate dispatches a request to Google Cloud Code Assist, automatically handling rate limits,
 // token refresh, cooldowns, and seamless account rotation.
 func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPayloadBuilder) (*AttemptResult, error) {
@@ -273,9 +366,14 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 	maxWait := r.maxWait
 	r.mu.RUnlock()
 
+	// maxAttempts bounds upstream dispatches only. Absorbing a cooldown wait must not consume the
+	// dispatch budget, otherwise a single-account pool can sleep through its final iteration and
+	// exit without ever retrying after the cooldown expired.
 	maxAttempts := len(states)*2 + 2
+	dispatches := 0
 
-	for attempt := range maxAttempts {
+rotation:
+	for dispatches < maxAttempts {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -306,14 +404,17 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			continue
 		}
 
+		dispatches++
+		tokenCharged := pick.TokenConsumed
 		s := pick.State
 		token, err := s.Token(ctx, r.cfg, r.nowFn)
 		if err != nil {
+			r.refundToken(s, tokenCharged)
 			var oauthErr *auth.OAuthError
 			if errors.As(err, &oauthErr) && oauthErr.InvalidGrant {
 				_ = r.pool.DisableAccount(s.Email(), "refresh token revoked")
 			} else {
-				s.SetCooldown("*", now.Add(DefaultCooldownDuration), err.Error())
+				s.SetCooldown("*", now.Add(r.progressiveCooldown(1)), err.Error())
 			}
 			skip[s] = struct{}{}
 			lastRotErr = &RotatorError{
@@ -325,22 +426,24 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 
 		payload, err := builder(s)
 		if err != nil {
+			r.refundToken(s, tokenCharged)
 			return nil, fmt.Errorf("building request payload for account %s: %w", s.Email(), err)
 		}
 
 		bodyBytes, err := json.Marshal(payload)
 		if err != nil {
+			r.refundToken(s, tokenCharged)
 			return nil, fmt.Errorf("marshaling request payload: %w", err)
 		}
 
-		resp, err := r.post(ctx, model, token, bodyBytes)
+		resp, err := r.post(ctx, model, s.Tier(), token, bodyBytes)
 		s.requests.Add(1)
 
 		if err != nil {
 			r.logger.Warn("Upstream network call failed", "account", s.Email(), "error", err)
 			serverErrors++
 			r.picker.HealthTracker().RecordFailure(s.Email())
-			s.TokenBucket().Refund()
+			r.refundToken(s, tokenCharged)
 			skip[s] = struct{}{}
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusBadGateway,
@@ -349,12 +452,16 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			if serverErrors >= 3 {
 				break
 			}
-			_ = r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond)
+			if err := r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
 		// Success!
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			s.ResetRateLimitStreak()
+			s.ResetQuotaFraction(model)
 			r.picker.HealthTracker().RecordSuccess(s.Email())
 			return &AttemptResult{Response: resp, State: s}, nil
 		}
@@ -371,7 +478,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 		case FailurePromptRejection:
 			// Request-scoped rejection: the prompt triggered upstream content filtering, so the
 			// account stays healthy and must not receive a pooled cooldown.
-			s.TokenBucket().Refund()
+			r.refundToken(s, tokenCharged)
 			r.logger.Warn("Prompt rejected by upstream without quota metadata", "account", s.Email(), "model", model)
 			return nil, &RotatorError{
 				StatusCode:     http.StatusBadRequest,
@@ -380,11 +487,14 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			}
 
 		case FailureRateLimit:
+			r.refundToken(s, tokenCharged)
 			r.picker.HealthTracker().RecordRateLimit(s.Email())
 			s.rateLimits.Add(1)
+			// A confirmed quota rejection means this model currently has no remaining allowance.
+			s.SetQuotaFraction(model, 0)
 			delay, ok := ParseRetryDelay(errBody, resp.Header, r.nowFn())
 			if !ok {
-				delay = DefaultCooldownDuration
+				delay = r.progressiveCooldown(s.NextRateLimitStreak())
 			}
 			s.SetCooldown(model, r.nowFn().Add(delay), fmt.Sprintf("HTTP 429: %s", errMsg))
 			lastRotErr = &RotatorError{
@@ -395,6 +505,7 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			r.logger.Warn("Account rate limited (429)", "account", s.Email(), "model", model, "cooldown", delay)
 
 		case FailureAuth:
+			r.refundToken(s, tokenCharged)
 			if _, alreadyRetried := retried401[s]; !alreadyRetried {
 				retried401[s] = struct{}{}
 				s.ClearAccessToken()
@@ -411,17 +522,31 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 
 		case FailureForbidden:
 			r.picker.HealthTracker().RecordFailure(s.Email())
-			s.TokenBucket().Refund()
+			r.refundToken(s, tokenCharged)
+			skip[s] = struct{}{}
+			if IsPermanentForbidden(errBody) {
+				// Terms-of-service bans are permanent: cooling the account for 30 minutes only cycles it
+				// back into rotation. Persist the disabled state with the upstream reason instead.
+				reason := fmt.Sprintf("HTTP 403 permanent suspension: %s", errMsg)
+				if disableErr := r.pool.DisableAccount(s.Email(), reason); disableErr != nil {
+					r.logger.Warn("failed persisting permanent account suspension", "account", s.Email(), "error", disableErr)
+				}
+				lastRotErr = &RotatorError{
+					StatusCode:   http.StatusForbidden,
+					ErrorMessage: fmt.Sprintf("Google permanently disabled %s: %s", s.Email(), errMsg),
+				}
+				r.logger.Warn("Account permanently disabled by upstream", "account", s.Email(), "error", errMsg)
+				continue
+			}
 			s.SetCooldown("*", r.nowFn().Add(ForbiddenCooldownDuration), fmt.Sprintf("HTTP 403: %s", errMsg))
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusForbidden,
 				ErrorMessage: fmt.Sprintf("Google forbidden %s: %s", s.Email(), errMsg),
 			}
-			skip[s] = struct{}{}
 
 		case FailureServer:
 			r.picker.HealthTracker().RecordFailure(s.Email())
-			s.TokenBucket().Refund()
+			r.refundToken(s, tokenCharged)
 			serverErrors++
 			lastRotErr = &RotatorError{
 				StatusCode:   http.StatusBadGateway,
@@ -430,25 +555,31 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 			// On persistent server error, skip current account and fall back to next account
 			skip[s] = struct{}{}
 			if serverErrors >= 3 {
-				break
+				break rotation
 			}
-			_ = r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond)
+			if err := r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond); err != nil {
+				return nil, err
+			}
 
 		case FailureBadRequest:
 			// Malformed payloads fail identically on all accounts. Terminal error; do not rotate.
+			r.refundToken(s, tokenCharged)
 			return nil, &RotatorError{
 				StatusCode:   http.StatusBadRequest,
 				ErrorMessage: errMsg,
 			}
 
 		default:
+			r.refundToken(s, tokenCharged)
 			return nil, &RotatorError{
 				StatusCode:   resp.StatusCode,
 				ErrorMessage: errMsg,
 			}
 		}
+	}
 
-		_ = attempt // continue rotation
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// If no account could serve the model, compute soonest wait time for Retry-After header
@@ -477,11 +608,12 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 	}
 }
 
-// post dispatches an HTTP POST request to Google Cloud Code Assist, cycling through configured endpoints on 5xx errors.
-func (r *Rotator) post(ctx context.Context, model, token string, body []byte) (*http.Response, error) {
+// post dispatches an HTTP POST request to Google Cloud Code Assist, cycling through endpoints ordered
+// for the account tier and falling back on 5xx, 403, and 404 responses.
+func (r *Rotator) post(ctx context.Context, model, tier, token string, body []byte) (*http.Response, error) {
 	endpoints := config.DefaultEndpoints()
-	if r.cfg != nil && len(r.cfg.Endpoints) > 0 {
-		endpoints = r.cfg.Endpoints
+	if r.cfg != nil {
+		endpoints = r.cfg.EndpointsForTier(tier)
 	}
 
 	var lastErr error

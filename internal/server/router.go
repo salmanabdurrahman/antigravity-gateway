@@ -367,7 +367,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the system instruction moved into the first user turn. The extra loop iteration keeps the
 	// retry independent from the empty-stream retry budget.
 	promptFallback := false
-	for attempt := range EmptyStreamRetries + 2 {
+	for attempt := range s.emptyStreamRetryCount() + 2 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
@@ -486,7 +486,7 @@ func (s *Server) processCompletionsResponse(
 			return nil
 		})
 
-		if !translator.SawOutput() && !started && attempt < EmptyStreamRetries {
+		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
 			return false, true
 		}
@@ -579,7 +579,7 @@ func (s *Server) processCompletionsResponse(
 		return nil
 	})
 
-	if !translator.SawOutput() && attempt < EmptyStreamRetries {
+	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
 		return false, true
 	}
@@ -631,7 +631,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
 	// the system instruction moved into the first user turn before the error is surfaced.
 	promptFallback := false
-	for attempt := range EmptyStreamRetries + 2 {
+	for attempt := range s.emptyStreamRetryCount() + 2 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
@@ -720,7 +720,7 @@ func (s *Server) processAnthropicResponse(
 			return nil
 		})
 
-		if !translator.SawOutput() && !started && attempt < EmptyStreamRetries {
+		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
 			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
 			return false, true
 		}
@@ -755,7 +755,7 @@ func (s *Server) processAnthropicResponse(
 		return nil
 	})
 
-	if !translator.SawOutput() && attempt < EmptyStreamRetries {
+	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
 		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
 		return false, true
 	}

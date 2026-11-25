@@ -112,6 +112,51 @@ func DefaultTierID(data map[string]any) string {
 	return "free-tier"
 }
 
+// TierFromLoadCodeAssist extracts and normalizes the subscription tier reported by
+// `v1internal:loadCodeAssist`. Google returns tier metadata in `currentTier`, `paidTier`, or the
+// `allowedTiers` collection, and the identifiers vary between consumer and Workspace products, so
+// every label is normalized through config.NormalizeAccountTier instead of matched verbatim.
+func TierFromLoadCodeAssist(data map[string]any) string {
+	if data == nil {
+		return ""
+	}
+
+	// Paid tier metadata wins over currentTier: entitled Workspace/Enterprise accounts can report a
+	// consumer-looking currentTier alongside a paidTier that carries the real endpoint entitlement.
+	for _, key := range []string{"paidTier", "currentTier"} {
+		if tierMap, ok := data[key].(map[string]any); ok {
+			if tier := config.NormalizeAccountTier(strings.Join(tierLabels(tierMap), " ")); tier != "" {
+				return tier
+			}
+		}
+	}
+
+	if tiers, ok := data["allowedTiers"].([]any); ok {
+		for _, item := range tiers {
+			tierMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if tier := config.NormalizeAccountTier(strings.Join(tierLabels(tierMap), " ")); tier != "" {
+				return tier
+			}
+		}
+	}
+
+	return ""
+}
+
+// tierLabels collects the identifier and display-name fields that may describe a subscription tier.
+func tierLabels(tierMap map[string]any) []string {
+	labels := make([]string, 0, 3)
+	for _, key := range []string{"id", "tierId", "name", "displayName"} {
+		if label, ok := tierMap[key].(string); ok && strings.TrimSpace(label) != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
 // DiscoverProject finds the Cloud Code companion project bound to the account.
 //
 // Protocol Quirk: Google Cloud Code Assist requires every API request to specify a companion
@@ -121,6 +166,13 @@ func DefaultTierID(data map[string]any) string {
 // found, it triggers `POST /v1internal:onboardUser` using the default subscription tier ID,
 // polling until the long-running onboarding operation returns `done: true` with the assigned project ID.
 func DiscoverProject(ctx context.Context, cfg *config.Config, accessToken string) (string, error) {
+	projectID, _, err := DiscoverProjectAndTier(ctx, cfg, accessToken)
+	return projectID, err
+}
+
+// DiscoverProjectAndTier resolves both the companion project and the normalized subscription tier
+// from the same loadCodeAssist round trip, avoiding a second upstream call during login.
+func DiscoverProjectAndTier(ctx context.Context, cfg *config.Config, accessToken string) (string, string, error) {
 	endpoints := config.DefaultEndpoints()
 	if cfg != nil && len(cfg.Endpoints) > 0 {
 		endpoints = cfg.Endpoints
@@ -129,6 +181,7 @@ func DiscoverProject(ctx context.Context, cfg *config.Config, accessToken string
 	headers := config.BuildUpstreamHeaders(cfg, accessToken, "")
 
 	var lastLoadData map[string]any
+	tier := ""
 
 	// Step 1: Attempt to load existing Code Assist companion project across configured endpoints
 	for _, endpoint := range endpoints {
@@ -145,8 +198,9 @@ func DiscoverProject(ctx context.Context, cfg *config.Config, accessToken string
 		}
 
 		lastLoadData = respData
+		tier = cmp.Or(tier, TierFromLoadCodeAssist(respData))
 		if projectID := ExtractProjectID(respData); projectID != "" {
-			return projectID, nil
+			return projectID, tier, nil
 		}
 	}
 
@@ -168,7 +222,7 @@ func DiscoverProject(ctx context.Context, cfg *config.Config, accessToken string
 			if attempt > 0 {
 				select {
 				case <-ctx.Done():
-					return "", ctx.Err()
+					return "", tier, ctx.Err()
 				case <-time.After(2 * time.Second):
 				}
 			}
@@ -182,18 +236,18 @@ func DiscoverProject(ctx context.Context, cfg *config.Config, accessToken string
 				// The response field can be nested under "response"
 				if respMap, ok := respData["response"].(map[string]any); ok {
 					if projectID := ExtractProjectID(respMap); projectID != "" {
-						return projectID, nil
+						return projectID, tier, nil
 					}
 				}
 				if projectID := ExtractProjectID(respData); projectID != "" {
-					return projectID, nil
+					return projectID, tier, nil
 				}
 				break
 			}
 		}
 	}
 
-	return "", ErrNoCompanionProject
+	return "", tier, ErrNoCompanionProject
 }
 
 // postJSON is an internal helper that executes an HTTP POST request with a serialized JSON payload

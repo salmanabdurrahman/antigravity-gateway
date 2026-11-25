@@ -91,6 +91,29 @@ func ClassifyWithHeaders(status int, body string, headers http.Header) FailureKi
 	return FailureClient
 }
 
+// permanentForbiddenMarkers are upstream phrases that indicate a permanent terms-of-service
+// suspension instead of a transient project or region permission error.
+var permanentForbiddenMarkers = []string{
+	"has been disabled",
+	"violation of terms of service",
+	"terms of service violation",
+	"validation_required",
+	"permanently suspended",
+}
+
+// IsPermanentForbidden reports whether an HTTP 403 body describes a permanent account suspension.
+// Matching is intentionally narrow: only the explicit markers above qualify, so recoverable project
+// permission errors keep the transient cooldown + endpoint/account failover path.
+func IsPermanentForbidden(body string) bool {
+	lower := strings.ToLower(body)
+	for _, marker := range permanentForbiddenMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // isBarePromptRejection reports whether a 429 / RESOURCE_EXHAUSTED response lacks every quota
 // signal: Retry-After header, error details[] array, retry delay, and quota reset timestamps.
 func isBarePromptRejection(body string, headers http.Header) bool {

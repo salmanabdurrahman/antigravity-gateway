@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,9 +22,20 @@ import (
 // CacheMaxAge defines the duration after which the cached model catalog is considered stale (15 minutes).
 const CacheMaxAge = 15 * time.Minute
 
+// BackgroundRefreshTimeout bounds one background refresh across every pooled account. Each upstream
+// request keeps its own DefaultFetchTimeout, so this only guards a hung multi-account loop.
+const BackgroundRefreshTimeout = 5 * time.Minute
+
 // AccountRunner defines the contract required to execute tasks using an available Google account.
 type AccountRunner interface {
 	WithAccount(ctx context.Context, fn func(ctx context.Context, token string, state *rotator.AccountState) error) error
+}
+
+// AccountIterator is an optional extension implemented by rotators that can execute work against
+// every usable account. Catalog refresh uses it to collect per-account quotas instead of stopping
+// after the first successful account.
+type AccountIterator interface {
+	ForEachAccount(ctx context.Context, fn func(ctx context.Context, token string, state *rotator.AccountState) error) error
 }
 
 // CachePayload defines the on-disk JSON envelope for cached model catalog data.
@@ -41,6 +51,9 @@ type CachePayload struct {
 
 	// DefaultModel records the upstream default model identifier.
 	DefaultModel string `json:"defaultModel,omitempty"`
+
+	// AccountQuota caches the separated rolling and weekly allowance windows.
+	AccountQuota *AccountQuotaSummary `json:"accountQuota,omitzero"`
 }
 
 // ModelCatalog coordinates in-memory model snapshots, atomic disk caching, and background refreshes.
@@ -142,6 +155,7 @@ func (c *ModelCatalog) LoadCache() error {
 		c.snapshot.Models = payload.Models
 		c.snapshot.Quotas = payload.Quotas
 		c.snapshot.DefaultModel = payload.DefaultModel
+		c.snapshot.AccountQuota = payload.AccountQuota
 		if payload.FetchedAt > 0 {
 			c.fetchedAt = time.UnixMilli(payload.FetchedAt)
 		}
@@ -165,6 +179,7 @@ func (c *ModelCatalog) SaveCache() error {
 		Models:       c.snapshot.Models,
 		Quotas:       c.snapshot.Quotas,
 		DefaultModel: c.snapshot.DefaultModel,
+		AccountQuota: c.snapshot.AccountQuota,
 	}
 
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -193,45 +208,205 @@ func (c *ModelCatalog) refreshLocked(ctx context.Context) error {
 		return errors.New("cannot refresh catalog: no account rotator configured")
 	}
 
-	var fetchedSnap *CatalogSnapshot
-	err := c.rotator.WithAccount(ctx, func(ctx context.Context, token string, state *rotator.AccountState) error {
-		c.mu.RLock()
-		cfg := c.cfg
-		client := c.httpClient
-		c.mu.RUnlock()
+	c.mu.RLock()
+	cfg := c.cfg
+	client := c.httpClient
+	c.mu.RUnlock()
 
-		snap, err := FetchCatalog(ctx, cfg, client, token, state.ProjectID())
+	merged := &CatalogSnapshot{
+		Models: make([]CatalogModel, 0),
+		Quotas: make(map[string]ModelQuota),
+	}
+	accounts := 0
+	var lastErr error
+
+	fetch := func(ctx context.Context, token string, state *rotator.AccountState) error {
+		tier := ""
+		projectID := ""
+		if state != nil {
+			tier = state.Tier()
+			projectID = state.ProjectID()
+		}
+
+		snap, err := FetchCatalogForTier(ctx, cfg, client, token, projectID, tier)
 		if err != nil {
 			return err
 		}
-		fetchedSnap = snap
-		if state != nil && len(snap.Quotas) > 0 {
-			for modelID, q := range snap.Quotas {
-				if q.RemainingFraction != nil {
-					state.SetQuotaFraction(modelID, *q.RemainingFraction)
+		if snap == nil || len(snap.Models) == 0 {
+			return errors.New("upstream returned an empty model catalog")
+		}
+
+		if state != nil {
+			// Per-account quota state feeds hybrid scoring; every usable account must be refreshed,
+			// not only the first account that answers.
+			for modelID, quota := range snap.Quotas {
+				if quota.RemainingFraction != nil {
+					state.SetQuotaFraction(modelID, *quota.RemainingFraction)
 				}
 			}
 		}
-		return nil
-	})
 
-	if err != nil {
-		return fmt.Errorf("refreshing catalog via rotator: %w", err)
+		// Weekly windows are fetched separately because the model catalog does not always embed them.
+		if summary, summaryErr := FetchAccountQuotaSummary(ctx, cfg, client, token, projectID, tier); summaryErr != nil {
+			c.logger.Debug("account quota summary unavailable", "account", stateEmail(state), "error", summaryErr)
+		} else {
+			snap.AccountQuota = MergeQuotaSummary(snap.AccountQuota, summary)
+			if state != nil && summary != nil && summary.FiveHour != nil && summary.FiveHour.RemainingFraction != nil {
+				state.SetQuotaFraction("*", *summary.FiveHour.RemainingFraction)
+			}
+		}
+
+		mergeCatalogSnapshot(merged, snap)
+		accounts++
+		return nil
 	}
 
-	if fetchedSnap != nil && len(fetchedSnap.Models) > 0 {
-		c.mu.Lock()
-		c.snapshot = *fetchedSnap
-		c.fetchedAt = now
-		c.rebuildIndexLocked()
-		c.mu.Unlock()
-
-		if saveErr := c.SaveCache(); saveErr != nil {
-			c.logger.Warn("failed persisting refreshed model catalog to disk", "error", saveErr)
+	if iterator, ok := c.rotator.(AccountIterator); ok {
+		err := iterator.ForEachAccount(ctx, fetch)
+		if err != nil {
+			lastErr = err
+		}
+	} else {
+		err := c.rotator.WithAccount(ctx, fetch)
+		if err != nil {
+			lastErr = err
 		}
 	}
 
+	// A canceled or timed-out refresh must never be persisted as fresh: a partial catalog would hide
+	// whole model families for CacheMaxAge, and accounts later in the pool would keep stale quotas.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if accounts == 0 {
+		if lastErr != nil {
+			return fmt.Errorf("refreshing catalog via rotator: %w", lastErr)
+		}
+		return errors.New("refreshing catalog via rotator: no account produced a catalog")
+	}
+	if lastErr != nil {
+		c.logger.Warn("some accounts failed to refresh catalog; using partial results", "error", lastErr, "accounts", accounts)
+	}
+
+	merged.DefaultModel = resolveMergedDefaultModel(merged)
+
+	c.mu.Lock()
+	c.snapshot = *merged
+	c.fetchedAt = now
+	c.rebuildIndexLocked()
+	c.mu.Unlock()
+
+	if saveErr := c.SaveCache(); saveErr != nil {
+		c.logger.Warn("failed persisting refreshed model catalog to disk", "error", saveErr)
+	}
+
 	return nil
+}
+
+// stateEmail returns the account email for diagnostics without failing on a nil state.
+func stateEmail(state *rotator.AccountState) string {
+	if state == nil {
+		return ""
+	}
+	return state.Email()
+}
+
+// mergeCatalogSnapshot merges one account's catalog into the aggregate snapshot. Models are unioned
+// by identifier and quotas keep the most permissive fraction, so one depleted Free account never
+// hides a higher-tier model or throttles a sibling account's available capacity.
+func mergeCatalogSnapshot(dst *CatalogSnapshot, src *CatalogSnapshot) {
+	if src == nil {
+		return
+	}
+	if dst.Quotas == nil {
+		dst.Quotas = make(map[string]ModelQuota)
+	}
+	if src.DefaultModel != "" && dst.DefaultModel == "" {
+		dst.DefaultModel = src.DefaultModel
+	}
+
+	index := make(map[string]int, len(dst.Models))
+	for i, model := range dst.Models {
+		index[strings.ToLower(model.ID)] = i
+	}
+
+	for _, model := range src.Models {
+		key := strings.ToLower(model.ID)
+		if position, ok := index[key]; ok {
+			existing := &dst.Models[position]
+			existing.ContextWindow = max(existing.ContextWindow, model.ContextWindow)
+			existing.MaxOutputTokens = max(existing.MaxOutputTokens, model.MaxOutputTokens)
+			existing.Thinking = existing.Thinking || model.Thinking
+			existing.Images = existing.Images || model.Images
+			if existing.DisplayName == "" {
+				existing.DisplayName = model.DisplayName
+			}
+			if existing.ThinkingBudget == nil {
+				existing.ThinkingBudget = model.ThinkingBudget
+			}
+			if existing.MinThinkingBudget == nil {
+				existing.MinThinkingBudget = model.MinThinkingBudget
+			}
+			continue
+		}
+		index[key] = len(dst.Models)
+		dst.Models = append(dst.Models, model)
+	}
+
+	for modelID, quota := range src.Quotas {
+		key := strings.ToLower(modelID)
+		if existing, ok := dst.Quotas[key]; ok {
+			dst.Quotas[key] = mergeModelQuota(existing, quota)
+			continue
+		}
+		dst.Quotas[key] = quota
+	}
+
+	dst.AccountQuota = MergeQuotaSummary(dst.AccountQuota, src.AccountQuota)
+
+	slices.SortFunc(dst.Models, func(a, b CatalogModel) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+}
+
+// mergeModelQuota combines two per-model quotas, keeping the most permissive remaining fraction.
+func mergeModelQuota(current ModelQuota, candidate ModelQuota) ModelQuota {
+	merged := current
+	if candidate.RemainingFraction != nil && (merged.RemainingFraction == nil || *candidate.RemainingFraction > *merged.RemainingFraction) {
+		merged.RemainingFraction = candidate.RemainingFraction
+		if candidate.ResetTime != "" {
+			merged.ResetTime = candidate.ResetTime
+		}
+	} else if merged.ResetTime == "" && candidate.ResetTime != "" {
+		merged.ResetTime = candidate.ResetTime
+	}
+
+	if candidate.Weekly != nil {
+		if merged.Weekly == nil {
+			merged.Weekly = candidate.Weekly
+		} else if candidate.Weekly.RemainingFraction != nil &&
+			(merged.Weekly.RemainingFraction == nil || *candidate.Weekly.RemainingFraction > *merged.Weekly.RemainingFraction) {
+			merged.Weekly = candidate.Weekly
+		}
+	}
+
+	return merged
+}
+
+// resolveMergedDefaultModel picks a stable default model from the merged catalog.
+func resolveMergedDefaultModel(snapshot *CatalogSnapshot) string {
+	if snapshot == nil || len(snapshot.Models) == 0 {
+		return ""
+	}
+	if snapshot.DefaultModel != "" {
+		for _, model := range snapshot.Models {
+			if strings.EqualFold(model.ID, snapshot.DefaultModel) {
+				return model.ID
+			}
+		}
+	}
+	return snapshot.Models[0].ID
 }
 
 // rebuildIndexLocked populates the lowercase byID map. Caller must hold c.mu.
@@ -278,7 +453,7 @@ func (c *ModelCatalog) Ensure(ctx context.Context) error {
 		if c.refreshMu.TryLock() {
 			go func() {
 				defer c.refreshMu.Unlock()
-				refreshCtx, cancel := context.WithTimeout(context.Background(), DefaultFetchTimeout)
+				refreshCtx, cancel := context.WithTimeout(context.Background(), BackgroundRefreshTimeout)
 				defer cancel()
 				if err := c.refreshLocked(refreshCtx); err != nil {
 					c.logger.Warn("background catalog refresh failed", "error", err)
@@ -314,8 +489,9 @@ func (c *ModelCatalog) Snapshot() (CatalogSnapshot, time.Time) {
 
 	snap := CatalogSnapshot{
 		Models:       slices.Clone(c.snapshot.Models),
-		Quotas:       maps.Clone(c.snapshot.Quotas),
+		Quotas:       cloneModelQuotas(c.snapshot.Quotas),
 		DefaultModel: c.snapshot.DefaultModel,
+		AccountQuota: cloneQuotaWindowSummary(c.snapshot.AccountQuota),
 	}
 
 	return snap, c.fetchedAt

@@ -152,6 +152,15 @@ func (s *Server) config() *config.Config {
 	return s.cfg.Load()
 }
 
+// emptyStreamRetryCount returns the configured empty-stream retry budget, falling back to the
+// package default when no configuration is attached.
+func (s *Server) emptyStreamRetryCount() int {
+	if cfg := s.config(); cfg != nil {
+		return cfg.EmptyStreamRetryCount()
+	}
+	return EmptyStreamRetries
+}
+
 // setConfig applies mutate to a deep copy of the current configuration and publishes the result
 // atomically, so no handler can ever observe a partially mutated struct. The copy also keeps the
 // caller-owned configuration passed to NewServer untouched.

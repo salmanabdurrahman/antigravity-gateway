@@ -184,33 +184,8 @@ func loadAvailableModels(ctx context.Context, cfg *config.Config, baseURL string
 		}
 	}
 
-	// Third: provide default known chat models if offline and uninitialized
-	return []catalog.CatalogModel{
-		{
-			ID:              "gemini-3.1-pro-high",
-			DisplayName:     "Gemini 3.1 Pro High",
-			ContextWindow:   1048576,
-			MaxOutputTokens: 65536,
-			Thinking:        true,
-			Images:          true,
-		},
-		{
-			ID:              "gemini-3.8-flash-high",
-			DisplayName:     "Gemini 3.8 Flash High",
-			ContextWindow:   1048576,
-			MaxOutputTokens: 65536,
-			Thinking:        true,
-			Images:          true,
-		},
-		{
-			ID:              "claude-sonnet-4-5",
-			DisplayName:     "Claude Sonnet 4.5",
-			ContextWindow:   200000,
-			MaxOutputTokens: 8192,
-			Thinking:        true,
-			Images:          true,
-		},
-	}, nil
+	// Third: provide the bundled offline model manifest if uninitialized
+	return catalog.FallbackModels(), nil
 }
 
 // runSetupPi executes configuration injection and legacy cleanup for the Pi Coding Agent.

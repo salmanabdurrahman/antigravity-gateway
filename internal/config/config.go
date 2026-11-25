@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Version defines the current semantic version of the gateway application.
@@ -58,6 +59,44 @@ const (
 
 	// EnvClientSecret overrides ClientSecret from an environment variable for BYOC configurations.
 	EnvClientSecret = "AGW_CLIENT_SECRET"
+
+	// DefaultMaxWaitSeconds defines how long the rotator absorbs account cooldowns before failing a request.
+	DefaultMaxWaitSeconds = 20
+
+	// DefaultCooldownSeconds defines the base 429 cooldown applied when upstream omits an explicit retry delay.
+	DefaultCooldownSeconds = 60
+
+	// DefaultEmptyStreamRetries defines how many times an empty upstream stream is retried before failing.
+	DefaultEmptyStreamRetries = 2
+
+	// MaxWaitLimitSeconds caps cooldown absorption so a mis-typed config cannot block a request for hours.
+	MaxWaitLimitSeconds = 120
+
+	// CooldownLimitSeconds caps the base 429 cooldown at one hour.
+	CooldownLimitSeconds = 3600
+
+	// EmptyStreamRetryLimit caps empty-stream retries to avoid unbounded upstream amplification.
+	EmptyStreamRetryLimit = 5
+)
+
+// Account tier identifiers normalized from the upstream loadCodeAssist subscription metadata.
+const (
+	// TierPersonal covers free, Plus, and Pro consumer subscriptions that route through the daily endpoint.
+	TierPersonal = "personal"
+
+	// TierBusiness covers Google Workspace business subscriptions that route through the production endpoint.
+	TierBusiness = "business"
+
+	// TierEnterprise covers enterprise subscriptions that route through the production endpoint.
+	TierEnterprise = "enterprise"
+)
+
+var (
+	// dailyEndpointHost is the Google Cloud Code Assist daily quota endpoint used by consumer tiers.
+	dailyEndpointHost = "https://daily-cloudcode-pa.googleapis.com"
+
+	// productionEndpointHost is the Google Cloud Code Assist production endpoint used by paid tiers.
+	productionEndpointHost = "https://cloudcode-pa.googleapis.com"
 )
 
 // ErrInvalidAPIKey indicates that a gateway API key does not match the locally generated format
@@ -66,10 +105,64 @@ var ErrInvalidAPIKey = errors.New("gateway API key does not match the generated 
 
 // DefaultEndpoints returns the default ordered list of Google Cloud Code Assist upstream endpoints.
 func DefaultEndpoints() []string {
-	return []string{
-		"https://daily-cloudcode-pa.googleapis.com",
-		"https://cloudcode-pa.googleapis.com",
+	return []string{dailyEndpointHost, productionEndpointHost}
+}
+
+// NormalizeAccountTier converts free-form upstream subscription identifiers into a stable tier label.
+// Consumer identifiers (free, plus, pro, premium, personal) collapse to TierPersonal, while Workspace and
+// enterprise identifiers retain their distinction because endpoint ordering differs between them.
+func NormalizeAccountTier(raw string) string {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case lower == "":
+		return ""
+	case strings.Contains(lower, "enterprise"):
+		return TierEnterprise
+	case strings.Contains(lower, "business"), strings.Contains(lower, "workspace"):
+		return TierBusiness
+	case containsWord(lower, "personal"),
+		containsWord(lower, "free"),
+		containsWord(lower, "plus"),
+		containsWord(lower, "premium"),
+		containsWord(lower, "pro"):
+		return TierPersonal
+	default:
+		return ""
 	}
+}
+
+// containsWord reports whether lower contains token as a whole word, so identifiers such as
+// "production" or "product" are not mistaken for the "pro" consumer tier.
+func containsWord(lower, token string) bool {
+	fields := strings.FieldsFunc(lower, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
+	return slices.Contains(fields, token)
+}
+
+// IsPaidTier reports whether the tier should prefer the production Cloud Code endpoint.
+func IsPaidTier(tier string) bool {
+	return tier == TierBusiness || tier == TierEnterprise
+}
+
+// EndpointsForTier returns the configured endpoints ordered for the given account tier.
+// The standard default order is daily-first; business and enterprise accounts prefer the
+// production endpoint instead. Any operator-supplied endpoint list that differs from the standard
+// default order is returned untouched so explicit overrides always win.
+func (c *Config) EndpointsForTier(tier string) []string {
+	endpoints := DefaultEndpoints()
+	if c != nil && len(c.Endpoints) > 0 {
+		endpoints = c.Endpoints
+	}
+
+	if !slices.Equal(endpoints, DefaultEndpoints()) {
+		return slices.Clone(endpoints)
+	}
+
+	if IsPaidTier(tier) {
+		return []string{productionEndpointHost, dailyEndpointHost}
+	}
+	return []string{dailyEndpointHost, productionEndpointHost}
 }
 
 // Config represents runtime settings for the local daemon, rotation engine, and upstream integrations.
@@ -121,6 +214,41 @@ type Config struct {
 
 	// ModelMapping maps custom model alias names to backend model IDs (e.g. {"gemini-4-argon": "gemini-4-argon-high"}).
 	ModelMapping map[string]string `json:"model_mapping,omitempty"`
+
+	// MaxWaitSeconds caps how long the rotator absorbs account cooldowns before failing a request.
+	MaxWaitSeconds int `json:"max_wait_seconds,omitzero"`
+
+	// DefaultCooldownSeconds is the base cooldown applied on HTTP 429 without an explicit retry delay.
+	DefaultCooldownSeconds int `json:"default_cooldown_seconds,omitzero"`
+
+	// EmptyStreamRetries is how many times an empty upstream stream is retried before surfacing an error.
+	EmptyStreamRetries int `json:"empty_stream_retries,omitzero"`
+}
+
+// MaxWaitDuration returns the configured cooldown absorption limit as a duration.
+func (c *Config) MaxWaitDuration() time.Duration {
+	seconds := DefaultMaxWaitSeconds
+	if c != nil && c.MaxWaitSeconds > 0 {
+		seconds = min(c.MaxWaitSeconds, MaxWaitLimitSeconds)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// CooldownDuration returns the configured base 429 cooldown as a duration.
+func (c *Config) CooldownDuration() time.Duration {
+	seconds := DefaultCooldownSeconds
+	if c != nil && c.DefaultCooldownSeconds > 0 {
+		seconds = min(c.DefaultCooldownSeconds, CooldownLimitSeconds)
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// EmptyStreamRetryCount returns the configured empty-stream retry budget.
+func (c *Config) EmptyStreamRetryCount() int {
+	if c != nil && c.EmptyStreamRetries > 0 {
+		return min(c.EmptyStreamRetries, EmptyStreamRetryLimit)
+	}
+	return DefaultEmptyStreamRetries
 }
 
 // String returns a redacted representation of Config to avoid leaking secrets in logs and diagnostic outputs.
@@ -147,18 +275,21 @@ func (c *Config) String() string {
 // DefaultConfig instantiates a Config initialized with standard production defaults and fallback endpoints.
 func DefaultConfig() *Config {
 	return &Config{
-		Host:           DefaultHost,
-		Port:           DefaultPort,
-		Strategy:       DefaultStrategy,
-		ClientID:       cmp.Or(os.Getenv(EnvClientID), DefaultClientID),
-		ClientSecret:   cmp.Or(os.Getenv(EnvClientSecret), DefaultClientSecret),
-		AuthURL:        DefaultAuthURL,
-		TokenURL:       DefaultTokenURL,
-		UserInfoURL:    DefaultUserInfoURL,
-		RedirectURI:    DefaultRedirectURI,
-		Endpoints:      DefaultEndpoints(),
-		QuotaThreshold: 0.05,
-		ModelMapping:   make(map[string]string),
+		Host:                   DefaultHost,
+		Port:                   DefaultPort,
+		Strategy:               DefaultStrategy,
+		ClientID:               cmp.Or(os.Getenv(EnvClientID), DefaultClientID),
+		ClientSecret:           cmp.Or(os.Getenv(EnvClientSecret), DefaultClientSecret),
+		AuthURL:                DefaultAuthURL,
+		TokenURL:               DefaultTokenURL,
+		UserInfoURL:            DefaultUserInfoURL,
+		RedirectURI:            DefaultRedirectURI,
+		Endpoints:              DefaultEndpoints(),
+		QuotaThreshold:         0.05,
+		ModelMapping:           make(map[string]string),
+		MaxWaitSeconds:         DefaultMaxWaitSeconds,
+		DefaultCooldownSeconds: DefaultCooldownSeconds,
+		EmptyStreamRetries:     DefaultEmptyStreamRetries,
 	}
 }
 
@@ -235,6 +366,9 @@ func Load(path string) (*Config, error) {
 	if len(cfg.Endpoints) == 0 {
 		cfg.Endpoints = DefaultEndpoints()
 	}
+	cfg.MaxWaitSeconds = cmp.Or(cfg.MaxWaitSeconds, DefaultMaxWaitSeconds)
+	cfg.DefaultCooldownSeconds = cmp.Or(cfg.DefaultCooldownSeconds, DefaultCooldownSeconds)
+	cfg.EmptyStreamRetries = cmp.Or(cfg.EmptyStreamRetries, DefaultEmptyStreamRetries)
 	if cfg.APIKey == "" {
 		apiKey, keyErr := GenerateAPIKey()
 		if keyErr != nil {

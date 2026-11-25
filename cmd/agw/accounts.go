@@ -126,7 +126,7 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 					status = "Active"
 				}
 
-				snap, fetchErr := catalog.FetchCatalog(ctx, cfg, nil, tokenRes.AccessToken, acc.ProjectID)
+				snap, fetchErr := catalog.FetchCatalogForTier(ctx, cfg, nil, tokenRes.AccessToken, acc.ProjectID, acc.Tier)
 				if fetchErr != nil {
 					geminiQuota = "Error"
 					claudeQuota = "Error"

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "gemini-4-neon",
+    "displayName": "Gemini 4 Neon",
+    "contextWindow": 524288,
+    "maxOutputTokens": 65536,
+    "thinking": true,
+    "thinkingBudget": -1,
+    "images": true
+  },
+  {
+    "id": "gemini-4-carbon",
+    "displayName": "Gemini 4 Carbon",
+    "contextWindow": 1048576,
+    "maxOutputTokens": 65536,
+    "thinking": true,
+    "thinkingBudget": -1,
+    "images": true
+  },
+  {
+    "id": "gemini-4-hydrogen-sonar",
+    "displayName": "Gemini 4 Hydrogen",
+    "contextWindow": 1048576,
+    "maxOutputTokens": 65536,
+    "thinking": true,
+    "thinkingBudget": -1,
+    "images": true
+  },
+  {
+    "id": "claude-sonnet-5-5-high",
+    "displayName": "Claude Sonnet 5.5 (High)",
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000,
+    "thinking": true,
+    "thinkingBudget": 32768,
+    "images": true
+  },
+  {
+    "id": "claude-opus-5-5-high",
+    "displayName": "Claude Opus 5.5 (High)",
+    "contextWindow": 1000000,
+    "maxOutputTokens": 64000,
+    "thinking": true,
+    "thinkingBudget": 32768,
+    "images": true
+  }
+]

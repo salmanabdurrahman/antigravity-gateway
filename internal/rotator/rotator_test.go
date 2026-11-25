@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -469,5 +470,335 @@ func TestRotatorWithAccount(t *testing.T) {
 	}
 	if !executed {
 		t.Errorf("fn was not executed")
+	}
+}
+
+// TestRotatorWaitAbsorptionDoesNotExhaustAttempts verifies that absorbed cooldown waits are not
+// charged against the dispatch budget, so a pool of one account still retries after a wait that
+// lands on what used to be the final loop iteration.
+func TestRotatorWaitAbsorptionDoesNotExhaustAttempts(t *testing.T) {
+	ctx := t.Context()
+	var calls atomic.Int64
+
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		attempt := calls.Add(1)
+		if attempt <= 3 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"status": "RESOURCE_EXHAUSTED",
+					"details": []any{
+						map[string]any{
+							"@type":      "type.googleapis.com/google.rpc.RetryInfo",
+							"retryDelay": "0.05s",
+						},
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{newTestAccount("solo@example.com")})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+	r.SetMaxWait(2 * time.Second)
+
+	res, err := r.Generate(ctx, "gemini-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatalf("expected success after absorbed waits, got %v", err)
+	}
+	_ = res.Response.Body.Close()
+
+	if got := calls.Load(); got != 4 {
+		t.Errorf("expected 4 upstream calls, got %d", got)
+	}
+}
+
+// TestRotatorBackoffSleepCanceled verifies that context cancellation during a server-error backoff
+// sleep propagates instead of being discarded.
+func TestRotatorBackoffSleepCanceled(t *testing.T) {
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "boom"}})
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{newTestAccount("solo@example.com")})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+	r.SetSleepFn(func(ctx context.Context, d time.Duration) error {
+		return context.Canceled
+	})
+
+	_, err := r.Generate(t.Context(), "gemini-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled from backoff sleep, got %v", err)
+	}
+}
+
+// TestRotatorHybridTokenBucketRefund verifies that a hybrid selection token consumed before an
+// upstream 401 retry is refunded, keeping consume and refund balanced.
+func TestRotatorHybridTokenBucketRefund(t *testing.T) {
+	var calls atomic.Int64
+
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "unauthorized"}})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategyHybrid),
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	account := newTestAccount("hybrid@example.com")
+	pool.SetAccounts([]*auth.Account{account})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+
+	before := pool.States()[0].TokenBucket().Tokens(time.Now())
+	res, err := r.Generate(t.Context(), "gemini-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	_ = res.Response.Body.Close()
+
+	after := pool.States()[0].TokenBucket().Tokens(time.Now())
+	if after < before-1.5 || after > before-0.5 {
+		t.Errorf("expected exactly one consumed token, before=%.2f after=%.2f", before, after)
+	}
+}
+
+// TestRotatorPermanentForbiddenDisablesAccount verifies a terms-of-service 403 permanently disables
+// the account instead of applying a transient cooldown, while transient 403s still fail over.
+func TestRotatorPermanentForbiddenDisablesAccount(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantBanned bool
+	}{
+		{
+			name:       "permanent suspension",
+			body:       `{"error":{"message":"This account has been disabled for a violation of terms of service."}}`,
+			wantBanned: true,
+		},
+		{
+			name:       "validation required",
+			body:       `{"error":{"status":"VALIDATION_REQUIRED","message":"Verify your account to continue."}}`,
+			wantBanned: true,
+		},
+		{
+			name:       "transient project permission",
+			body:       `{"error":{"message":"Caller does not have permission for this project"}}`,
+			wantBanned: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+					return
+				}
+				var body struct {
+					Project string `json:"project"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if body.Project == "proj-banned@example.com" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(tc.body))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+			})
+			defer mockServer.close()
+
+			cfg := &config.Config{
+				TokenURL:  mockServer.server.URL + "/token",
+				Endpoints: []string{mockServer.server.URL},
+			}
+			pool, _ := rotator.NewPool(nil, cfg, time.Now)
+			pool.SetAccounts([]*auth.Account{
+				newTestAccount("banned@example.com"),
+				newTestAccount("healthy@example.com"),
+			})
+
+			r := rotator.NewRotator(pool, cfg, nil, time.Now)
+			r.SetHTTPClient(mockServer.server.Client())
+
+			res, err := r.Generate(t.Context(), "gemini-pro", func(s *rotator.AccountState) (any, error) {
+				return map[string]any{"project": s.ProjectID()}, nil
+			})
+			if err != nil {
+				t.Fatalf("expected failover to healthy account, got %v", err)
+			}
+			_ = res.Response.Body.Close()
+			if res.State.Email() != "healthy@example.com" {
+				t.Errorf("expected healthy account to serve, got %s", res.State.Email())
+			}
+
+			states := pool.States()
+			banned := states[0]
+			if tc.wantBanned {
+				if banned.Usable() {
+					t.Error("permanently banned account must be disabled")
+				}
+				if until := banned.CoolingUntil("*"); !until.IsZero() {
+					t.Errorf("permanently banned account must not receive a cooldown, got %v", until)
+				}
+			} else {
+				if !banned.Usable() {
+					t.Error("transient 403 must not disable the account")
+				}
+				if until := banned.CoolingUntil("*"); until.IsZero() {
+					t.Error("transient 403 must apply a cooldown")
+				}
+			}
+		})
+	}
+}
+
+// TestRotatorProgressiveCooldownWithoutRetryInfo verifies escalating backoff for repeated 429s that
+// carry no explicit retry metadata.
+func TestRotatorProgressiveCooldownWithoutRetryInfo(t *testing.T) {
+	baseTime := time.Now()
+	current := baseTime
+	var nowMu sync.Mutex
+
+	nowFn := func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return current
+	}
+	advance := func(d time.Duration) {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		current = current.Add(d)
+	}
+
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 7200})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "quota exceeded"}})
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, nowFn)
+	pool.SetAccounts([]*auth.Account{newTestAccount("progress@example.com")})
+
+	r := rotator.NewRotator(pool, cfg, nil, nowFn)
+	r.SetHTTPClient(mockServer.server.Client())
+
+	builder := func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"ok": true}, nil
+	}
+
+	wantCooldowns := []time.Duration{60 * time.Second, 5 * time.Minute, 30 * time.Minute}
+	for i, want := range wantCooldowns {
+		if _, err := r.Generate(t.Context(), "gemini-pro", builder); err == nil {
+			t.Fatalf("call %d: expected 429 error", i)
+		}
+		until := pool.States()[0].CoolingUntil("gemini-pro")
+		if got := until.Sub(nowFn()); got < want-2*time.Second || got > want+2*time.Second {
+			t.Errorf("call %d: cooldown = %v; want ~%v", i, got, want)
+		}
+		if got := pool.States()[0].QuotaFraction("gemini-pro"); got != 0 {
+			t.Errorf("call %d: quota fraction = %v; want 0 after confirmed 429", i, got)
+		}
+		advance(want + time.Second)
+	}
+}
+
+// TestRotatorSuccessClearsZeroQuotaFraction verifies a confirmed successful request clears a stale
+// zero quota fraction recorded during an earlier 429, so hybrid scoring can recover the account.
+func TestRotatorSuccessClearsZeroQuotaFraction(t *testing.T) {
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategyHybrid),
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+	pool, _ := rotator.NewPool(nil, cfg, time.Now)
+	pool.SetAccounts([]*auth.Account{newTestAccount("recover@example.com")})
+	pool.States()[0].SetQuotaFraction("gemini-pro", 0)
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+
+	res, err := r.Generate(t.Context(), "gemini-pro", func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+	_ = res.Response.Body.Close()
+
+	if got := pool.States()[0].QuotaFraction("gemini-pro"); got != 1.0 {
+		t.Errorf("quota fraction after success = %v; want 1.0", got)
 	}
 }

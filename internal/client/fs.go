@@ -265,13 +265,14 @@ func globToRegex(glob string) (*regexp.Regexp, error) {
 }
 
 // PreferredTestModels specifies the prioritized list of model names to test during verification.
+// Gemini 4 and Claude 5.5 identifiers come first because the legacy Gemini 3.8 and Claude 4.x
+// families are retired from fresh installs.
 var PreferredTestModels = []string{
-	"gemini-3.1-pro-high",
-	"gemini-3.8-flash-high",
-	"gemini-3.8-flash-medium",
-	"gemini-3.8-pro-high",
-	"claude-sonnet-4-5",
-	"claude-opus-4-5",
+	"gemini-4-neon",
+	"gemini-4-hydrogen-sonar",
+	"gemini-4-carbon",
+	"claude-sonnet-5-5-high",
+	"claude-opus-5-5-high",
 	"gpt-oss-120b-medium",
 }
 
