@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-26
+
+### Added
+
+- `agw quota` command for live rolling five-hour, weekly, and per-model quota inspection (`--models`, `--watch`, `--interval`, `--json`, `--re-enable`).
+- `agw status` command probing `/health` and authenticated `/v1/accounts` for daemon state, port-matched PID, active rotation strategy, cached catalog age, and per-account runtime metrics (`--port`, `--json`).
+- `agw config` command (`show`, `path`, `strategy`) to inspect redacted configuration values and update the persisted rotation strategy (`--json`).
+- Parallel bounded `agw accounts --check` inspection reporting rolling five-hour and weekly windows, `TIER` and `SOURCE` columns, relative reset countdowns, and `--json` output.
+- `agw models list --quota` and `--json` flags displaying cached quota remaining, cache age hints, and configured `model_mapping` aliases.
+- `agw stop --port <n>` for port-scoped daemon shutdown, `--experimental-mcp` opt-out flag on `agw setup claude`, and Cobra `Examples:` with next-step hints across commands.
+
+### Changed
+
+- Removed the embedded WebUI dashboard (`internal/server/webui`), `agw ui` command, `/ui*` routes, HTML root redirect, and `docs/webui.md` to focus strictly on the CLI and authenticated `/v1/*` APIs.
+- Included the daemon's active `strategy` in `GET /v1/accounts` responses.
+- Dynamic Sonnet, Opus, and Haiku model selection in `agw setup claude` using numeric version and effort ranking instead of a hardcoded Opus identifier.
+- Restructured `README.md` into focused guides under `docs/` (`cli.md`, `api.md`, `configuration.md`, `architecture.md`) and added unofficial-tool and public OAuth client disclosures.
+
+### Fixed
+
+- Applied the 1024-token numeric reasoning floor to `gpt-oss` models under tight explicit `max_tokens` caps.
+- Resolved the OAuth callback port from `redirect_uri` in `agw doctor` and surfaced warnings for malformed URIs instead of hardcoding port `51121`.
+- Reused pooled `sync.OnceValue` HTTP transports in `config.DefaultHTTPClient` across standard and `AGW_PREFER_IPV4=1` modes to avoid per-call connection pool churn.
+- Preserved an unrelated primary daemon's `agw.pid` when stopping a custom port via `agw stop --port` and when `agw status --port` probes a separate instance.
+
+### Security
+
+- Restricted unauthenticated loopback endpoints strictly to `/` and `/health` by removing all `/ui` and `/ui/api/*` routes and same-origin mutation surfaces.
+- Enforced secret redaction for gateway API keys and OAuth client secrets across `agw config show` and `agw config show --json`.
+
 ## [0.2.1] - 2026-11-25
 
 ### Fixed
@@ -157,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
 - Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
-[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.0...v0.1.1
