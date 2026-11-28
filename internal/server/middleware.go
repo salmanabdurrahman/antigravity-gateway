@@ -24,6 +24,10 @@ type APIError struct {
 
 	// Code holds the numerical HTTP status code.
 	Code int `json:"code"`
+
+	// AppealURL carries the validated upstream appeal link for a terminal account suspension, omitted
+	// for every other error so existing clients see an unchanged payload.
+	AppealURL string `json:"appeal_url,omitempty"`
 }
 
 // APIErrorResponse wraps APIError in the standard OpenAI error envelope.
@@ -201,33 +205,77 @@ func sendJSON(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-// sendJSONError formats and sends an OpenAI-compatible error JSON response.
-func sendJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration) {
-	errType := "invalid_request_error"
+// openAIErrorType maps an HTTP status code to the OpenAI-compatible error type label.
+func openAIErrorType(status int) string {
 	switch {
 	case status == http.StatusTooManyRequests:
-		errType = "rate_limit_error"
+		return "rate_limit_error"
 	case status == http.StatusUnauthorized:
-		errType = "authentication_error"
+		return "authentication_error"
 	case status == http.StatusForbidden:
-		errType = "permission_error"
+		return "permission_error"
 	case status >= http.StatusInternalServerError:
-		errType = "server_error"
+		return "server_error"
+	default:
+		return "invalid_request_error"
 	}
+}
 
-	if retryAfter > 0 {
-		seconds := int(retryAfter.Seconds())
-		if seconds <= 0 {
-			seconds = 1
-		}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+// anthropicErrorType maps an HTTP status code to the Anthropic-compatible error type label.
+func anthropicErrorType(status int) string {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case status == http.StatusUnauthorized:
+		return "authentication_error"
+	case status == http.StatusForbidden:
+		return "permission_error"
+	case status == http.StatusNotFound:
+		return "not_found_error"
+	case status >= http.StatusInternalServerError:
+		return "api_error"
+	default:
+		return "invalid_request_error"
 	}
+}
+
+// setRetryAfterHeader advertises the remaining backoff as whole seconds, never below one.
+func setRetryAfterHeader(w http.ResponseWriter, retryAfter time.Duration) {
+	if retryAfter <= 0 {
+		return
+	}
+	seconds := int(retryAfter.Seconds())
+	if seconds <= 0 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+}
+
+// sendJSONError formats and sends an OpenAI-compatible error JSON response.
+func sendJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration) {
+	setRetryAfterHeader(w, retryAfter)
 
 	sendJSON(w, status, APIErrorResponse{
 		Error: APIError{
 			Message: message,
-			Type:    errType,
+			Type:    openAIErrorType(status),
 			Code:    status,
+		},
+	})
+}
+
+// sendSuspensionJSONError sends an OpenAI-compatible error response for a terminal upstream account
+// suspension, carrying the validated appeal link so a client can tell the operator what to do next
+// instead of retrying a permanently refused account.
+func sendSuspensionJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration, appealURL string) {
+	setRetryAfterHeader(w, retryAfter)
+
+	sendJSON(w, status, APIErrorResponse{
+		Error: APIError{
+			Message:   message,
+			Type:      openAIErrorType(status),
+			Code:      status,
+			AppealURL: appealURL,
 		},
 	})
 }
@@ -239,6 +287,10 @@ type AnthropicError struct {
 
 	// Message is the descriptive error explanation.
 	Message string `json:"message"`
+
+	// AppealURL carries the validated upstream appeal link for a terminal account suspension, omitted
+	// for every other error.
+	AppealURL string `json:"appeal_url,omitempty"`
 }
 
 // AnthropicErrorResponse wraps the Anthropic error envelope.
@@ -252,33 +304,28 @@ type AnthropicErrorResponse struct {
 
 // sendAnthropicJSONError formats and sends an Anthropic-compatible error JSON response.
 func sendAnthropicJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration) {
-	errType := "invalid_request_error"
-	switch {
-	case status == http.StatusTooManyRequests:
-		errType = "rate_limit_error"
-	case status == http.StatusUnauthorized:
-		errType = "authentication_error"
-	case status == http.StatusForbidden:
-		errType = "permission_error"
-	case status == http.StatusNotFound:
-		errType = "not_found_error"
-	case status >= http.StatusInternalServerError:
-		errType = "api_error"
-	}
-
-	if retryAfter > 0 {
-		seconds := int(retryAfter.Seconds())
-		if seconds <= 0 {
-			seconds = 1
-		}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
-	}
+	setRetryAfterHeader(w, retryAfter)
 
 	sendJSON(w, status, AnthropicErrorResponse{
 		Type: "error",
 		Error: AnthropicError{
-			Type:    errType,
+			Type:    anthropicErrorType(status),
 			Message: message,
+		},
+	})
+}
+
+// sendAnthropicSuspensionJSONError sends an Anthropic-compatible error response for a terminal account
+// suspension, carrying the validated appeal link alongside the standard permission error.
+func sendAnthropicSuspensionJSONError(w http.ResponseWriter, status int, message string, retryAfter time.Duration, appealURL string) {
+	setRetryAfterHeader(w, retryAfter)
+
+	sendJSON(w, status, AnthropicErrorResponse{
+		Type: "error",
+		Error: AnthropicError{
+			Type:      anthropicErrorType(status),
+			Message:   message,
+			AppealURL: appealURL,
 		},
 	})
 }

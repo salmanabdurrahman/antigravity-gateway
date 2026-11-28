@@ -3,6 +3,7 @@ package rotator
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,10 @@ type RotatorError struct {
 	// than account quota exhaustion. Callers may retry once with the system instruction moved
 	// into the first user turn before surfacing the error.
 	PromptRejected bool
+
+	// Suspension carries the terminal upstream account-suspension verdict when the failure is one,
+	// including the validated appeal link. Callers surface it instead of applying generic cooldowns.
+	Suspension *Suspension
 }
 
 // Error formats the RotatorError into a descriptive error string.
@@ -87,6 +93,16 @@ type Rotator struct {
 
 	// cooldown is the base 429 backoff applied when upstream omits an explicit retry delay.
 	cooldown time.Duration
+
+	// suspendPause is how long all upstream dispatch stays paused after a terminal suspension verdict.
+	suspendPause time.Duration
+
+	// suspendUntil is the wall-clock end of the current protective pause, zero when none is armed.
+	suspendUntil time.Time
+
+	// lastSuspension remembers the verdict that armed the current pause so callers can surface the
+	// upstream appeal link instead of only a generic pause message.
+	lastSuspension *Suspension
 }
 
 // NewRotator creates a configured Rotator coordinating accounts from the provided pool.
@@ -112,21 +128,24 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 
 	maxWait := config.DefaultConfig().MaxWaitDuration()
 	cooldown := config.DefaultConfig().CooldownDuration()
+	suspendPause := config.DefaultConfig().SuspendPauseDuration()
 	if cfg != nil {
 		maxWait = cfg.MaxWaitDuration()
 		cooldown = cfg.CooldownDuration()
+		suspendPause = cfg.SuspendPauseDuration()
 	}
 
 	return &Rotator{
-		pool:     pool,
-		picker:   picker,
-		cfg:      cfg,
-		client:   config.DefaultHTTPClient(0), // Stream requests can be long-running
-		logger:   logger,
-		nowFn:    nowFn,
-		sleepFn:  defaultSleep,
-		maxWait:  maxWait,
-		cooldown: cooldown,
+		pool:         pool,
+		picker:       picker,
+		cfg:          cfg,
+		client:       config.DefaultHTTPClient(0), // Stream requests can be long-running
+		logger:       logger,
+		nowFn:        nowFn,
+		sleepFn:      defaultSleep,
+		maxWait:      maxWait,
+		cooldown:     cooldown,
+		suspendPause: suspendPause,
 	}
 }
 
@@ -147,6 +166,82 @@ func (r *Rotator) SetMaxWait(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.maxWait = d
+}
+
+// SetSuspendPause configures how long upstream dispatch stays paused after a terminal suspension
+// verdict. A zero duration disables the protective pause, so the pool fails over immediately.
+func (r *Rotator) SetSuspendPause(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.suspendPause = d
+}
+
+// suspensionPauseError reports the remaining protective pause after an upstream suspension verdict.
+// It returns nil when no pause is armed or it already expired, and clears expired state on the way out
+// so a long-running daemon does not carry a stale verdict forever. The common case takes only the read
+// lock because this check sits on the dispatch hot path of every request.
+func (r *Rotator) suspensionPauseError() *RotatorError {
+	r.mu.RLock()
+	until := r.suspendUntil
+	suspension := r.lastSuspension
+	r.mu.RUnlock()
+
+	if until.IsZero() {
+		return nil
+	}
+
+	remaining := until.Sub(r.nowFn())
+	if remaining <= 0 {
+		r.mu.Lock()
+		// Re-check under the write lock: a suspension may have re-armed the pause between the read and
+		// the upgrade, and clearing it here would drop a fresh verdict.
+		if r.suspendUntil.Equal(until) {
+			r.suspendUntil = time.Time{}
+			r.lastSuspension = nil
+		}
+		r.mu.Unlock()
+		return nil
+	}
+
+	return &RotatorError{
+		StatusCode:   http.StatusForbidden,
+		RetryAfter:   remaining,
+		ErrorMessage: suspensionPauseMessage(suspension, remaining),
+		Suspension:   suspension,
+	}
+}
+
+// armSuspensionPause starts the protective pause for pause after a suspension verdict, remembering the
+// verdict so every paused request carries the upstream appeal link.
+func (r *Rotator) armSuspensionPause(pause time.Duration, suspension *Suspension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.suspendUntil = r.nowFn().Add(pause)
+	r.lastSuspension = suspension
+}
+
+// suspensionPauseMessage formats the operator-facing explanation for a paused gateway.
+func suspensionPauseMessage(suspension *Suspension, remaining time.Duration) string {
+	message := fmt.Sprintf("Google suspended an account, so the gateway paused all upstream traffic for %s. Review the account before continuing.", remaining.Round(time.Second))
+	if suspension != nil && suspension.AppealURL != "" {
+		message = fmt.Sprintf("%s Appeal: %s", message, suspension.AppealURL)
+	}
+	return message
+}
+
+// suspensionError builds the terminal error returned when upstream suspends an account, carrying the
+// verdict so callers can surface the appeal link instead of a generic permission error.
+func suspensionError(email string, suspension *Suspension) *RotatorError {
+	detail := cmp.Or(strings.TrimSpace(suspension.Message), "no upstream detail")
+	message := fmt.Sprintf("Google suspended %s (%s): %s", email, suspension.Kind, detail)
+	if suspension.AppealURL != "" {
+		message = fmt.Sprintf("%s Appeal: %s", message, suspension.AppealURL)
+	}
+	return &RotatorError{
+		StatusCode:   http.StatusForbidden,
+		ErrorMessage: message,
+		Suspension:   suspension,
+	}
 }
 
 // progressiveCooldown returns the backoff for the given consecutive rate-limit streak.
@@ -347,6 +442,14 @@ func (r *Rotator) GenerateWithExclude(ctx context.Context, model string, exclude
 		r.logger.Warn("failed checking accounts file reload", "error", err)
 	}
 
+	// A protective pause armed by a previous suspension verdict stops every dispatch, including
+	// requests that would otherwise fail over to a sibling account: the enforcement wave that hit one
+	// credential is not request-scoped, and continuing to send traffic is what escalates a first
+	// suspension into a permanent one.
+	if pauseErr := r.suspensionPauseError(); pauseErr != nil {
+		return nil, pauseErr
+	}
+
 	states := r.pool.States()
 	hasUsable := false
 	for _, s := range states {
@@ -508,6 +611,34 @@ rotation:
 		_ = resp.Body.Close()
 		errBody := string(errBodyBytes)
 
+		// Terminal suspension verdict: Google refused the account itself, not the request. Cooling it for
+		// 30 minutes, retrying the same payload, or rotating to a sibling account only keeps sending
+		// traffic to an account Google has already refused, so the account leaves rotation and an
+		// optional protective pause stops the whole pool instead.
+		if suspension, ok := DetectSuspension(resp.StatusCode, errBody); ok {
+			r.refundToken(s, tokenCharged)
+			r.picker.HealthTracker().RecordFailure(s.Email())
+			skip[s] = struct{}{}
+			if suspendErr := r.pool.SuspendAccount(s.Email(), suspension); suspendErr != nil {
+				r.logger.Warn("failed persisting upstream account suspension", "account", s.Email(), "error", suspendErr)
+			}
+			r.logger.Warn("Upstream suspended account; removed from rotation",
+				"account", s.Email(),
+				"kind", suspension.Kind,
+				"appeal_url_present", suspension.AppealURL != "",
+			)
+			lastRotErr = suspensionError(s.Email(), suspension)
+
+			r.mu.RLock()
+			pause := r.suspendPause
+			r.mu.RUnlock()
+			if pause > 0 {
+				r.armSuspensionPause(pause, suspension)
+				break rotation
+			}
+			continue
+		}
+
 		kind := ClassifyWithHeaders(resp.StatusCode, errBody, resp.Header)
 		errMsg := ExtractErrorMessage(errBody)
 
@@ -565,20 +696,6 @@ rotation:
 			r.picker.HealthTracker().RecordFailure(s.Email())
 			r.refundToken(s, tokenCharged)
 			skip[s] = struct{}{}
-			if IsPermanentForbidden(errBody) {
-				// Terms-of-service bans are permanent: cooling the account for 30 minutes only cycles it
-				// back into rotation. Persist the disabled state with the upstream reason instead.
-				reason := fmt.Sprintf("HTTP 403 permanent suspension: %s", errMsg)
-				if disableErr := r.pool.DisableAccount(s.Email(), reason); disableErr != nil {
-					r.logger.Warn("failed persisting permanent account suspension", "account", s.Email(), "error", disableErr)
-				}
-				lastRotErr = &RotatorError{
-					StatusCode:   http.StatusForbidden,
-					ErrorMessage: fmt.Sprintf("Google permanently disabled %s: %s", s.Email(), errMsg),
-				}
-				r.logger.Warn("Account permanently disabled by upstream", "account", s.Email(), "error", errMsg)
-				continue
-			}
 			now := r.nowFn()
 			s.SetCooldown("*", now.Add(ForbiddenCooldownDuration), now, fmt.Sprintf("HTTP 403: %s", errMsg))
 			lastRotErr = &RotatorError{

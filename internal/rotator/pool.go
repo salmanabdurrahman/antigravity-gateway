@@ -2,6 +2,7 @@
 package rotator
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -573,6 +574,45 @@ func (p *Pool) DisableAccount(email, reason string) error {
 	if p.store != nil {
 		if err := p.store.SetDisabled(email, true, reason); err != nil {
 			return fmt.Errorf("persisting disabled status for %s: %w", email, err)
+		}
+	}
+	return nil
+}
+
+// SuspendAccount records a terminal upstream suspension verdict for an account: the account leaves
+// rotation immediately, and the verdict, its reason, and its validated appeal link are persisted so
+// an operator can act on it without re-contacting Google and a restart cannot resurrect the account.
+func (p *Pool) SuspendAccount(email string, suspension *Suspension) error {
+	if suspension == nil {
+		return fmt.Errorf("suspending account %s: nil suspension verdict", email)
+	}
+
+	reason := cmp.Or(strings.TrimSpace(suspension.Message), string(suspension.Kind))
+
+	p.mu.RLock()
+	var target *AccountState
+	for _, s := range p.states {
+		if strings.EqualFold(s.Email(), email) {
+			target = s
+			break
+		}
+	}
+	p.mu.RUnlock()
+
+	if target != nil {
+		target.mu.Lock()
+		target.account.Disabled = true
+		target.account.LastError = reason
+		target.account.SuspendKind = string(suspension.Kind)
+		target.account.SuspendReason = reason
+		target.account.AppealURL = suspension.AppealURL
+		target.lastError = reason
+		target.mu.Unlock()
+	}
+
+	if p.store != nil {
+		if err := p.store.SetSuspended(email, string(suspension.Kind), reason, suspension.AppealURL); err != nil {
+			return fmt.Errorf("persisting suspension for %s: %w", email, err)
 		}
 	}
 	return nil

@@ -63,13 +63,15 @@ agw accounts --check
 agw accounts --check --json
 ```
 
-| Flag          | Purpose                                                                                         |
-| :------------ | :---------------------------------------------------------------------------------------------- |
-| `--check`     | Query live upstream rolling (5h), weekly, Gemini/Claude family quotas, and reset countdowns.    |
-| `--re-enable` | Re-enable disabled accounts whose credentials still work (requires `--check`).                  |
-| `--json`      | Output redacted account metadata (and live quota details when combined with `--check`) as JSON. |
+| Flag          | Purpose                                                                                                                          |
+| :------------ | :------------------------------------------------------------------------------------------------------------------------------- |
+| `--check`     | Query live upstream rolling (5h), weekly, Gemini/Claude family quotas, and reset countdowns.                                     |
+| `--re-enable` | Re-enable disabled accounts (requires `--check`); for a suspended account it clears the stored verdict without probing upstream. |
+| `--json`      | Output redacted account metadata (and live quota details when combined with `--check`) as JSON.                                  |
 
 `--check` queries accounts concurrently in a bounded pool and never re-enables disabled accounts on its own: a disabled account whose credentials still work is reported as disabled with a hint, and clearing that state requires `--check --re-enable`. The only state the inspection records by itself is a revoked refresh token, which is marked disabled so later requests skip it until you log in again. The command exits non-zero when the configuration cannot be loaded, so broken configuration fails scripts instead of printing a status column.
+
+An account Google suspended for a terms violation shows `Suspended (<kind>)` instead of `Disabled (...)` and prints the upstream appeal link underneath the table. Suspended accounts receive **no** upstream traffic — no token refresh, catalog fetch, or quota probe — because probing a refused account is what escalates a first suspension into a permanent one. Reinstating stays explicit: after Google lifts the suspension, `agw accounts --check --re-enable` clears the local verdict without contacting upstream.
 
 ## 3. `agw quota`
 
@@ -111,7 +113,7 @@ agw status --json
 agw logout user@example.com
 ```
 
-Removes the account's credentials and project mapping from `~/.agw/accounts.json`.
+Removes the account's credentials and project mapping from `~/.agw/accounts.json`. When the account was suspended upstream, the command also prints the stored verdict, the validated appeal link, and the reminder to revoke third-party access at `https://myaccount.google.com/permissions` before signing in again — background traffic from a still-authorized integration can turn a lifted suspension into a permanent one.
 
 ## 6. `agw models`
 
@@ -150,6 +152,8 @@ agw config strategy hybrid
 | `agw config strategy [val]` | Print or persist `strategy` (`sticky`, `round-robin`, or `hybrid`).         |
 
 `--json` is supported across all `agw config` subcommands. Updating `strategy` rewrites only the `"strategy"` field in `config.json`; if a daemon is running, restart it (`agw stop && agw start -d`) for the new strategy to take effect.
+
+`agw config show` also reports the effective post-suspension protection window as `Suspension Pause`: the resolved number of seconds, or `disabled` when `disable_suspend_pause` is set. See the [Configuration Reference](configuration.md#5-account-rotation--failover) for the underlying keys.
 
 ## 8. `agw start`
 

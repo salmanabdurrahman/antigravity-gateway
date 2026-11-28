@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
@@ -36,16 +37,43 @@ func runLogout(cmd *cobra.Command, args []string) error {
 	}
 	accountStore := auth.NewStore(accPath)
 
-	removed, err := accountStore.Remove(email)
+	// Capture the stored verdict before removal: a suspended account needs remediation guidance the
+	// operator can still act on, and the record is gone once the account is deleted.
+	var removed *auth.Account
+	if accounts, loadErr := accountStore.Load(); loadErr == nil {
+		if idx := slices.IndexFunc(accounts, func(a *auth.Account) bool {
+			return strings.EqualFold(strings.TrimSpace(a.Email), email)
+		}); idx != -1 {
+			removed = accounts[idx]
+		}
+	}
+
+	wasRemoved, err := accountStore.Remove(email)
 	if err != nil {
 		return fmt.Errorf("removing account %s: %w", email, err)
 	}
 
-	if !removed {
+	if !wasRemoved {
 		cmd.Printf("Account not found: %s\n", email)
 		return nil
 	}
 
 	cmd.Printf("Successfully removed account: %s\n", email)
+	printSuspensionGuidance(cmd, removed)
 	return nil
+}
+
+// printSuspensionGuidance explains the remediation path for an account Google suspended before its
+// credentials were deleted. It exists so the operator revokes the third-party integration before
+// signing in again, instead of triggering a second and permanent suspension with background traffic.
+func printSuspensionGuidance(cmd *cobra.Command, acc *auth.Account) {
+	if acc == nil || !acc.Suspended() {
+		return
+	}
+
+	cmd.Printf("\nThis account was suspended upstream (%s).\n", acc.SuspendKind)
+	cmd.Println("Revoke third-party access at https://myaccount.google.com/permissions before signing in again.")
+	if acc.AppealURL != "" {
+		cmd.Printf("Appeal once: %s\n", acc.AppealURL)
+	}
 }

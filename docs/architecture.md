@@ -76,7 +76,7 @@ End-to-end measurements against live accounts (macOS arm64, `gemini-2.5-flash`):
 - **Zero dependencies**: only the Go standard library plus Cobra — no Node, Electron, or database engine to install or audit.
 - **Single-binary distribution**: cross-compiled archives for six platform/architecture targets with per-release checksums, plus an in-place updater that verifies digests before replacing the executable.
 - **Transactional client injection**: `agw setup` writes through atomic temp-file renames, keeps timestamped backups, and verifies connectivity with a 1-token completion before declaring success.
-- **Fail fast on policy**: permanent 403 suspensions disable the account with the upstream reason rather than retrying into the same wall, and 429 handling distinguishes prompt-scoped rejections from account-scoped throttles.
+- **Fail fast on policy**: a terminal suspension verdict (403 `TOS_VIOLATION`/`VALIDATION_REQUIRED` or 412 `FAILED_PRECONDITION`) retires the account with its upstream reason and validated appeal link, pauses the whole pool for `suspend_pause_seconds` instead of rotating into the same wall, and keeps every background path (token refresh, catalog refresh, quota checks) away from the refused account. 429 handling separately distinguishes prompt-scoped rejections from account-scoped throttles.
 
 ## 7. Related documents
 

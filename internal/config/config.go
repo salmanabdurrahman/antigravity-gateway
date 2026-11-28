@@ -69,6 +69,10 @@ const (
 	// DefaultEmptyStreamRetries defines how many times an empty upstream stream is retried before failing.
 	DefaultEmptyStreamRetries = 2
 
+	// DefaultSuspendPauseSeconds defines how long the rotator pauses all upstream dispatch after a
+	// terminal account-suspension verdict, so one enforcement hit cannot sweep the rest of the pool.
+	DefaultSuspendPauseSeconds = 900
+
 	// MaxWaitLimitSeconds caps cooldown absorption so a mis-typed config cannot block a request for hours.
 	MaxWaitLimitSeconds = 120
 
@@ -77,6 +81,9 @@ const (
 
 	// EmptyStreamRetryLimit caps empty-stream retries to avoid unbounded upstream amplification.
 	EmptyStreamRetryLimit = 5
+
+	// SuspendPauseLimitSeconds caps the post-suspension protection window at 24 hours.
+	SuspendPauseLimitSeconds = 86400
 )
 
 // Account tier identifiers normalized from the upstream loadCodeAssist subscription metadata.
@@ -223,6 +230,14 @@ type Config struct {
 
 	// EmptyStreamRetries is how many times an empty upstream stream is retried before surfacing an error.
 	EmptyStreamRetries int `json:"empty_stream_retries,omitzero"`
+
+	// SuspendPauseSeconds caps how long all upstream dispatch stays paused after a terminal
+	// account-suspension verdict. A zero or absent value uses the default window.
+	SuspendPauseSeconds int `json:"suspend_pause_seconds,omitzero"`
+
+	// DisableSuspendPause turns the post-suspension protection window off entirely, restoring the
+	// legacy behaviour of failing over to the next pooled account immediately.
+	DisableSuspendPause bool `json:"disable_suspend_pause,omitzero"`
 }
 
 // MaxWaitDuration returns the configured cooldown absorption limit as a duration.
@@ -249,6 +264,20 @@ func (c *Config) EmptyStreamRetryCount() int {
 		return min(c.EmptyStreamRetries, EmptyStreamRetryLimit)
 	}
 	return DefaultEmptyStreamRetries
+}
+
+// SuspendPauseDuration returns how long upstream dispatch stays paused after a terminal suspension
+// verdict. A negative or explicitly disabled configuration returns zero, meaning the pool fails over
+// to the next account immediately.
+func (c *Config) SuspendPauseDuration() time.Duration {
+	if c != nil && c.DisableSuspendPause {
+		return 0
+	}
+	seconds := DefaultSuspendPauseSeconds
+	if c != nil && c.SuspendPauseSeconds > 0 {
+		seconds = min(c.SuspendPauseSeconds, SuspendPauseLimitSeconds)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // String returns a redacted representation of Config to avoid leaking secrets in logs and diagnostic outputs.
@@ -290,6 +319,7 @@ func DefaultConfig() *Config {
 		MaxWaitSeconds:         DefaultMaxWaitSeconds,
 		DefaultCooldownSeconds: DefaultCooldownSeconds,
 		EmptyStreamRetries:     DefaultEmptyStreamRetries,
+		SuspendPauseSeconds:    DefaultSuspendPauseSeconds,
 	}
 }
 

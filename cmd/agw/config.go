@@ -107,6 +107,13 @@ type redactedConfigView struct {
 	// EmptyStreamRetries is the retry budget for empty upstream streams.
 	EmptyStreamRetries int `json:"empty_stream_retries"`
 
+	// SuspendPauseSeconds is the effective window that pauses all upstream dispatch after a terminal
+	// account-suspension verdict, zero when the protection window is disabled.
+	SuspendPauseSeconds int `json:"suspend_pause_seconds"`
+
+	// SuspendPauseDisabled reports whether the post-suspension protection window is turned off.
+	SuspendPauseDisabled bool `json:"suspend_pause_disabled"`
+
 	// Endpoints lists configured upstream Cloud Code Assist base URLs.
 	Endpoints []string `json:"endpoints,omitempty"`
 
@@ -150,6 +157,8 @@ func buildRedactedConfigView(path string, cfg *config.Config) redactedConfigView
 		MaxWaitSeconds:         int(cfg.MaxWaitDuration() / time.Second),
 		DefaultCooldownSeconds: int(cfg.CooldownDuration() / time.Second),
 		EmptyStreamRetries:     cfg.EmptyStreamRetryCount(),
+		SuspendPauseSeconds:    int(cfg.SuspendPauseDuration() / time.Second),
+		SuspendPauseDisabled:   cfg.DisableSuspendPause,
 		Endpoints:              slices.Clone(cfg.Endpoints),
 		ModelMapping:           mapping,
 	}
@@ -178,6 +187,11 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	cmd.Printf("Max Cooldown Wait:     %ds\n", view.MaxWaitSeconds)
 	cmd.Printf("Default 429 Cooldown:  %ds\n", view.DefaultCooldownSeconds)
 	cmd.Printf("Empty Stream Retries:  %d\n", view.EmptyStreamRetries)
+	if view.SuspendPauseDisabled {
+		cmd.Printf("Suspension Pause:      disabled\n")
+	} else {
+		cmd.Printf("Suspension Pause:      %ds\n", view.SuspendPauseSeconds)
+	}
 	if len(view.Endpoints) > 0 {
 		cmd.Printf("Upstream Endpoints:    %s\n", strings.Join(view.Endpoints, ", "))
 	}

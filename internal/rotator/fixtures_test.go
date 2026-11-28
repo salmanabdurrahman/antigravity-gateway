@@ -92,13 +92,14 @@ func TestRetryDelay_TrackedFixtures(t *testing.T) {
 	}
 }
 
-// TestSuspensionFixtureClassification pins how the current failure classifier reads the Cloud Code
+// TestSuspensionFixtureClassification pins how the generic failure classifier reads the Cloud Code
 // Assist account-suspension envelopes captured in tracked fixtures. Two shapes already surface as a
-// permanent disposition: the structured 403 PERMISSION_DENIED carrying TOS_VIOLATION metadata, and
-// the support-routed TOS_VIOLATION_CONTACT_SUPPORT variant. The other two deliberately pin gaps: a
-// suspension reported as 412 FAILED_PRECONDITION still falls through as a generic client error, and
-// a bare 429 RESOURCE_EXHAUSTED body still classifies as a request-scoped prompt rejection.
-// Changing any of those verdicts has to be deliberate, because these assertions fail otherwise.
+// permanent disposition at that level: the structured 403 PERMISSION_DENIED carrying TOS_VIOLATION
+// metadata, and the support-routed TOS_VIOLATION_CONTACT_SUPPORT variant. The other two pin shaping
+// details rather than product behaviour: a suspension reported as 412 FAILED_PRECONDITION stays a
+// generic client error here because the dedicated DetectSuspension verdict covers it, and a bare 429
+// RESOURCE_EXHAUSTED body stays a request-scoped prompt rejection. Changing any of those verdicts has
+// to be deliberate, because these assertions fail otherwise.
 func TestSuspensionFixtureClassification(t *testing.T) {
 	tests := []struct {
 		// fixture is the tracked JSON envelope under testdata/.

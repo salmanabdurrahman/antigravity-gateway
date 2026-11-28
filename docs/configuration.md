@@ -39,6 +39,8 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 | `max_wait_seconds`         | integer           | `20` (range 1–120)                      | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.                                  |
 | `default_cooldown_seconds` | integer           | `60` (range 1–3600)                     | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x.                            |
 | `empty_stream_retries`     | integer           | `2` (range 1–5)                         | Extra attempts when Google returns no visible text, reasoning text, or tool calls (including signature-only empty frames). |
+| `suspend_pause_seconds`    | integer           | `900` (range 1–86400)                   | How long all upstream dispatch stays paused after a terminal account-suspension verdict.                                   |
+| `disable_suspend_pause`    | boolean           | `false`                                 | Turns the post-suspension protection window off so the pool fails over to the next account immediately.                    |
 
 `host` accepts IPv4 and IPv6 loopback addresses; non-loopback values are coerced back to `127.0.0.1`. IPv6 literals are bracketed everywhere the daemon binds or builds a URL, so `host: "::1"` yields `[::1]:51400`.
 
@@ -105,7 +107,10 @@ The rotator supports three strategies, configured through `strategy` in `config.
 - When every account is cooling and the wait is ≤ `max_wait_seconds`, the gateway absorbs the wait transparently; beyond that it returns HTTP 429 with the exact seconds in `Retry-After`.
 - Secondary endpoints and healthy-account fallbacks are exercised on upstream 5xx errors.
 - Empty upstream streams (including frames carrying only a `thoughtSignature` or `finishReason: STOP` without visible text, reasoning text, or tool calls) are retried up to `empty_stream_retries` times independently of prompt/schema fallbacks, with linear backoff (`250ms × attempt`) and soft rotation onto another ready account before returning HTTP `502`. Explicit safety/policy stops (`SAFETY`, `RECITATION`, etc.) bypass empty-stream retries and surface `content_filter` / `refusal`.
-- HTTP 403 bodies that indicate a permanent suspension (`has been disabled`, `violation of terms of service`, `VALIDATION_REQUIRED`) disable the account persistently with the upstream reason instead of looping it through 30-minute cooldowns. Transient 403s still cool down and fail over.
+- HTTP 403 bodies and 412 `FAILED_PRECONDITION` bodies that carry a terminal suspension verdict disable the account persistently instead of looping it through 30-minute cooldowns. A suspension is recognized from structured `details[].reason` values (`TOS_VIOLATION`, `TOS_VIOLATION_CONTACT_SUPPORT`, `VALIDATION_REQUIRED`), from the plain `FAILED_PRECONDITION` wording, or from the legacy text markers (`has been disabled`, `violation of terms of service`); transient project and region 403s still cool down and fail over.
+- A suspension is account-scoped and terminal until Google lifts it, so the account leaves rotation immediately, its verdict, reason, and validated appeal link (`forms.gle`, `docs.google.com` over HTTPS only) are persisted to `accounts.json`, and no cooldown or retry cycle can bring it back. All background work skips it: token refresh, catalog refresh, quota polling, and `agw accounts --check` never send traffic to a suspended account.
+- After the first verdict the rotator pauses **all** upstream dispatch for `suspend_pause_seconds` (default 900s). Failover to a sibling account during the enforcement window is what turns a first suspension into a permanent one, so paused requests return HTTP 403 with the appeal link and a `Retry-After` header. Set `disable_suspend_pause: true` to restore immediate failover.
+- Clearing the verdict stays explicit: after Google reinstates the account, run `agw accounts --check --re-enable`, which clears the local suspension metadata without probing upstream.
 
 ### Endpoint ordering by subscription tier
 

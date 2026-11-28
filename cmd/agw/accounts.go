@@ -77,6 +77,9 @@ type accountReportEntry struct {
 	// Disabled reports whether the account is currently disabled in accounts.json.
 	Disabled bool `json:"disabled,omitzero"`
 
+	// AppealURL carries the validated upstream appeal link for a suspended account, omitted otherwise.
+	AppealURL string `json:"appeal_url,omitempty"`
+
 	// AddedAt records when the account was first authenticated.
 	AddedAt string `json:"added_at,omitempty"`
 
@@ -119,10 +122,13 @@ func accountSourceLabel(acc *auth.Account) string {
 	return "oauth"
 }
 
-// accountBaseStatus formats the persisted active or disabled status string from accounts.json.
+// accountBaseStatus formats the persisted active, suspended, or disabled status string from accounts.json.
 func accountBaseStatus(acc *auth.Account) string {
 	if acc == nil || !acc.Disabled {
 		return "Active"
+	}
+	if acc.Suspended() {
+		return fmt.Sprintf("Suspended (%s)", acc.SuspendKind)
 	}
 	if acc.LastError != "" {
 		return fmt.Sprintf("Disabled (%s)", acc.LastError)
@@ -141,6 +147,7 @@ func buildStoredAccountEntries(accounts []*auth.Account) []accountReportEntry {
 			Source:    accountSourceLabel(acc),
 			Status:    accountBaseStatus(acc),
 			Disabled:  acc.Disabled,
+			AppealURL: acc.AppealURL,
 			AddedAt:   acc.AddedAt,
 		}
 	}
@@ -228,12 +235,33 @@ func inspectSingleAccountQuota(
 		Source:        accountSourceLabel(acc),
 		Status:        accountBaseStatus(acc),
 		Disabled:      acc.Disabled,
+		AppealURL:     acc.AppealURL,
 		AddedAt:       acc.AddedAt,
 		FiveHourQuota: "-",
 		WeeklyQuota:   "-",
 		GeminiQuota:   "-",
 		ClaudeQuota:   "-",
 		ResetTime:     "Ready",
+	}
+
+	// A suspended account must not receive any upstream traffic: Google refused the account itself, and
+	// probing its quota afterwards is exactly what turns a first suspension into a permanent one.
+	// Re-enabling stays an explicit operator action, so --re-enable clears the local verdict without a
+	// probe instead of sending a token refresh and catalog fetch to a suspended account.
+	if acc.Suspended() {
+		if reEnable {
+			if clearErr := accountStore.SetDisabled(acc.Email, false, ""); clearErr != nil {
+				entry.Status = fmt.Sprintf("Error (re-enable failed: %v)", clearErr)
+				entry.Error = clearErr.Error()
+				return entry
+			}
+			entry.Status = "Active (suspension cleared; appeal verified)"
+			entry.Disabled = false
+			entry.AppealURL = ""
+			return entry
+		}
+		entry.Status = accountBaseStatus(acc)
+		return entry
 	}
 
 	tokenRes, refreshErr := auth.AccessTokenFor(ctx, cfg, acc)
@@ -424,9 +452,13 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
 		_, _ = fmt.Fprintln(w, "EMAIL\tPROJECT ID\tTIER\tSOURCE\tSTATUS\tADDED AT")
 		hasDisabled := false
+		hasSuspended := false
 		for _, entry := range entries {
-			if entry.Disabled {
+			if entry.Disabled && entry.AppealURL == "" {
 				hasDisabled = true
+			}
+			if entry.AppealURL != "" {
+				hasSuspended = true
 			}
 			tier := cmp.Or(entry.Tier, "-")
 			added := cmp.Or(entry.AddedAt, "-")
@@ -437,6 +469,14 @@ func runAccounts(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		cmd.Println("\nRun 'agw accounts --check' for live quota, or 'agw quota --models' for per-model breakdown.")
+		if hasSuspended {
+			cmd.Println("Suspended accounts stay out of rotation until Google lifts the suspension. Appeal once, then revoke third-party access before signing in again:")
+			for _, entry := range entries {
+				if entry.AppealURL != "" {
+					cmd.Printf("  %s  %s\n", entry.Email, entry.AppealURL)
+				}
+			}
+		}
 		if hasDisabled {
 			cmd.Println("Tip: verify and reactivate working disabled accounts with 'agw accounts --check --re-enable'.")
 		}

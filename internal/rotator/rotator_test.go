@@ -615,7 +615,9 @@ func TestRotatorHybridTokenBucketRefund(t *testing.T) {
 }
 
 // TestRotatorPermanentForbiddenDisablesAccount verifies a terms-of-service 403 permanently disables
-// the account instead of applying a transient cooldown, while transient 403s still fail over.
+// the account instead of applying a transient cooldown, while transient 403s still fail over. The
+// protective pool pause stays disabled here so this test keeps isolating per-account behaviour; the
+// pause itself is covered by the dedicated suspension tests.
 func TestRotatorPermanentForbiddenDisablesAccount(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -664,6 +666,9 @@ func TestRotatorPermanentForbiddenDisablesAccount(t *testing.T) {
 			cfg := &config.Config{
 				TokenURL:  mockServer.server.URL + "/token",
 				Endpoints: []string{mockServer.server.URL},
+				// Keep the protective pool pause out of the picture: this case isolates how a single
+				// account is treated after upstream refuses it.
+				DisableSuspendPause: true,
 			}
 			pool, _ := rotator.NewPool(nil, cfg, time.Now)
 			pool.SetAccounts([]*auth.Account{

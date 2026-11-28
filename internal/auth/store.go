@@ -60,6 +60,27 @@ type Account struct {
 
 	// LastError records the most recent fatal authentication or authorization error message.
 	LastError string `json:"last_error,omitempty"`
+
+	// SuspendedAt records the RFC 3339 timestamp of the terminal upstream suspension verdict. It is
+	// empty for accounts that were disabled for other reasons.
+	SuspendedAt string `json:"suspended_at,omitempty"`
+
+	// SuspendKind classifies the terminal suspension (for example tos_violation or failed_precondition)
+	// so operators and clients can distinguish it from an ordinary disabled account.
+	SuspendKind string `json:"suspend_kind,omitempty"`
+
+	// SuspendReason stores the upstream explanation for the suspension, kept separate from LastError
+	// so a later transient error cannot erase the verdict Google returned.
+	SuspendReason string `json:"suspend_reason,omitempty"`
+
+	// AppealURL stores the validated operator appeal link upstream returned with the verdict. It is
+	// empty when upstream supplied none or the link failed validation.
+	AppealURL string `json:"appeal_url,omitempty"`
+}
+
+// Suspended reports whether upstream returned a terminal suspension verdict for this account.
+func (a *Account) Suspended() bool {
+	return a != nil && strings.TrimSpace(a.SuspendKind) != ""
 }
 
 // HasCredentials reports whether the account holds at least one usable credential: an OAuth refresh
@@ -373,7 +394,8 @@ func (s *Store) Remove(email string) (bool, error) {
 }
 
 // SetDisabled sets the disabled state and optional last error message on an account.
-// Used when Google invalidates a refresh token or revokes access.
+// Used when Google invalidates a refresh token or revokes access, and by the operator re-enable path.
+// Re-enabling clears any suspension metadata so a stale verdict cannot outlive an appeal.
 func (s *Store) SetDisabled(email string, disabled bool, lastError string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -393,6 +415,42 @@ func (s *Store) SetDisabled(email string, disabled bool, lastError string) error
 
 	accounts[idx].Disabled = disabled
 	accounts[idx].LastError = lastError
+	if !disabled {
+		accounts[idx].SuspendedAt = ""
+		accounts[idx].SuspendKind = ""
+		accounts[idx].SuspendReason = ""
+		accounts[idx].AppealURL = ""
+	}
+
+	return s.saveUnlocked(accounts)
+}
+
+// SetSuspended records a terminal upstream suspension verdict and removes the account from rotation.
+// The verdict is persisted next to the disabled flag so operators can read the upstream reason and
+// appeal link without re-contacting Google, and so a restart cannot silently resurrect the account.
+func (s *Store) SetSuspended(email, kind, reason, appealURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	accounts, err := s.loadUnlocked()
+	if err != nil {
+		return err
+	}
+
+	idx := slices.IndexFunc(accounts, func(a *Account) bool {
+		return strings.EqualFold(a.Email, email)
+	})
+
+	if idx == -1 {
+		return fmt.Errorf("account not found: %s", email)
+	}
+
+	accounts[idx].Disabled = true
+	accounts[idx].LastError = reason
+	accounts[idx].SuspendedAt = time.Now().UTC().Format(time.RFC3339)
+	accounts[idx].SuspendKind = kind
+	accounts[idx].SuspendReason = reason
+	accounts[idx].AppealURL = appealURL
 
 	return s.saveUnlocked(accounts)
 }

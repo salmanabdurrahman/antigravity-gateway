@@ -505,6 +505,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
 					continue
 				}
+				if rotErr.Suspension != nil {
+					sendSuspensionJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter, rotErr.Suspension.AppealURL)
+					return
+				}
 				sendJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter)
 				return
 			}
@@ -794,6 +798,10 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 					s.legacySchemas.Store(true)
 					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
 					continue
+				}
+				if rotErr.Suspension != nil {
+					sendAnthropicSuspensionJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter, rotErr.Suspension.AppealURL)
+					return
 				}
 				sendAnthropicJSONError(w, rotErr.StatusCode, rotErr.ErrorMessage, rotErr.RetryAfter)
 				return
