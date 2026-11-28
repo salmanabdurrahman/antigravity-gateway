@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-28
+
+### Added
+
+- `agw debug wire` read-only report of the upstream identity (`User-Agent`, `X-Goog-Api-Client`, `Client-Metadata`), the active wire transport, endpoint order, and request defaults, with `--json` output.
+- `agw status --risk` captures a local risk snapshot into `~/.agw/risk.json` (owner-only, newest 24 snapshots) and prints the resolved posture plus per-account request, `429`, bare-rejection, last-success, and suspension counters using masked addresses and opaque credential digests.
+- Operating profiles through `profile` (`safe` by default, or `manual`) and `rotation_mode` (`single` or `pool`), together with `max_in_flight_per_account`, `max_dispatches_per_request`, `catalog_max_age_minutes`, `prompt_rejection_limit`, `prompt_rejection_cooldown_seconds`, `suspend_pause_seconds`, `disable_suspend_pause`, and `disable_prompt_preflight`.
+- Per-credential HTTP/1.1 connection pools without ALPN negotiation, plus the `AGW_WIRE_MODE=auto` rollback to the shared HTTP/2 pool.
+- Suspension surfacing across the CLI and API: `agw accounts`, `agw logout`, `agw status`, and `agw doctor` report `Suspended (<kind>)` with the validated appeal link, `/v1/chat/completions` and `/v1/messages` answer `403` with `error.appeal_url`, and `agw accounts --check --re-enable` clears a stored verdict without probing upstream.
+- Doctor diagnostics for the operating profile, suspended accounts, the advertised Hub identity together with its `cl` pairing, the locally installed Antigravity CLI version, and the prompt preflight state.
+
+### Changed
+
+- **Default operating profile is now `safe`; existing installs that relied on pooled rotation change behaviour.** One primary account serves every request, failover to sibling credentials is off, cooldown absorption is off, empty-stream retries drop to one, the catalog refreshes hourly, at most two streams run concurrently per credential, and one request performs at most two upstream dispatches. Set `profile: manual` (or override individual keys) to restore the previous behaviour.
+- Upstream generation, catalog, and token-refresh traffic now uses HTTP/1.1 with one connection pool per credential and no ALPN protocol list. `AGW_WIRE_MODE=auto` restores the shared HTTP/2 pool.
+- A terminal terms-of-service suspension retires the account with its verdict persisted and pauses all upstream dispatch for `suspend_pause_seconds` instead of rotating to a sibling; token refresh, catalog refresh, quota polling, and `agw accounts --check` no longer touch a suspended account.
+- System instructions are preflighted before dispatch: known harness banners and tool anchors are rewritten by line-anchored, idempotent rules bounded to an 80% removal budget, and `disable_prompt_preflight: true` opts out.
+- Repeated bare `429 RESOURCE_EXHAUSTED` rejections park an account for `prompt_rejection_cooldown_seconds` once `prompt_rejection_limit` occurrences fall inside five minutes, and the client receives `429` with the park duration.
+- Upstream 5xx retry backoff includes jitter so parallel clients do not retry in lockstep.
+- `agw config show`, `agw debug wire`, and `agw doctor` report the resolved profile, rotation mode, catalog window, pacing posture, rejection guard, prompt preflight, and suspension pause.
+
+### Fixed
+
+- Empty upstream streams, including frames that carry only a signature or a bare `STOP`, are retried and answered with HTTP `502` instead of an empty `200`.
+- Disabled records written by earlier releases that only carry a suspension message are recognized as suspended, with the kind derived from that message, without rewriting `accounts.json`.
+- The runtime account table in `agw status` labels suspended accounts as suspended instead of disabled.
+- The `agw doctor` account summary counts suspended accounts separately from other disabled accounts.
+- Persisted risk telemetry clips free-text errors to 300 runes after email redaction.
+
+### Security
+
+- Suspension verdicts no longer cycle through transient cooldowns or rotate onto healthy sibling credentials, and background refresh and probes are suppressed for the refused account.
+- Risk telemetry stores masked addresses and opaque credential digests only; prompts and tokens are never recorded.
+- Each credential keeps its own upstream connection pool, so two Google identities never share a TCP/TLS connection.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added
@@ -187,7 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imported desktop payloads are validated for token length and control characters, and local listener reads are bounded.
 - Re-importing a desktop session never downgrades an existing OAuth account: accounts that already hold a refresh token keep their refreshable credentials.
 
-[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/salmanabdurrahman/antigravity-gateway/compare/v0.1.1...v0.2.0

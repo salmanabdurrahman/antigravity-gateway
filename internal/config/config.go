@@ -18,7 +18,7 @@ import (
 
 // Version defines the current semantic version of the gateway application.
 // Can be overridden at build time via -ldflags "-X github.com/salmanabdurrahman/antigravity-gateway/internal/config.Version=vX.Y.Z".
-var Version = "0.3.0"
+var Version = "0.4.0"
 
 const (
 	// DefaultHost defines the default local loopback binding address.
