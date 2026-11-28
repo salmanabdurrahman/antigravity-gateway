@@ -61,22 +61,22 @@ Deeper design notes: [Architecture Overview](docs/architecture.md).
 
 ## Commands at a Glance
 
-| Command                          | Purpose                                                        |
-| :------------------------------- | :------------------------------------------------------------- |
-| `agw login`                      | Google OAuth PKCE login (`--no-browser`, `--local`)            |
-| `agw accounts [--check]`         | List accounts, tiers, sources, live quota (`--json`)           |
-| `agw quota [--models] [--watch]` | Inspect rolling (5h), weekly, and per-model quota usage        |
-| `agw logout <email>`             | Remove an account from the local store                         |
-| `agw models list [--refresh]`    | Inspect catalog models, context windows, limits (`--quota`)    |
-| `agw config [show\|strategy]`    | Inspect redacted config or update rotation strategy            |
-| `agw debug wire`                 | Print effective upstream identity headers and request defaults |
-| `agw start [--detach]`           | Run the gateway (`--strategy`, `--port`, `--config`)           |
-| `agw status`                     | Show daemon state, active strategy, and runtime account stats  |
-| `agw stop`                       | Stop the daemon, rediscovering it from `/health` if needed     |
-| `agw setup <pi/opencode/claude>` | Transactional client configuration with backups + verification |
-| `agw doctor`                     | Ports, permissions, accounts, upstream reachability, clients   |
-| `agw update [--check]`           | Verify-and-replace the binary in place (alias: `upgrade`)      |
-| `agw version`                    | Print the build version                                        |
+| Command                          | Purpose                                                         |
+| :------------------------------- | :-------------------------------------------------------------- |
+| `agw login`                      | Google OAuth PKCE login (`--no-browser`, `--local`)             |
+| `agw accounts [--check]`         | List accounts, tiers, sources, live quota (`--json`)            |
+| `agw quota [--models] [--watch]` | Inspect rolling (5h), weekly, and per-model quota usage         |
+| `agw logout <email>`             | Remove an account from the local store                          |
+| `agw models list [--refresh]`    | Inspect catalog models, context windows, limits (`--quota`)     |
+| `agw config [show\|strategy]`    | Inspect redacted config or update rotation strategy             |
+| `agw debug wire`                 | Print effective upstream identity headers and request defaults  |
+| `agw start [--detach]`           | Run the gateway (`--strategy`, `--port`, `--config`)            |
+| `agw status [--risk]`            | Show daemon state and runtime stats, or snapshot risk telemetry |
+| `agw stop`                       | Stop the daemon, rediscovering it from `/health` if needed      |
+| `agw setup <pi/opencode/claude>` | Transactional client configuration with backups + verification  |
+| `agw doctor`                     | Ports, permissions, accounts, upstream reachability, clients    |
+| `agw update [--check]`           | Verify-and-replace the binary in place (alias: `upgrade`)       |
+| `agw version`                    | Print the build version                                         |
 
 Full flag reference: [CLI Reference](docs/cli.md).
 

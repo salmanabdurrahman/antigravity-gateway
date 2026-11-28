@@ -22,6 +22,7 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/client"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/risk"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/updater"
 	"github.com/spf13/cobra"
 )
@@ -490,8 +491,42 @@ func checkAccounts(cfg *config.Config) []CheckItem {
 	}
 
 	items = append(items, accountProfileCheck(cfg, usable)...)
+	items = append(items, suspendedAccountCheck(accounts)...)
 
 	return items
+}
+
+// suspendedAccountCheck reports accounts Google suspended, because they stay out of rotation until the
+// operator appeals and clears them locally. The first appeal link is surfaced so doctor output is
+// actionable without a second command.
+func suspendedAccountCheck(accounts []*auth.Account) []CheckItem {
+	var suspended []*auth.Account
+	for _, acc := range accounts {
+		if acc.Suspended() {
+			suspended = append(suspended, acc)
+		}
+	}
+	if len(suspended) == 0 {
+		return nil
+	}
+
+	kinds := make([]string, 0, len(suspended))
+	for _, acc := range suspended {
+		kinds = append(kinds, fmt.Sprintf("%s (%s)", risk.MaskEmail(acc.Email), acc.SuspendKind))
+	}
+
+	hint := "Appeal once, then revoke third-party access at https://myaccount.google.com/permissions before signing in again"
+	if suspended[0].AppealURL != "" {
+		hint = fmt.Sprintf("Appeal once: %s — then revoke third-party access before signing in again", suspended[0].AppealURL)
+	}
+
+	return []CheckItem{{
+		Category: "Account Pool",
+		Name:     "Suspended Accounts",
+		Status:   StatusWarn,
+		Message:  fmt.Sprintf("%d suspended: %s", len(suspended), strings.Join(kinds, ", ")),
+		Hint:     hint,
+	}}
 }
 
 // accountProfileCheck reports how the operating profile uses the stored pool: the safe profile serves a

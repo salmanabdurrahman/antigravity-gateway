@@ -94,7 +94,7 @@ agw quota --json
 
 ## 4. `agw status`
 
-Probes the local gateway daemon (`/health` and authenticated `/v1/accounts`) to report whether the daemon is running, its PID, active rotation strategy, cached catalog count, and per-account runtime request/429/cooldown metrics.
+Probes the local gateway daemon (`/health` and authenticated `/v1/accounts`) to report whether the daemon is running, its PID, active rotation strategy, cached catalog count, and per-account runtime request/429/cooldown metrics. With `--risk`, it also snapshots the local risk posture (profile, rotation mode, in-flight ceiling, bare-429 guard) plus per-account counters into `~/.agw/risk.json`, using a masked address and an opaque credential digest so the file stays useful without storing identities.
 
 ```bash
 agw status
@@ -102,10 +102,11 @@ agw status --port 51400
 agw status --json
 ```
 
-| Flag           | Purpose                                                               |
-| :------------- | :-------------------------------------------------------------------- |
-| `-p`, `--port` | Gateway HTTP port to inspect (default from `config.json` or `51400`). |
-| `--json`       | Output daemon status and runtime metrics as JSON.                     |
+| Flag           | Purpose                                                                          |
+| :------------- | :------------------------------------------------------------------------------- |
+| `-p`, `--port` | Gateway HTTP port to inspect (default from `config.json` or `51400`).            |
+| `--risk`       | Capture risk telemetry into `~/.agw/risk.json` and print the local risk posture. |
+| `--json`       | Output daemon status and runtime metrics as JSON.                                |
 
 ## 5. `agw logout`
 
@@ -266,7 +267,7 @@ Runs an end-to-end environment audit:
 
 1. **Network ports**: gateway port (`51400` or configured `port`) and OAuth callback port resolved from `redirect_uri` (default `51121`).
 2. **Filesystem permissions**: `0700` directory and `0600` credential files, plus API-key format validation.
-3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions, plus an operating-profile advisory that warns when `profile: manual` would rotate more than one active account and explains idle accounts under the safe profile.
+3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions, plus an operating-profile advisory that warns when `profile: manual` would rotate more than one active account and explains idle accounts under the safe profile. Suspended accounts are reported with their appeal link, since they stay out of rotation until the operator appeals and clears them.
 4. **Upstream identity**: the advertised `antigravity/hub/<version>` identity with its paired `cl` changelist, warning when a version override has no matching changelist, plus the locally installed `agy` CLI version reported on its own track.
 5. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 6. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.

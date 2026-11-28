@@ -667,6 +667,7 @@ rotation:
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			s.ResetRateLimitStreak()
 			s.ResetPromptRejections()
+			s.RecordSuccess(r.nowFn())
 			s.ResetQuotaFraction(model)
 			r.picker.HealthTracker().RecordSuccess(s.Email())
 			resp.Body = newPacedBody(resp.Body, release)

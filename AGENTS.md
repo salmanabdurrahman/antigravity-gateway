@@ -110,6 +110,7 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
   - `internal/translate`: OpenAI/Anthropic request builders (`request.go`, `anthropic.go`), thinking budgets (`thinking.go`), thought signature recipes (`recipe.go`), cache-control markers (`cache_control.go`), schema normalization (`schema.go`, `schema_pipeline.go`), SSE and response translation (`response.go`).
   - `internal/server`: `net/http` daemon (`server.go`, `daemon.go`), router and handlers (`router.go`), middleware (`middleware.go`), bounded thought-signature cache (`signature_cache.go`), PID/port ownership helpers (`portowner*.go`).
   - `internal/client`: Client auto-configurators (`pi.go`, `opencode.go`, `claude.go`), atomic file helpers (`fs.go`), connectivity probes (`test_completion.go`).
+  - `internal/risk`: Bounded, privacy-preserving risk telemetry snapshots (`risk.go`) persisted to `~/.agw/risk.json` with masked identities.
 - **Internal Encapsulation**: Never leak private structs or raw internal states across package boundaries. Keep interfaces small and focused.
 
 ### 4.3 Error Handling Discipline
@@ -173,6 +174,7 @@ Follow the standard Go project layout (`golang-standards/project-layout`):
 | `internal/translate/`   | Bidirectional OpenAI $\leftrightarrow$ Cloud Code | Thought signatures, `$ref` schema defense, SSE parser                                                                                                       |
 | `internal/server/`      | `net/http` daemon & router                        | Strict `127.0.0.1:51400` binding; Bearer key auth; config snapshot copy-on-write; bounded signature cache                                                   |
 | `internal/client/`      | Agent configuration injectors                     | Pi, OpenCode, and Claude Code injectors; safe atomic backup (`*.bak-<timestamp>`) before modifying client configs                                           |
+| `internal/risk/`        | Local risk telemetry snapshots                    | Bounded 24-entry `~/.agw/risk.json` written by `agw status --risk`; masked emails, opaque credential digests, no prompts or tokens                          |
 | `internal/updater/`     | Release discovery, SHA-256 verification, upgrade  | In-place atomic replacement (`os.Executable()`); checksum verification against `SHA256SUMS`                                                                 |
 | `.github/`              | CI/CD automation workflows                        | Read-only repository permissions (`contents: read`); native Linux/macOS/Windows test jobs; release publishes only after artifact and installer verification |
 | `.githooks/`            | Native git hooks repository                       | Zero-dependency pre-commit script enforcing format, vet, smoke tests                                                                                        |

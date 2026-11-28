@@ -89,6 +89,15 @@ func ModelsCacheFilePath() (string, error) {
 	return filepath.Join(dir, "models-cache.json"), nil
 }
 
+// RiskFilePath returns the absolute path to the local risk telemetry file (risk.json).
+func RiskFilePath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "risk.json"), nil
+}
+
 // PIDFilePath returns the absolute path to the background daemon process ID file (agw.pid).
 func PIDFilePath() (string, error) {
 	dir, err := Dir()

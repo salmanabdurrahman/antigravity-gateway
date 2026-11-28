@@ -11,8 +11,11 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 | `~/.agw/config.json`       | Daemon settings, host/port, local API key, rotation strategy, quota threshold, model mapping | `0600`      |
 | `~/.agw/accounts.json`     | Stored Google account tokens, imported desktop tokens, companion projects, tiers             | `0600`      |
 | `~/.agw/models-cache.json` | Cached model catalog, token limits, quota windows                                            | `0600`      |
+| `~/.agw/risk.json`         | Bounded risk telemetry snapshots (traffic counters, suspension state, safety posture)        | `0600`      |
 | `~/.agw/agw.pid`           | Running daemon process ID (written once listening)                                           | `0600`      |
 | `~/.agw/agw.log`           | Background daemon stdout/stderr                                                              | `0600`      |
+
+`risk.json` is written only by `agw status --risk`. Each snapshot records the resolved profile, rotation mode, in-flight ceiling, bare-429 threshold, and per-account counters (requests, 429s, bare rejections, last successful completion, suspension kind). Account identity is stored as an opaque credential digest plus a masked address (`o***@example.com`), free-text error messages are email-redacted before storage, prompts are never recorded, and the newest 24 snapshots are retained.
 
 `config.json` is the single source of truth for gateway settings, and a running daemon treats it as read-only rather than overwriting your API key, endpoints, or model mapping. Inspect redacted settings with `agw config show`, resolve the active file path with `agw config path`, and update `strategy` safely with `agw config strategy <mode>`. The daemon logs its resolved configuration path at startup, and `agw doctor` verifies that the stored key still matches the generated format and the key embedded in each configured client.
 

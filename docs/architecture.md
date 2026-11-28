@@ -13,6 +13,7 @@ AI coding agent (Pi / OpenCode / Claude Code / Cursor)
 │ internal/translate   OpenAI/Anthropic → Cloud Code envelopes   │
 │ internal/rotator     account pick, cooldowns, 429 failover     │
 │ internal/catalog     model catalog, token limits, quotas       │
+│ internal/risk        local risk telemetry snapshots            │
 └──────────────────────────────────────────────────────────────┘
         │  POST v1internal:generateContent / streamGenerateContent
         ▼

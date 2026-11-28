@@ -18,6 +18,7 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/client"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/risk"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/server"
 	"github.com/spf13/cobra"
@@ -29,6 +30,9 @@ var (
 
 	// statusJSON toggles structured JSON output for daemon and runtime metrics.
 	statusJSON bool
+
+	// statusRisk captures and persists local risk telemetry alongside the status report.
+	statusRisk bool
 
 	// statusCmd inspects the running daemon's health, active rotation strategy, and runtime pool metrics.
 	statusCmd = &cobra.Command{
@@ -47,6 +51,7 @@ cached catalog summary, and per-account runtime request/429/cooldown metrics.`,
 func init() {
 	statusCmd.Flags().IntVarP(&statusPort, "port", "p", 0, "Gateway HTTP port to inspect (default from config or 51400)")
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output daemon status and runtime metrics as JSON")
+	statusCmd.Flags().BoolVar(&statusRisk, "risk", false, "Capture risk telemetry into ~/.agw/risk.json and print the local risk posture")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -90,6 +95,18 @@ type statusReport struct {
 
 	// DiagnosticsError records a non-fatal error querying /v1/accounts while /health succeeded.
 	DiagnosticsError string `json:"diagnostics_error,omitempty"`
+
+	// Risk holds the captured risk posture when --risk was requested.
+	Risk *risk.Snapshot `json:"risk,omitempty"`
+
+	// RiskPath records where the captured snapshot was persisted, empty when persistence failed.
+	RiskPath string `json:"risk_path,omitempty"`
+
+	// RiskError records why the risk snapshot could not be persisted.
+	RiskError string `json:"risk_error,omitempty"`
+
+	// RiskGuardCooldownSeconds is the resolved park duration for a bare-rejection storm.
+	RiskGuardCooldownSeconds int `json:"risk_guard_cooldown_seconds,omitzero"`
 }
 
 // runStatus probes the local gateway daemon and renders runtime or stopped-state diagnostics.
@@ -110,8 +127,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		ConfigPath: activeConfigPath(),
 	}
 
+	var storedAccounts []*auth.Account
 	if accPath, accErr := config.AccountsFilePath(); accErr == nil {
 		if stored, loadErr := auth.NewStore(accPath).Load(); loadErr == nil {
+			storedAccounts = stored
 			report.TotalAccounts = len(stored)
 			for _, a := range stored {
 				if !a.Disabled && a.HasCredentials() {
@@ -170,12 +189,78 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if statusRisk {
+		captureRiskSnapshot(&report, cfg, storedAccounts, time.Now())
+	}
+
 	if statusJSON {
 		return writeJSONOutput(cmd, report)
 	}
 
 	renderStatusReport(cmd, report, time.Now())
 	return nil
+}
+
+// captureRiskSnapshot builds the local risk posture from stored accounts plus live runtime counters and
+// persists it to risk.json. Failures are reported in the status output instead of aborting: telemetry is
+// diagnostic, and a read-only home directory must not break incident triage.
+func captureRiskSnapshot(report *statusReport, cfg *config.Config, stored []*auth.Account, now time.Time) {
+	snapshot := buildRiskSnapshot(cfg, stored, report.RuntimeAccounts, now)
+	report.Risk = &snapshot
+
+	_, cooldown := cfg.PromptRejectionGuard()
+	report.RiskGuardCooldownSeconds = int(cooldown / time.Second)
+
+	riskPath, pathErr := config.RiskFilePath()
+	if pathErr != nil {
+		report.RiskError = pathErr.Error()
+		return
+	}
+	if appendErr := risk.NewStore(riskPath).Append(snapshot); appendErr != nil {
+		report.RiskError = appendErr.Error()
+		return
+	}
+	report.RiskPath = riskPath
+}
+
+// buildRiskSnapshot merges stored account identities with live runtime counters. Identity comes from the
+// credential store because it carries the opaque credential digest and suspension metadata; counters come
+// from the daemon when one is running.
+func buildRiskSnapshot(cfg *config.Config, stored []*auth.Account, runtime []rotator.AccountSnapshot, now time.Time) risk.Snapshot {
+	limit, _ := cfg.PromptRejectionGuard()
+	snapshot := risk.Snapshot{
+		CapturedAt:           risk.TimestampNow(now),
+		Profile:              cfg.EffectiveProfile(),
+		RotationMode:         cfg.EffectiveRotationMode(),
+		MaxInFlight:          cfg.MaxInFlightPerAccountLimit(),
+		PromptRejectionLimit: limit,
+		Accounts:             make([]risk.Account, 0, len(stored)),
+	}
+
+	counters := make(map[string]rotator.AccountSnapshot, len(runtime))
+	for _, acc := range runtime {
+		counters[strings.ToLower(acc.Email)] = acc
+	}
+
+	for _, acc := range stored {
+		entry := risk.Account{
+			Credential:  acc.CredentialKey(),
+			Email:       risk.MaskEmail(acc.Email),
+			Suspended:   acc.Suspended(),
+			SuspendKind: acc.SuspendKind,
+			LastError:   risk.RedactEmails(acc.LastError),
+		}
+		if live, ok := counters[strings.ToLower(acc.Email)]; ok {
+			entry.Requests = live.Requests
+			entry.RateLimits = live.RateLimits
+			entry.PromptRejections = live.PromptRejections
+			entry.LastUpstreamOK = live.LastUpstreamOK
+			entry.LastError = risk.RedactEmails(cmp.Or(live.LastError, acc.LastError))
+		}
+		snapshot.Accounts = append(snapshot.Accounts, entry)
+	}
+
+	return snapshot
 }
 
 // fetchRuntimeAccounts retrieves redacted runtime account snapshots and strategy from /v1/accounts.
@@ -235,6 +320,10 @@ func renderStatusReport(cmd *cobra.Command, report statusReport, now time.Time) 
 		}
 	} else {
 		cmd.Println("Catalog:   empty (run 'agw models list --refresh')")
+	}
+
+	if report.Risk != nil {
+		renderRiskReport(cmd, report)
 	}
 
 	if !report.Running {
@@ -323,4 +412,54 @@ func formatRelativePast(ts string, now time.Time) string {
 	default:
 		return t.UTC().Format("Jan 02 15:04 UTC")
 	}
+}
+
+// renderRiskReport prints the captured local risk posture together with per-account traffic counters.
+func renderRiskReport(cmd *cobra.Command, report statusReport) {
+	snapshot := report.Risk
+	if snapshot == nil {
+		return
+	}
+
+	cmd.Println("\n[Risk Telemetry]")
+	cmd.Printf("  Captured:  %s\n", snapshot.CapturedAt)
+	if report.RiskPath != "" {
+		cmd.Printf("  Stored:    %s\n", report.RiskPath)
+	} else if report.RiskError != "" {
+		cmd.Printf("  Store:     unavailable (%s)\n", report.RiskError)
+	}
+
+	inFlight := "unbounded"
+	if snapshot.MaxInFlight > 0 {
+		inFlight = fmt.Sprintf("%d per account", snapshot.MaxInFlight)
+	}
+	guard := "off"
+	if snapshot.PromptRejectionLimit > 0 {
+		guard = fmt.Sprintf("%d bare 429s / %ds", snapshot.PromptRejectionLimit, report.RiskGuardCooldownSeconds)
+	}
+	cmd.Printf("  Posture:   %s profile, %s rotation, %s in flight, guard %s\n",
+		snapshot.Profile, snapshot.RotationMode, inFlight, guard)
+
+	if len(snapshot.Accounts) == 0 {
+		return
+	}
+
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ACCOUNT\tSTATUS\tREQUESTS\t429S\tBARE 429S\tLAST OK\tLAST ERROR")
+	for _, account := range snapshot.Accounts {
+		status := "Active"
+		if account.Suspended {
+			status = fmt.Sprintf("Suspended (%s)", cmp.Or(account.SuspendKind, "unknown"))
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
+			cmp.Or(account.Email, "-"),
+			status,
+			account.Requests,
+			account.RateLimits,
+			account.PromptRejections,
+			cmp.Or(account.LastUpstreamOK, "-"),
+			cmp.Or(account.LastError, "-"),
+		)
+	}
+	_ = w.Flush()
 }

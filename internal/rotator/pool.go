@@ -78,6 +78,9 @@ type AccountState struct {
 	// lastUsed records the timestamp of the last request dispatched to this account.
 	lastUsed time.Time
 
+	// lastSuccess records the timestamp of the last successful upstream completion.
+	lastSuccess time.Time
+
 	// quotaFractions maps model IDs (or "*") to remaining quota fractions (0.0 to 1.0).
 	quotaFractions map[string]float64
 }
@@ -360,6 +363,14 @@ func (s *AccountState) Token(ctx context.Context, cfg *config.Config, nowFn func
 	return res.AccessToken, nil
 }
 
+// RecordSuccess stamps the account's last successful upstream completion, which feeds the risk
+// telemetry so an operator can tell a credential that still works from one that only collects errors.
+func (s *AccountState) RecordSuccess(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSuccess = now
+}
+
 // Snapshot returns an immutable status snapshot of this account state for diagnostics.
 func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 	s.mu.RLock()
@@ -367,17 +378,26 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 	projectID := ""
 	disabled := false
 	tier := ""
+	suspendKind := ""
+	appealURL := ""
 	if s.account != nil {
 		email = s.account.Email
 		projectID = s.account.ProjectID
 		disabled = s.account.Disabled
 		tier = s.account.Tier
+		suspendKind = s.account.SuspendKind
+		appealURL = s.account.AppealURL
 	}
 	lastErr := s.lastError
 	lastUsedStr := ""
 	if !s.lastUsed.IsZero() {
 		lastUsedStr = s.lastUsed.UTC().Format(time.RFC3339)
 	}
+	lastSuccessStr := ""
+	if !s.lastSuccess.IsZero() {
+		lastSuccessStr = s.lastSuccess.UTC().Format(time.RFC3339)
+	}
+	promptRejections := s.promptRejections
 	s.mu.RUnlock()
 
 	activeCooldowns := make(map[string]string)
@@ -386,15 +406,19 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 	}
 
 	return AccountSnapshot{
-		Email:      email,
-		ProjectID:  projectID,
-		Tier:       tier,
-		Disabled:   disabled,
-		Cooldowns:  activeCooldowns,
-		Requests:   s.requests.Load(),
-		RateLimits: s.rateLimits.Load(),
-		LastUsed:   lastUsedStr,
-		LastError:  lastErr,
+		Email:            email,
+		ProjectID:        projectID,
+		Tier:             tier,
+		Disabled:         disabled,
+		Cooldowns:        activeCooldowns,
+		Requests:         s.requests.Load(),
+		RateLimits:       s.rateLimits.Load(),
+		PromptRejections: promptRejections,
+		LastUsed:         lastUsedStr,
+		LastUpstreamOK:   lastSuccessStr,
+		LastError:        lastErr,
+		SuspendKind:      suspendKind,
+		AppealURL:        appealURL,
 	}
 }
 
@@ -424,11 +448,23 @@ type AccountSnapshot struct {
 	// Health represents the runtime operational health score (0.0 to 100.0).
 	Health float64 `json:"health,omitzero"`
 
+	// PromptRejections holds the bare RESOURCE_EXHAUSTED rejections counted inside the guard window.
+	PromptRejections int `json:"prompt_rejections,omitzero"`
+
 	// LastUsed holds the RFC 3339 timestamp of the last request dispatched.
 	LastUsed string `json:"last_used,omitempty"`
 
+	// LastUpstreamOK holds the RFC 3339 timestamp of the last successful upstream completion.
+	LastUpstreamOK string `json:"last_upstream_ok,omitempty"`
+
 	// LastError holds the last recorded operational error for diagnostics.
 	LastError string `json:"last_error,omitempty"`
+
+	// SuspendKind reports the terminal upstream suspension classification when the account is suspended.
+	SuspendKind string `json:"suspend_kind,omitempty"`
+
+	// AppealURL carries the validated upstream appeal link for a suspended account.
+	AppealURL string `json:"appeal_url,omitempty"`
 }
 
 // Pool maintains in-memory account states and synchronizes with the backing Store.

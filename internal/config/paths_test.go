@@ -102,6 +102,14 @@ func TestPathsHelpers(t *testing.T) {
 		t.Errorf("ModelsCacheFilePath() = %q, expected %q", cachePath, filepath.Join(tempDir, "models-cache.json"))
 	}
 
+	riskPath, err := RiskFilePath()
+	if err != nil {
+		t.Fatalf("RiskFilePath() error: %v", err)
+	}
+	if riskPath != filepath.Join(tempDir, "risk.json") {
+		t.Errorf("RiskFilePath() = %q, expected %q", riskPath, filepath.Join(tempDir, "risk.json"))
+	}
+
 	pidPath, err := PIDFilePath()
 	if err != nil {
 		t.Fatalf("PIDFilePath() error: %v", err)
