@@ -26,6 +26,18 @@ import (
 // single client request alive indefinitely across continuation segments.
 const maxContinuationHops = 16
 
+// emptyStreamBaseBackoff defines the base delay before retrying an empty upstream stream so
+// immediate retries do not hit the identical transient backend state back-to-back.
+const emptyStreamBaseBackoff = 250 * time.Millisecond
+
+// emptyStreamBackoff computes the linear backoff duration for the given 1-based empty-stream retry.
+func emptyStreamBackoff(retryNum int) time.Duration {
+	if retryNum <= 0 {
+		return 0
+	}
+	return time.Duration(retryNum) * emptyStreamBaseBackoff
+}
+
 // streamTranslator is the shared surface required to chain long-decode continuation hops across the
 // OpenAI and Anthropic stream translators.
 type streamTranslator interface {
@@ -37,6 +49,72 @@ type streamTranslator interface {
 
 	// ClearContinuationToken resets the token before the next hop is read.
 	ClearContinuationToken()
+}
+
+// outcomeTranslator exposes response completeness and policy-block state shared by OpenAI and
+// Anthropic handlers when deciding whether to retry an empty upstream stream or fail with 502.
+type outcomeTranslator interface {
+	// SawOutput reports whether non-empty text, reasoning text, or a tool call was emitted.
+	SawOutput() bool
+
+	// IsContentBlocked reports whether upstream stopped due to a safety or policy block.
+	IsContentBlocked() bool
+
+	// FinishReason returns the raw upstream finishReason string, if any.
+	FinishReason() string
+
+	// HasSignature reports whether any upstream part carried a thoughtSignature.
+	HasSignature() bool
+}
+
+// shouldRetryEmptyStream reports whether a completed upstream attempt produced no usable output
+// and should be retried before any HTTP response headers have been flushed to the client.
+func (s *Server) shouldRetryEmptyStream(
+	t outcomeTranslator,
+	streamErr error,
+	started bool,
+	account string,
+	upstream string,
+	emptyRetries int,
+	maxEmptyRetries int,
+) bool {
+	if streamErr != nil || started || t.SawOutput() || t.IsContentBlocked() || emptyRetries >= maxEmptyRetries {
+		return false
+	}
+	s.logger.Warn("empty response from upstream; retrying",
+		"account", account,
+		"model", upstream,
+		"attempt", emptyRetries+1,
+		"max_retries", maxEmptyRetries,
+		"finish_reason", t.FinishReason(),
+		"had_signature", t.HasSignature(),
+	)
+	return true
+}
+
+// emptyOrStreamFailureMessage returns a descriptive 502 error message and logs terminal exhaustion
+// when an upstream stream failed or finished with no usable output and is not a policy block.
+func (s *Server) emptyOrStreamFailureMessage(
+	t outcomeTranslator,
+	streamErr error,
+	account string,
+	upstream string,
+	emptyRetries int,
+) (string, bool) {
+	if streamErr != nil {
+		return fmt.Sprintf("Upstream stream failed: %v", streamErr), true
+	}
+	if t.SawOutput() || t.IsContentBlocked() {
+		return "", false
+	}
+	s.logger.Error("upstream returned empty response across all retries",
+		"account", account,
+		"model", upstream,
+		"attempts", emptyRetries+1,
+		"finish_reason", t.FinishReason(),
+		"had_signature", t.HasSignature(),
+	)
+	return fmt.Sprintf("Google returned an empty response after %d attempt(s).", emptyRetries+1), true
 }
 
 // readUpstreamHops consumes the upstream SSE body of the current attempt and, while Gemini reports a
@@ -387,10 +465,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
 
 	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
-	// the system instruction moved into the first user turn. The extra loop iteration keeps the
-	// retry independent from the empty-stream retry budget.
+	// the system instruction moved into the first user turn, and schema-rejection fallback is tried
+	// once. Tracking emptyRetries independently ensures neither fallback consumes the empty-stream
+	// retry budget.
 	promptFallback := false
-	for attempt := range s.emptyStreamRetryCount() + 2 {
+	schemaRetried := false
+	emptyRetries := 0
+	maxEmptyRetries := s.emptyStreamRetryCount()
+	attemptedAccounts := make(map[string]struct{})
+	for range maxEmptyRetries + 4 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
@@ -404,7 +487,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
+		attemptResult, err := s.rotator.GenerateWithExclude(r.Context(), upstream, attemptedAccounts, func(st *rotator.AccountState) (any, error) {
 			return translate.WrapEnvelope(geminiReq, upstream, st.ProjectID()), nil
 		})
 		if err != nil {
@@ -416,7 +499,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
-				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+				if !schemaRetried && !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+					schemaRetried = true
 					s.legacySchemas.Store(true)
 					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
 					continue
@@ -436,8 +520,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		chatReq.Model = originalModel
-		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, continuation, id, created, upstream, attempt, sessionID)
+		done, retry := s.processCompletionsResponse(w, r, &chatReq, attemptResult, continuation, id, created, upstream, emptyRetries, maxEmptyRetries, sessionID)
 		if retry {
+			emptyRetries++
+			attemptedAccounts[attemptResult.State.Email()] = struct{}{}
+			if sleepErr := s.sleep(r.Context(), emptyStreamBackoff(emptyRetries)); sleepErr != nil {
+				sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream retry canceled: %v", sleepErr), 0)
+				return
+			}
 			chatReq.Model = resolvedModel
 			continue
 		}
@@ -445,6 +535,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Google returned an empty response after %d attempt(s).", emptyRetries+1), 0)
 }
 
 // processCompletionsResponse handles the upstream HTTP response, returning whether the request
@@ -458,7 +549,8 @@ func (s *Server) processCompletionsResponse(
 	id string,
 	created int64,
 	upstream string,
-	attempt int,
+	emptyRetries int,
+	maxEmptyRetries int,
 	sessionID string,
 ) (done bool, retry bool) {
 	defer result.Response.Body.Close()
@@ -515,17 +607,12 @@ func (s *Server) processCompletionsResponse(
 
 		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, chatReq.MaxTokens == nil && chatReq.MaxCompletionTokens == nil)
 
-		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
-			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+		if s.shouldRetryEmptyStream(translator, streamErr, started, result.State.Email(), upstream, emptyRetries, maxEmptyRetries) {
 			return false, true
 		}
 
 		if !started {
-			if streamErr != nil || !translator.SawOutput() {
-				errMsg := "Google returned an empty response."
-				if streamErr != nil {
-					errMsg = fmt.Sprintf("Upstream stream failed: %v", streamErr)
-				}
+			if errMsg, failed := s.emptyOrStreamFailureMessage(translator, streamErr, result.State.Email(), upstream, emptyRetries); failed {
 				sendJSONError(w, http.StatusBadGateway, errMsg, 0)
 				return true, false
 			}
@@ -554,7 +641,7 @@ func (s *Server) processCompletionsResponse(
 			return true, false
 		}
 
-		if details := translator.ReasoningDetails(); len(details) > 0 {
+		if details := translator.ReasoningDetails(); translator.SawOutput() && len(details) > 0 {
 			s.recipeCache.Store(sessionID, details)
 			writeChunk(translate.ChatCompletionChunk{
 				ID:      id,
@@ -606,17 +693,16 @@ func (s *Server) processCompletionsResponse(
 	translator := translate.NewResponseTranslator(chatReq.Model, func(delta translate.Delta) {})
 	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, chatReq.MaxTokens == nil && chatReq.MaxCompletionTokens == nil)
 
-	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
-		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+	if s.shouldRetryEmptyStream(translator, streamErr, false, result.State.Email(), upstream, emptyRetries, maxEmptyRetries) {
 		return false, true
 	}
 
-	if streamErr != nil && !translator.SawOutput() {
-		sendJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream stream failed: %v", streamErr), 0)
+	if errMsg, failed := s.emptyOrStreamFailureMessage(translator, streamErr, result.State.Email(), upstream, emptyRetries); failed {
+		sendJSONError(w, http.StatusBadGateway, errMsg, 0)
 		return true, false
 	}
 
-	if details := translator.ReasoningDetails(); len(details) > 0 {
+	if details := translator.ReasoningDetails(); translator.SawOutput() && len(details) > 0 {
 		s.recipeCache.Store(sessionID, details)
 	}
 
@@ -669,9 +755,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	// The derived session identifier still stabilizes upstream session affinity for tool loops.
 
 	// Protocol Quirk: a prompt rejected by upstream content filtering is retried exactly once with
-	// the system instruction moved into the first user turn before the error is surfaced.
+	// the system instruction moved into the first user turn, and schema-rejection fallback is tried
+	// once. Tracking emptyRetries independently ensures neither fallback consumes the empty-stream
+	// retry budget.
 	promptFallback := false
-	for attempt := range s.emptyStreamRetryCount() + 2 {
+	schemaRetried := false
+	emptyRetries := 0
+	maxEmptyRetries := s.emptyStreamRetryCount()
+	attemptedAccounts := make(map[string]struct{})
+	for range maxEmptyRetries + 4 {
 		opts := translate.BuildOptions{
 			Info:          info,
 			LegacySchemas: s.legacySchemas.Load(),
@@ -685,7 +777,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		attemptResult, err := s.rotator.Generate(r.Context(), upstream, func(st *rotator.AccountState) (any, error) {
+		attemptResult, err := s.rotator.GenerateWithExclude(r.Context(), upstream, attemptedAccounts, func(st *rotator.AccountState) (any, error) {
 			return translate.WrapEnvelope(geminiReq, upstream, st.ProjectID()), nil
 		})
 		if err != nil {
@@ -697,7 +789,8 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 					continue
 				}
 				// Protocol Quirk: If upstream rejects parametersJsonSchema, remember legacy mode and retry
-				if !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+				if !schemaRetried && !s.legacySchemas.Load() && translate.IsSchemaRejection(rotErr.StatusCode, rotErr.ErrorMessage) {
+					schemaRetried = true
 					s.legacySchemas.Store(true)
 					s.logger.Info("Google refused parametersJsonSchema; switching tool schemas to legacy parameters field")
 					continue
@@ -717,8 +810,14 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		}
 
 		anthReq.Model = originalModel
-		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, continuation, upstream, attempt)
+		done, retry := s.processAnthropicResponse(w, r, &anthReq, attemptResult, continuation, upstream, emptyRetries, maxEmptyRetries)
 		if retry {
+			emptyRetries++
+			attemptedAccounts[attemptResult.State.Email()] = struct{}{}
+			if sleepErr := s.sleep(r.Context(), emptyStreamBackoff(emptyRetries)); sleepErr != nil {
+				sendAnthropicJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream retry canceled: %v", sleepErr), 0)
+				return
+			}
 			anthReq.Model = resolvedModel
 			continue
 		}
@@ -726,6 +825,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	sendAnthropicJSONError(w, http.StatusBadGateway, fmt.Sprintf("Google returned an empty response after %d attempt(s).", emptyRetries+1), 0)
 }
 
 // processAnthropicResponse handles the upstream HTTP response for Anthropic Messages requests.
@@ -736,7 +836,8 @@ func (s *Server) processAnthropicResponse(
 	result *rotator.AttemptResult,
 	continuation func(st *rotator.AccountState, token string) (any, error),
 	upstream string,
-	attempt int,
+	emptyRetries int,
+	maxEmptyRetries int,
 ) (done bool, retry bool) {
 	defer result.Response.Body.Close()
 
@@ -765,17 +866,12 @@ func (s *Server) processAnthropicResponse(
 
 		streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, anthReq.MaxTokens <= 0)
 
-		if !translator.SawOutput() && !started && attempt < s.emptyStreamRetryCount() {
-			s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+		if s.shouldRetryEmptyStream(translator, streamErr, started, result.State.Email(), upstream, emptyRetries, maxEmptyRetries) {
 			return false, true
 		}
 
 		if !started {
-			if streamErr != nil || !translator.SawOutput() {
-				errMsg := "Google returned an empty response."
-				if streamErr != nil {
-					errMsg = fmt.Sprintf("Upstream stream failed: %v", streamErr)
-				}
+			if errMsg, failed := s.emptyOrStreamFailureMessage(translator, streamErr, result.State.Email(), upstream, emptyRetries); failed {
 				sendAnthropicJSONError(w, http.StatusBadGateway, errMsg, 0)
 				return true, false
 			}
@@ -797,13 +893,12 @@ func (s *Server) processAnthropicResponse(
 	translator := translate.NewAnthropicStreamTranslator(anthReq.Model, nil)
 	streamErr := s.readUpstreamHops(r.Context(), upstream, result, continuation, translator, anthReq.MaxTokens <= 0)
 
-	if !translator.SawOutput() && attempt < s.emptyStreamRetryCount() {
-		s.logger.Warn("empty response from upstream; retrying", "account", result.State.Email(), "model", upstream)
+	if s.shouldRetryEmptyStream(translator, streamErr, false, result.State.Email(), upstream, emptyRetries, maxEmptyRetries) {
 		return false, true
 	}
 
-	if streamErr != nil && !translator.SawOutput() {
-		sendAnthropicJSONError(w, http.StatusBadGateway, fmt.Sprintf("Upstream stream failed: %v", streamErr), 0)
+	if errMsg, failed := s.emptyOrStreamFailureMessage(translator, streamErr, result.State.Email(), upstream, emptyRetries); failed {
+		sendAnthropicJSONError(w, http.StatusBadGateway, errMsg, 0)
 		return true, false
 	}
 

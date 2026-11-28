@@ -852,3 +852,65 @@ func TestRotatorSuccessClearsZeroQuotaFraction(t *testing.T) {
 		t.Errorf("quota fraction after success = %v; want 1.0", got)
 	}
 }
+
+// TestRotatorGenerateWithExcludePrefersOtherUsableAccount verifies soft-exclusion rotates sticky
+// retries to another ready account, and falls back to the excluded account when alternatives are
+// unavailable or cooling down.
+func TestRotatorGenerateWithExcludePrefersOtherUsableAccount(t *testing.T) {
+	mockServer := newMockGoogleServer(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"test\":\"ok\"}\n\n"))
+	})
+	defer mockServer.close()
+
+	cfg := &config.Config{
+		Strategy:  string(rotator.StrategySticky),
+		TokenURL:  mockServer.server.URL + "/token",
+		Endpoints: []string{mockServer.server.URL},
+	}
+
+	a1 := newTestAccount("first@example.com")
+	a2 := newTestAccount("second@example.com")
+
+	pool, err := rotator.NewPool(nil, cfg, time.Now)
+	if err != nil {
+		t.Fatalf("new pool failed: %v", err)
+	}
+	pool.SetAccounts([]*auth.Account{a1, a2})
+
+	r := rotator.NewRotator(pool, cfg, nil, time.Now)
+	r.SetHTTPClient(mockServer.server.Client())
+	r.SetSleepFn(func(context.Context, time.Duration) error { return nil })
+
+	builder := func(s *rotator.AccountState) (any, error) {
+		return map[string]any{"project": s.Account().ProjectID}, nil
+	}
+
+	// With first@example.com excluded and second@example.com ready, second@example.com must be picked.
+	exclude := map[string]struct{}{"first@example.com": {}}
+	res, err := r.GenerateWithExclude(t.Context(), "gemini-pro", exclude, builder)
+	if err != nil {
+		t.Fatalf("GenerateWithExclude failed: %v", err)
+	}
+	_ = res.Response.Body.Close()
+	if res.State.Email() != "second@example.com" {
+		t.Fatalf("expected second@example.com when first is excluded, got %s", res.State.Email())
+	}
+
+	// When second@example.com is cooling down for 1 hour, excluding first@example.com must fall back
+	// to first@example.com immediately instead of failing with a 429 cooldown wait.
+	pool.States()[1].SetCooldown("gemini-pro", time.Now().Add(time.Hour), time.Now(), "429")
+	res, err = r.GenerateWithExclude(t.Context(), "gemini-pro", exclude, builder)
+	if err != nil {
+		t.Fatalf("GenerateWithExclude fallback failed: %v", err)
+	}
+	_ = res.Response.Body.Close()
+	if res.State.Email() != "first@example.com" {
+		t.Fatalf("expected fallback to first@example.com when alternative is cooling, got %s", res.State.Email())
+	}
+}

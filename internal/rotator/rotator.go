@@ -336,6 +336,13 @@ func (r *Rotator) ForEachAccount(ctx context.Context, fn func(ctx context.Contex
 // Generate dispatches a request to Google Cloud Code Assist, automatically handling rate limits,
 // token refresh, cooldowns, and seamless account rotation.
 func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPayloadBuilder) (*AttemptResult, error) {
+	return r.GenerateWithExclude(ctx, model, nil, builder)
+}
+
+// GenerateWithExclude dispatches a request like Generate while preferring accounts whose email is
+// not in excludeEmails. When every non-excluded account is unavailable or cooling down, it clears
+// the soft exclusion and falls back to excluded usable accounts so empty-stream retries still run.
+func (r *Rotator) GenerateWithExclude(ctx context.Context, model string, excludeEmails map[string]struct{}, builder RequestPayloadBuilder) (*AttemptResult, error) {
 	if err := r.pool.RefreshIfChanged(); err != nil {
 		r.logger.Warn("failed checking accounts file reload", "error", err)
 	}
@@ -357,6 +364,20 @@ func (r *Rotator) Generate(ctx context.Context, model string, builder RequestPay
 	}
 
 	skip := make(map[*AccountState]struct{})
+	// Track soft-excluded accounts separately from accounts that failed during this dispatch so a
+	// fallback can un-skip only the soft exclusions without retrying broken or cooling accounts.
+	softExcluded := make(map[*AccountState]struct{})
+	if len(excludeEmails) > 0 {
+		for _, s := range states {
+			if !s.Usable() {
+				continue
+			}
+			if _, excluded := excludeEmails[s.Email()]; excluded {
+				skip[s] = struct{}{}
+				softExcluded[s] = struct{}{}
+			}
+		}
+	}
 	retried401 := make(map[*AccountState]struct{})
 	var lastRotErr *RotatorError
 	var waited time.Duration
@@ -384,10 +405,26 @@ rotation:
 		r.mu.Unlock()
 
 		if pick.NoAcct {
+			if len(softExcluded) > 0 {
+				for s := range softExcluded {
+					delete(skip, s)
+				}
+				clear(softExcluded)
+				continue
+			}
 			break
 		}
 
 		if pick.Wait > 0 {
+			if len(softExcluded) > 0 {
+				// A non-excluded account is cooling while a soft-excluded account may be ready
+				// immediately, so fall back to the excluded pool before absorbing cooldown waits.
+				for s := range softExcluded {
+					delete(skip, s)
+				}
+				clear(softExcluded)
+				continue
+			}
 			if waited+pick.Wait > maxWait {
 				return nil, &RotatorError{
 					StatusCode:   http.StatusTooManyRequests,

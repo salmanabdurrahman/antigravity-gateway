@@ -239,8 +239,11 @@ type ResponseTranslator struct {
 	// responseID is the unique completion ID.
 	responseID string
 
-	// sawOutput tracks whether any content was emitted.
+	// sawOutput tracks whether any visible content or tool call was emitted.
 	sawOutput bool
+
+	// sawSignature tracks whether any upstream part carried a thoughtSignature.
+	sawSignature bool
 
 	// continuationToken holds the long-decode continuation token of the current hop, if any.
 	continuationToken string
@@ -292,7 +295,6 @@ func (t *ResponseTranslator) Push(event map[string]any) {
 			}
 			if fReason, ok := cand["finishReason"].(string); ok && fReason != "" {
 				t.finishReason = fReason
-				t.sawOutput = true
 			}
 		}
 	}
@@ -305,6 +307,9 @@ func (t *ResponseTranslator) Push(event map[string]any) {
 // processPart translates a single upstream candidate part (text, thought, or functionCall) into deltas and recipe steps.
 func (t *ResponseTranslator) processPart(part map[string]any) {
 	sig, _ := part["thoughtSignature"].(string)
+	if sig != "" {
+		t.sawSignature = true
+	}
 
 	if fc, ok := part["functionCall"].(map[string]any); ok {
 		t.sawOutput = true
@@ -373,8 +378,6 @@ func (t *ResponseTranslator) processPart(part map[string]any) {
 		if txt != "" {
 			t.reasoning.WriteString(txt)
 			t.onDelta(Delta{ReasoningContent: txt})
-		}
-		if txt != "" || sig != "" {
 			t.sawOutput = true
 		}
 		return
@@ -386,10 +389,6 @@ func (t *ResponseTranslator) processPart(part map[string]any) {
 	if txt != "" {
 		t.text.WriteString(txt)
 		t.onDelta(Delta{Content: txt})
-	}
-	// An empty text frame without a signature carries no model output, so it must not mark the stream
-	// as produced: doing so would suppress the empty-response retry and surface a blank answer.
-	if txt != "" || sig != "" {
 		t.sawOutput = true
 	}
 }
@@ -430,9 +429,24 @@ func (t *ResponseTranslator) Usage() *Usage {
 	return t.usage
 }
 
-// SawOutput reports whether any model text, thought, or tool call parts were encountered.
+// SawOutput reports whether any non-empty model text, thought text, or tool call parts were encountered.
 func (t *ResponseTranslator) SawOutput() bool {
 	return t.sawOutput
+}
+
+// HasSignature reports whether any upstream part carried a thoughtSignature.
+func (t *ResponseTranslator) HasSignature() bool {
+	return t.sawSignature
+}
+
+// FinishReason returns the raw upstream finishReason string observed on the response, if any.
+func (t *ResponseTranslator) FinishReason() string {
+	return t.finishReason
+}
+
+// IsContentBlocked reports whether upstream stopped generation due to a content safety or policy block.
+func (t *ResponseTranslator) IsContentBlocked() bool {
+	return slices.Contains(blockedReasons, t.finishReason)
 }
 
 // ContinuationToken returns the long-decode continuation token captured from the current hop.

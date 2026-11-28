@@ -74,6 +74,9 @@ type Server struct {
 	// recipeCache replays recent thought signatures for sessions whose client stripped
 	// reasoning_details between turns.
 	recipeCache *recipeCache
+
+	// sleepFn executes retry backoff pauses, injectable for deterministic tests.
+	sleepFn func(ctx context.Context, d time.Duration) error
 }
 
 // Options encapsulates configuration parameters for initializing a Server instance.
@@ -127,6 +130,7 @@ func NewServer(opts Options) (*Server, error) {
 		pidFile:     opts.PIDFile,
 		configPath:  opts.ConfigPath,
 		recipeCache: newRecipeCache(time.Now),
+		sleepFn:     defaultServerSleep,
 	}
 	// Clone so later mutation of the caller's configuration cannot change what handlers observe.
 	s.cfg.Store(opts.Config.Clone())
@@ -165,6 +169,39 @@ func (s *Server) emptyStreamRetryCount() int {
 		return cfg.EmptyStreamRetryCount()
 	}
 	return EmptyStreamRetries
+}
+
+// defaultServerSleep pauses execution for duration d while honoring context cancellation.
+func defaultServerSleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// sleep pauses execution for duration d using the configured sleep function under read lock.
+func (s *Server) sleep(ctx context.Context, d time.Duration) error {
+	s.mu.RLock()
+	fn := s.sleepFn
+	s.mu.RUnlock()
+	if fn != nil {
+		return fn(ctx, d)
+	}
+	return defaultServerSleep(ctx, d)
+}
+
+// setSleepFn overrides the server retry sleep handler for deterministic tests.
+func (s *Server) setSleepFn(fn func(ctx context.Context, d time.Duration) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sleepFn = fn
 }
 
 // setConfig applies mutate to a deep copy of the current configuration and publishes the result

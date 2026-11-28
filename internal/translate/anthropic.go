@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/catalog"
@@ -735,6 +736,9 @@ type AnthropicStreamTranslator struct {
 	// sawOutput tracks whether any visible content or tool call was encountered.
 	sawOutput bool
 
+	// sawSignature tracks whether any upstream part carried a thoughtSignature.
+	sawSignature bool
+
 	// accumulatedBlocks collects complete content blocks for non-streaming response assembly.
 	accumulatedBlocks []AnthropicContentBlock
 
@@ -749,6 +753,9 @@ type AnthropicStreamTranslator struct {
 
 	// cachedTokens accumulates cache read token counts.
 	cachedTokens int
+
+	// rawFinishReason stores the raw upstream finishReason string for diagnostics and block detection.
+	rawFinishReason string
 
 	// continuationToken holds the long-decode continuation token of the current hop, if any.
 	continuationToken string
@@ -769,9 +776,54 @@ func NewAnthropicStreamTranslator(model string, emit func(eventType string, data
 	}
 }
 
-// SawOutput reports whether output tokens or tools were generated.
+// SawOutput reports whether any non-empty visible output, thinking text, or tool calls were generated.
 func (t *AnthropicStreamTranslator) SawOutput() bool {
 	return t.sawOutput
+}
+
+// HasSignature reports whether any upstream part carried a thoughtSignature.
+func (t *AnthropicStreamTranslator) HasSignature() bool {
+	return t.sawSignature
+}
+
+// FinishReason returns the raw upstream finishReason string observed on the response, if any.
+func (t *AnthropicStreamTranslator) FinishReason() string {
+	return t.rawFinishReason
+}
+
+// IsContentBlocked reports whether upstream stopped generation due to a content safety or policy block.
+func (t *AnthropicStreamTranslator) IsContentBlocked() bool {
+	return slices.Contains(blockedReasons, strings.ToUpper(strings.TrimSpace(t.rawFinishReason)))
+}
+
+// ensureMessageStart emits the opening Anthropic message_start event once, deferred until real
+// output arrives (or Finish is called) so signature-only empty frames do not lock the HTTP stream
+// before empty-stream retries can run.
+func (t *AnthropicStreamTranslator) ensureMessageStart() {
+	if t.hasEmittedStart {
+		return
+	}
+	t.hasEmittedStart = true
+	if t.emit != nil {
+		t.emit("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":            t.messageID,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []any{},
+				"model":         t.model,
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage": map[string]any{
+					"input_tokens":                max(0, t.promptTokens-t.cachedTokens),
+					"output_tokens":               0,
+					"cache_read_input_tokens":     t.cachedTokens,
+					"cache_creation_input_tokens": 0,
+				},
+			},
+		})
+	}
 }
 
 // ContinuationToken returns the long-decode continuation token captured from the current hop.
@@ -803,6 +855,7 @@ func (t *AnthropicStreamTranslator) captureSignature(sig string) {
 	if sig == "" {
 		return
 	}
+	t.sawSignature = true
 	if t.currentBlockType == "thinking" {
 		t.currentSignature = sig
 	}
@@ -847,30 +900,6 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 	contentObj, _ := firstCand["content"].(map[string]any)
 	partsList, _ := contentObj["parts"].([]any)
 
-	if !t.hasEmittedStart && len(partsList) > 0 {
-		t.hasEmittedStart = true
-		if t.emit != nil {
-			t.emit("message_start", map[string]any{
-				"type": "message_start",
-				"message": map[string]any{
-					"id":            t.messageID,
-					"type":          "message",
-					"role":          "assistant",
-					"content":       []any{},
-					"model":         t.model,
-					"stop_reason":   nil,
-					"stop_sequence": nil,
-					"usage": map[string]any{
-						"input_tokens":                max(0, t.promptTokens-t.cachedTokens),
-						"output_tokens":               0,
-						"cache_read_input_tokens":     t.cachedTokens,
-						"cache_creation_input_tokens": 0,
-					},
-				},
-			})
-		}
-	}
-
 	for _, p := range partsList {
 		part, ok := p.(map[string]any)
 		if !ok {
@@ -878,9 +907,17 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 		}
 
 		if thought, ok := part["thought"].(bool); ok && thought {
-			t.sawOutput = true
 			txt, _ := part["text"].(string)
 			sig, _ := part["thoughtSignature"].(string)
+			if txt == "" {
+				// Protocol Quirk: Gemini may attach a reasoning signature to an empty thought part.
+				// Capture the signature without opening a block or marking sawOutput so empty-stream
+				// retries still trigger when no visible text or tool calls follow.
+				t.captureSignature(sig)
+				continue
+			}
+			t.ensureMessageStart()
+			t.sawOutput = true
 
 			// A different signature marks a distinct thinking block. Close the previous block first so
 			// its signature is emitted before the new one starts instead of being overwritten.
@@ -908,6 +945,7 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 			}
 
 			if sig != "" {
+				t.sawSignature = true
 				t.currentSignature = sig
 				if len(t.accumulatedBlocks) > 0 {
 					lastIdx := len(t.accumulatedBlocks) - 1
@@ -915,21 +953,19 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 				}
 			}
 
-			if txt != "" {
-				if len(t.accumulatedBlocks) > 0 {
-					lastIdx := len(t.accumulatedBlocks) - 1
-					t.accumulatedBlocks[lastIdx].Thinking += txt
-				}
-				if t.emit != nil {
-					t.emit("content_block_delta", map[string]any{
-						"type":  "content_block_delta",
-						"index": t.blockIndex,
-						"delta": map[string]any{
-							"type":     "thinking_delta",
-							"thinking": txt,
-						},
-					})
-				}
+			if len(t.accumulatedBlocks) > 0 {
+				lastIdx := len(t.accumulatedBlocks) - 1
+				t.accumulatedBlocks[lastIdx].Thinking += txt
+			}
+			if t.emit != nil {
+				t.emit("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": t.blockIndex,
+					"delta": map[string]any{
+						"type":     "thinking_delta",
+						"thinking": txt,
+					},
+				})
 			}
 		} else if txt, ok := part["text"].(string); ok {
 			sig, _ := part["thoughtSignature"].(string)
@@ -940,6 +976,7 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 				t.captureSignature(sig)
 				continue
 			}
+			t.ensureMessageStart()
 			t.sawOutput = true
 
 			if t.currentBlockType != "text" {
@@ -980,6 +1017,7 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 				})
 			}
 		} else if fc, ok := part["functionCall"].(map[string]any); ok {
+			t.ensureMessageStart()
 			t.sawOutput = true
 			// A signature attached to the tool call belongs to the reasoning block that produced it,
 			// so it is preserved before the open block is closed.
@@ -1040,6 +1078,7 @@ func (t *AnthropicStreamTranslator) Push(event map[string]any) {
 	}
 
 	if finishReason, ok := firstCand["finishReason"].(string); ok && finishReason != "" {
+		t.rawFinishReason = finishReason
 		// Long decode stops mid-generation: keep any captured continuation token and do not treat the
 		// hop as the final stop reason; the router chains the next hop instead.
 		if token, _ := firstCand["continuationToken"].(string); token != "" {
@@ -1106,29 +1145,7 @@ func (t *AnthropicStreamTranslator) closeCurrentBlock() {
 
 // Finish emits terminal message_delta and message_stop events.
 func (t *AnthropicStreamTranslator) Finish() {
-	if !t.hasEmittedStart {
-		t.hasEmittedStart = true
-		if t.emit != nil {
-			t.emit("message_start", map[string]any{
-				"type": "message_start",
-				"message": map[string]any{
-					"id":            t.messageID,
-					"type":          "message",
-					"role":          "assistant",
-					"content":       []any{},
-					"model":         t.model,
-					"stop_reason":   nil,
-					"stop_sequence": nil,
-					"usage": map[string]any{
-						"input_tokens":                max(0, t.promptTokens-t.cachedTokens),
-						"output_tokens":               0,
-						"cache_read_input_tokens":     t.cachedTokens,
-						"cache_creation_input_tokens": 0,
-					},
-				},
-			})
-		}
-	}
+	t.ensureMessageStart()
 
 	t.closeCurrentBlock()
 

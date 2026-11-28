@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -1115,5 +1116,391 @@ func TestChatCompletionsLongDecodeSkipsContinuationUnderExplicitCap(t *testing.T
 	}
 	if content, _ := completion.Choices[0].Message.Content.(string); !strings.Contains(content, "partial answer") {
 		t.Errorf("expected partial output preserved, got %q", content)
+	}
+}
+
+// TestChatCompletionsRetriesEmptySignatureOnlyStream verifies that an upstream stream carrying only
+// an empty text part with thoughtSignature and finishReason STOP triggers empty-stream retry and
+// returns the recovered completion instead of an empty HTTP 200 response.
+func TestChatCompletionsRetriesEmptySignatureOnlyStream(t *testing.T) {
+	var attempts atomic.Int64
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if attempts.Add(1) == 1 {
+				_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-empty-1"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":0,"thoughtsTokenCount":0}}}` + "\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Recovered answer."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5}}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	harness.server.setSleepFn(func(context.Context, time.Duration) error { return nil })
+
+	handler := harness.server.buildHandler()
+	payload := `{"model":"gemini-4-hydrogen-high","messages":[{"role":"user","content":"Hello"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 after empty-stream retry, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("expected 2 upstream attempts, got %d", got)
+	}
+	if !strings.Contains(rec.Body.String(), "Recovered answer.") {
+		t.Errorf("expected recovered answer in stream body, got:\n%s", rec.Body.String())
+	}
+}
+
+// TestChatCompletionsReturns502WhenEmptySignatureOnlyRetriesExhausted verifies both streaming and
+// non-streaming requests return HTTP 502 instead of an empty HTTP 200 when every upstream retry
+// yields only signature-bearing empty parts.
+func TestChatCompletionsReturns502WhenEmptySignatureOnlyRetriesExhausted(t *testing.T) {
+	for _, streamMode := range []bool{true, false} {
+		name := "non-streaming"
+		if streamMode {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var attempts atomic.Int64
+
+			harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+					return
+				}
+				if strings.Contains(r.URL.Path, "streamGenerateContent") {
+					attempts.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-empty"}]},"finishReason":"STOP"}]}}` + "\n\n"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			harness.server.setSleepFn(func(context.Context, time.Duration) error { return nil })
+
+			handler := harness.server.buildHandler()
+			body := map[string]any{
+				"model":    "gemini-4-hydrogen-high",
+				"messages": []map[string]any{{"role": "user", "content": "Hello"}},
+				"stream":   streamMode,
+			}
+			raw, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(raw))
+			req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("expected status 502 after exhausted retries, got %d: %s", rec.Code, rec.Body.String())
+			}
+			wantAttempts := int64(harness.server.emptyStreamRetryCount() + 1)
+			if got := attempts.Load(); got != wantAttempts {
+				t.Fatalf("expected %d upstream attempts, got %d", wantAttempts, got)
+			}
+		})
+	}
+}
+
+// TestChatCompletionsBlockedFinishReasonDoesNotRetry verifies that an empty SAFETY candidate is
+// returned immediately with finish_reason content_filter instead of burning empty-stream retries.
+func TestChatCompletionsBlockedFinishReasonDoesNotRetry(t *testing.T) {
+	var attempts atomic.Int64
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			attempts.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := harness.server.buildHandler()
+	payload := `{"model":"gemini-4-hydrogen-high","messages":[{"role":"user","content":"Hello"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for content_filter response, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("expected 1 attempt without empty-stream retries, got %d", got)
+	}
+	var completion translate.ChatCompletion
+	if err := json.Unmarshal(rec.Body.Bytes(), &completion); err != nil {
+		t.Fatalf("decoding completion: %v", err)
+	}
+	if len(completion.Choices) == 0 || completion.Choices[0].FinishReason != "content_filter" {
+		t.Fatalf("expected finish_reason content_filter, got %+v", completion.Choices)
+	}
+}
+
+// TestChatCompletionsEmptyStreamRetryRotatesAccountInStickyMode verifies that an empty signature-only
+// stream on one account rotates the retry onto another usable account even under sticky strategy.
+func TestChatCompletionsEmptyStreamRetryRotatesAccountInStickyMode(t *testing.T) {
+	var seenProjects []string
+	var mu sync.Mutex
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			var env struct {
+				Project string `json:"project"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&env)
+			mu.Lock()
+			seenProjects = append(seenProjects, env.Project)
+			callNum := len(seenProjects)
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if callNum == 1 {
+				_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-empty"}]},"finishReason":"STOP"}]}}` + "\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Rotated ok."}]},"finishReason":"STOP"}]}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	harness.server.setSleepFn(func(context.Context, time.Duration) error { return nil })
+
+	// Add a second usable account with a distinct ProjectID so we can distinguish which account served each attempt.
+	acc1 := &auth.Account{
+		Email:        harness.accEmail,
+		RefreshToken: "test-refresh-1",
+		ProjectID:    "proj-account-1",
+		AddedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	acc2 := &auth.Account{
+		Email:        "second-user@gmail.com",
+		RefreshToken: "test-refresh-2",
+		ProjectID:    "proj-account-2",
+		AddedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	harness.rotator.Pool().SetAccounts([]*auth.Account{acc1, acc2})
+
+	handler := harness.server.buildHandler()
+	payload := `{"model":"gemini-4-hydrogen-high","messages":[{"role":"user","content":"Hello"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenProjects) != 2 {
+		t.Fatalf("expected 2 upstream attempts, got %d (%v)", len(seenProjects), seenProjects)
+	}
+	if seenProjects[0] == seenProjects[1] {
+		t.Errorf("expected retry to rotate away from %s, got %v", seenProjects[0], seenProjects)
+	}
+}
+
+// TestChatCompletionsEmptyStreamRetryBudgetIndependentOfPromptFallback verifies that a prior
+// prompt-rejection fallback does not consume the empty-stream retry budget.
+func TestChatCompletionsEmptyStreamRetryBudgetIndependentOfPromptFallback(t *testing.T) {
+	var attempts atomic.Int64
+
+	harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+			return
+		}
+		if strings.Contains(r.URL.Path, "streamGenerateContent") {
+			n := attempts.Add(1)
+			if n == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource exhausted.","status":"RESOURCE_EXHAUSTED"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if n <= 3 {
+				_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-empty"}]},"finishReason":"STOP"}]}}` + "\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Survived all retries."}]},"finishReason":"STOP"}]}}` + "\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	harness.server.setSleepFn(func(context.Context, time.Duration) error { return nil })
+
+	handler := harness.server.buildHandler()
+	payload := `{
+		"model":"gemini-4-hydrogen-high",
+		"messages":[{"role":"system","content":"Be concise."},{"role":"user","content":"Hello"}],
+		"stream":false
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(payload))
+	req.Header.Set("Authorization", "Bearer "+harness.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 with full empty-stream retry budget, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := attempts.Load(); got != 4 {
+		t.Fatalf("expected 4 total attempts (1 prompt fallback + 1 initial + 2 empty retries), got %d", got)
+	}
+}
+
+// TestAnthropicMessagesRetriesEmptySignatureOnlyStream verifies that /v1/messages defers
+// message_start and retries when upstream emits only empty parts carrying thoughtSignature, and that
+// the recovered stream carries exactly one message_start instead of one per upstream attempt.
+func TestAnthropicMessagesRetriesEmptySignatureOnlyStream(t *testing.T) {
+	for _, streamMode := range []bool{true, false} {
+		name := "non-streaming"
+		if streamMode {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var attempts atomic.Int64
+
+			harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+					return
+				}
+				if strings.Contains(r.URL.Path, "streamGenerateContent") {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					if attempts.Add(1) == 1 {
+						_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"sig-anth-empty"}]},"finishReason":"STOP"}]}}` + "\n\n"))
+						return
+					}
+					_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"Anthropic recovered."}]},"finishReason":"STOP"}]}}` + "\n\n"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			harness.server.setSleepFn(func(context.Context, time.Duration) error { return nil })
+
+			handler := harness.server.buildHandler()
+			body := map[string]any{
+				"model":      "gemini-4-hydrogen-high",
+				"max_tokens": 128,
+				"messages":   []map[string]any{{"role": "user", "content": "Hello"}},
+				"stream":     streamMode,
+			}
+			raw, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(raw))
+			req.Header.Set("x-api-key", harness.apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if got := attempts.Load(); got != 2 {
+				t.Fatalf("expected 2 upstream attempts, got %d", got)
+			}
+			if !strings.Contains(rec.Body.String(), "Anthropic recovered.") {
+				t.Errorf("expected recovered text in response, got:\n%s", rec.Body.String())
+			}
+			if streamMode {
+				// A premature message_start on the discarded attempt would flush headers early and leave
+				// two start events in the client stream.
+				if got := strings.Count(rec.Body.String(), "event: message_start"); got != 1 {
+					t.Errorf("expected exactly 1 message_start event, got %d:\n%s", got, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// TestAnthropicMessagesBlockedFinishReasonDoesNotRetry verifies that an empty SAFETY candidate on
+// /v1/messages bypasses empty-stream retries and returns stop_reason refusal for both stream modes.
+func TestAnthropicMessagesBlockedFinishReasonDoesNotRetry(t *testing.T) {
+	for _, streamMode := range []bool{true, false} {
+		name := "non-streaming"
+		if streamMode {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			var attempts atomic.Int64
+
+			harness := setupTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/token" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "mock-token", "expires_in": 3600})
+					return
+				}
+				if strings.Contains(r.URL.Path, "streamGenerateContent") {
+					attempts.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}}` + "\n\n"))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+
+			handler := harness.server.buildHandler()
+			body := map[string]any{
+				"model":      "gemini-4-hydrogen-high",
+				"max_tokens": 128,
+				"messages":   []map[string]any{{"role": "user", "content": "Hello"}},
+				"stream":     streamMode,
+			}
+			raw, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(raw))
+			req.Header.Set("x-api-key", harness.apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200 for refusal response, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if got := attempts.Load(); got != 1 {
+				t.Fatalf("expected 1 attempt without empty-stream retries, got %d", got)
+			}
+			if !strings.Contains(rec.Body.String(), "refusal") {
+				t.Errorf("expected refusal stop_reason in response, got:\n%s", rec.Body.String())
+			}
+		})
 	}
 }

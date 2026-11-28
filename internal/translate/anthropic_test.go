@@ -1064,3 +1064,62 @@ func TestBuildAnthropicRequestToolChoiceNoneOmitsTools(t *testing.T) {
 		t.Errorf("expected tools and toolConfig omitted for tool_choice none, got tools=%v toolConfig=%v", geminiReq.Tools, geminiReq.ToolConfig)
 	}
 }
+
+// TestAnthropicStreamEmptySignatureOnlyDefersMessageStartAndSawOutput verifies that an empty text
+// or empty thought frame carrying only thoughtSignature does not emit message_start prematurely or
+// set SawOutput true, allowing router empty-stream retries to execute before headers are committed.
+func TestAnthropicStreamEmptySignatureOnlyDefersMessageStartAndSawOutput(t *testing.T) {
+	translator, events := collectAnthropicEvents(t, "gemini-4-hydrogen-high")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{
+					map[string]any{"thought": true, "text": "", "thoughtSignature": "sig-thought-empty"},
+					map[string]any{"text": "", "thoughtSignature": "sig-text-empty"},
+				}},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+
+	if translator.SawOutput() {
+		t.Fatal("expected SawOutput() false when only empty parts with signatures arrived")
+	}
+	if !translator.HasSignature() {
+		t.Fatal("expected HasSignature() true when signatures were captured")
+	}
+	if translator.IsContentBlocked() {
+		t.Fatal("expected IsContentBlocked() false for STOP")
+	}
+	if len(*events) != 0 {
+		t.Fatalf("expected message_start deferred until real output or Finish(), got events: %v", *events)
+	}
+
+	translator.Finish()
+	if len(*events) < 3 {
+		t.Fatalf("expected Finish() to emit terminal events, got %v", *events)
+	}
+}
+
+// TestAnthropicStreamSafetyBlockFlaggedWithoutOutput verifies that an empty SAFETY candidate is
+// flagged as content-blocked so callers surface refusal instead of retrying it as an empty glitch.
+func TestAnthropicStreamSafetyBlockFlaggedWithoutOutput(t *testing.T) {
+	translator, _ := collectAnthropicEvents(t, "gemini-4-hydrogen-high")
+
+	translator.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content":      map[string]any{"parts": []any{}},
+				"finishReason": "SAFETY",
+			}},
+		},
+	})
+
+	if translator.SawOutput() {
+		t.Fatal("expected SawOutput() false on empty SAFETY frame")
+	}
+	if !translator.IsContentBlocked() {
+		t.Fatal("expected IsContentBlocked() true on SAFETY finishReason")
+	}
+}

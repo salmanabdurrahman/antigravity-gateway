@@ -23,17 +23,17 @@ Responses travel the same path backwards: Cloud Code SSE chunks and JSON payload
 
 ## 2. Package map
 
-| Path                     | Responsibility                                                       |
-| :----------------------- | :------------------------------------------------------------------- |
-| `cmd/agw/`               | Cobra CLI commands; parsing and delegation only.                     |
-| `internal/config/`       | `~/.agw` resolution, defaults, env overrides, header builders.       |
-| `internal/auth/`         | OAuth PKCE, token refresh, companion project discovery, storage.     |
-| `internal/rotator/`      | Account pool, `sticky`/`round-robin`/`hybrid` pickers, cooldowns.    |
-| `internal/catalog/`      | Model discovery, token limits, quota tracking, disk cache.           |
-| `internal/translate/`    | Bidirectional schema mapping, thought signatures, SSE streaming.     |
-| `internal/server/`       | `net/http` daemon, middleware, routes, signature cache.              |
-| `internal/client/`       | Pi, OpenCode, and Claude Code config injectors with backups.         |
-| `internal/updater/`      | Release discovery, SHA-256 verification, atomic self-upgrade.        |
+| Path                  | Responsibility                                                    |
+| :-------------------- | :---------------------------------------------------------------- |
+| `cmd/agw/`            | Cobra CLI commands; parsing and delegation only.                  |
+| `internal/config/`    | `~/.agw` resolution, defaults, env overrides, header builders.    |
+| `internal/auth/`      | OAuth PKCE, token refresh, companion project discovery, storage.  |
+| `internal/rotator/`   | Account pool, `sticky`/`round-robin`/`hybrid` pickers, cooldowns. |
+| `internal/catalog/`   | Model discovery, token limits, quota tracking, disk cache.        |
+| `internal/translate/` | Bidirectional schema mapping, thought signatures, SSE streaming.  |
+| `internal/server/`    | `net/http` daemon, middleware, routes, signature cache.           |
+| `internal/client/`    | Pi, OpenCode, and Claude Code config injectors with backups.      |
+| `internal/updater/`   | Release discovery, SHA-256 verification, atomic self-upgrade.     |
 
 ## 3. Protocol fidelity
 
@@ -43,7 +43,7 @@ Cloud Code Assist is an internal surface, so correctness depends on reproducing 
 - **Schema sanitization**: tool JSON schemas pass through a multi-phase pipeline that hoists `$ref` collisions, flattens unions, repairs malformed array declarations across every composition keyword, and falls back to legacy `parameters` mode when upstream rejects a schema.
 - **Thinking budgets**: categorical thinking levels and numeric budgets are clamped per model family; explicit output caps shrink reasoning, and a cap below the family floor (1024 tokens for Claude and `gpt-oss`) disables reasoning instead of emitting an invalid envelope.
 - **Claude specifics**: the mandatory `anthropic-beta: interleaved-thinking-2025-05-14` header, `cache_control` stripping, and third-party agent identity line scrubbing keep Claude requests acceptable to upstream validation.
-- **Streaming**: SSE deltas preserve `index: 0` on tool-call chunks, keep reasoning separate from content, and use an expanded scanner buffer (10 MB) so large diffs and thinking blocks are never truncated.
+- **Streaming**: SSE deltas preserve `index: 0` on tool-call chunks, keep reasoning separate from content, and use an expanded scanner buffer (10 MB) so large diffs and thinking blocks are never truncated. Upstream streams that terminate with no visible output (including signature-only empty frames) are retried before flushing headers; see [HTTP API Reference](api.md#3-request--response-translation) and [Configuration Reference](configuration.md#5-account-rotation--failover).
 
 ## 4. Security posture
 

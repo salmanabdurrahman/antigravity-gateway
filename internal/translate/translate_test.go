@@ -1192,3 +1192,151 @@ func TestBuildRequestToolChoiceNoneOmitsTools(t *testing.T) {
 		t.Error("expected declarations retained for tool_choice auto")
 	}
 }
+
+// TestResponseTranslatorSignatureOnlyAndFinishReasonDoNotMarkSawOutput verifies that an upstream
+// stream carrying only empty text/thought parts with thoughtSignature or a bare finishReason STOP
+// leaves SawOutput false so the router retries instead of emitting an empty HTTP 200 completion.
+func TestResponseTranslatorSignatureOnlyAndFinishReasonDoNotMarkSawOutput(t *testing.T) {
+	cases := []struct {
+		name      string
+		events    []map[string]any
+		wantSig   bool
+		wantBlock bool
+	}{
+		{
+			name: "empty text with signature and STOP",
+			events: []map[string]any{
+				{
+					"response": map[string]any{
+						"candidates": []any{map[string]any{
+							"content": map[string]any{"parts": []any{
+								map[string]any{"text": "", "thoughtSignature": "sig-empty-text"},
+							}},
+							"finishReason": "STOP",
+						}},
+					},
+				},
+			},
+			wantSig: true,
+		},
+		{
+			name: "empty thought with signature and STOP",
+			events: []map[string]any{
+				{
+					"response": map[string]any{
+						"candidates": []any{map[string]any{
+							"content": map[string]any{"parts": []any{
+								map[string]any{"thought": true, "text": "", "thoughtSignature": "sig-empty-thought"},
+							}},
+							"finishReason": "STOP",
+						}},
+					},
+				},
+			},
+			wantSig: true,
+		},
+		{
+			name: "missing text field with signature and STOP",
+			events: []map[string]any{
+				{
+					"response": map[string]any{
+						"candidates": []any{map[string]any{
+							"content": map[string]any{"parts": []any{
+								map[string]any{"thoughtSignature": "sig-only"},
+							}},
+							"finishReason": "STOP",
+						}},
+					},
+				},
+			},
+			wantSig: true,
+		},
+		{
+			name: "empty parts with STOP only",
+			events: []map[string]any{
+				{
+					"response": map[string]any{
+						"candidates": []any{map[string]any{
+							"content":      map[string]any{"parts": []any{}},
+							"finishReason": "STOP",
+						}},
+					},
+				},
+			},
+		},
+		{
+			name: "empty parts with SAFETY block",
+			events: []map[string]any{
+				{
+					"response": map[string]any{
+						"candidates": []any{map[string]any{
+							"content":      map[string]any{"parts": []any{}},
+							"finishReason": "SAFETY",
+						}},
+					},
+				},
+			},
+			wantBlock: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var deltaCount int
+			tr := NewResponseTranslator("gemini-4-hydrogen-high", func(Delta) {
+				deltaCount++
+			})
+			for _, ev := range tc.events {
+				tr.Push(ev)
+			}
+			if tr.SawOutput() {
+				t.Errorf("expected SawOutput() false, got true")
+			}
+			if deltaCount != 0 {
+				t.Errorf("expected 0 emitted deltas, got %d", deltaCount)
+			}
+			if tr.HasSignature() != tc.wantSig {
+				t.Errorf("HasSignature() = %v; want %v", tr.HasSignature(), tc.wantSig)
+			}
+			if tr.IsContentBlocked() != tc.wantBlock {
+				t.Errorf("IsContentBlocked() = %v; want %v", tr.IsContentBlocked(), tc.wantBlock)
+			}
+		})
+	}
+}
+
+// TestResponseTranslatorTextWithTrailingSignatureMarksSawOutput verifies that visible text followed
+// by an empty trailing signature part marks SawOutput true and preserves the signature recipe.
+func TestResponseTranslatorTextWithTrailingSignatureMarksSawOutput(t *testing.T) {
+	tr := NewResponseTranslator("gemini-4-hydrogen-high", nil)
+	tr.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{
+					map[string]any{"text": "Hello"},
+				}},
+			}},
+		},
+	})
+	tr.Push(map[string]any{
+		"response": map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{
+					map[string]any{"text": "", "thoughtSignature": "sig-trailing"},
+				}},
+				"finishReason": "STOP",
+			}},
+		},
+	})
+
+	if !tr.SawOutput() {
+		t.Fatal("expected SawOutput() true when visible text was emitted")
+	}
+	if !tr.HasSignature() {
+		t.Fatal("expected HasSignature() true when trailing signature was present")
+	}
+	details := tr.ReasoningDetails()
+	if len(details) == 0 || !strings.Contains(details[0].Data, "sig-trailing") {
+		t.Errorf("expected trailing signature retained in recipe, got %+v", details)
+	}
+}

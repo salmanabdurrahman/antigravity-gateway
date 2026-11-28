@@ -18,27 +18,27 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 
 ## 2. `config.json` keys
 
-| Key                        | Type              | Default                                 | Purpose                                                                                         |
-| :------------------------- | :---------------- | :-------------------------------------- | :---------------------------------------------------------------------------------------------- |
-| `host`                     | string            | `127.0.0.1`                             | Loopback interface to bind; non-loopback values are coerced to `127.0.0.1`.                     |
-| `port`                     | integer           | `51400`                                 | Local TCP port for the gateway.                                                                 |
-| `api_key`                  | string            | generated `agw_` + 64 hex               | Bearer token required by `/v1/*` endpoints.                                                     |
-| `strategy`                 | string            | `sticky`                                | Rotation strategy: `sticky`, `round-robin`, or `hybrid`.                                        |
-| `client_id`                | string            | bundled desktop client                  | Google OAuth client identifier (BYOC override).                                                 |
-| `client_secret`            | string            | bundled desktop client                  | Google OAuth client secret (BYOC override; the bundled value is a public client credential).    |
-| `auth_url`                 | string            | Google OAuth endpoint                   | Authorization endpoint override.                                                                |
-| `token_url`                | string            | Google OAuth endpoint                   | Token exchange endpoint override.                                                               |
-| `user_info_url`            | string            | Google userinfo endpoint                | Account identity endpoint override.                                                             |
-| `redirect_uri`             | string            | `http://127.0.0.1:51121/oauth-callback` | Local OAuth callback listener.                                                                  |
-| `endpoints`                | array of strings  | tier-ordered default pair               | Upstream Cloud Code Assist endpoints, tried in order.                                           |
-| `user_agent`               | string (optional) | derived Antigravity Hub UA              | Overrides the upstream `User-Agent`.                                                            |
-| `api_client`               | string (optional) | derived                                 | Overrides the `X-Goog-Api-Client` header.                                                       |
-| `client_metadata`          | string (optional) | derived                                 | Overrides the `Client-Metadata` JSON header.                                                    |
-| `quota_threshold`          | float (0.0–1.0)   | `0.05` (5%)                             | Remaining-quota floor before `hybrid` deprioritizes an account.                                 |
-| `model_mapping`            | object            | empty                                   | Custom alias → backend model ID map.                                                            |
-| `max_wait_seconds`         | integer           | `20` (range 1–120)                      | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.       |
-| `default_cooldown_seconds` | integer           | `60` (range 1–3600)                     | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x. |
-| `empty_stream_retries`     | integer           | `2` (range 1–5)                         | Extra attempts when Google closes a stream before emitting any content.                         |
+| Key                        | Type              | Default                                 | Purpose                                                                                                                    |
+| :------------------------- | :---------------- | :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
+| `host`                     | string            | `127.0.0.1`                             | Loopback interface to bind; non-loopback values are coerced to `127.0.0.1`.                                                |
+| `port`                     | integer           | `51400`                                 | Local TCP port for the gateway.                                                                                            |
+| `api_key`                  | string            | generated `agw_` + 64 hex               | Bearer token required by `/v1/*` endpoints.                                                                                |
+| `strategy`                 | string            | `sticky`                                | Rotation strategy: `sticky`, `round-robin`, or `hybrid`.                                                                   |
+| `client_id`                | string            | bundled desktop client                  | Google OAuth client identifier (BYOC override).                                                                            |
+| `client_secret`            | string            | bundled desktop client                  | Google OAuth client secret (BYOC override; the bundled value is a public client credential).                               |
+| `auth_url`                 | string            | Google OAuth endpoint                   | Authorization endpoint override.                                                                                           |
+| `token_url`                | string            | Google OAuth endpoint                   | Token exchange endpoint override.                                                                                          |
+| `user_info_url`            | string            | Google userinfo endpoint                | Account identity endpoint override.                                                                                        |
+| `redirect_uri`             | string            | `http://127.0.0.1:51121/oauth-callback` | Local OAuth callback listener.                                                                                             |
+| `endpoints`                | array of strings  | tier-ordered default pair               | Upstream Cloud Code Assist endpoints, tried in order.                                                                      |
+| `user_agent`               | string (optional) | derived Antigravity Hub UA              | Overrides the upstream `User-Agent`.                                                                                       |
+| `api_client`               | string (optional) | derived                                 | Overrides the `X-Goog-Api-Client` header.                                                                                  |
+| `client_metadata`          | string (optional) | derived                                 | Overrides the `Client-Metadata` JSON header.                                                                               |
+| `quota_threshold`          | float (0.0–1.0)   | `0.05` (5%)                             | Remaining-quota floor before `hybrid` deprioritizes an account.                                                            |
+| `model_mapping`            | object            | empty                                   | Custom alias → backend model ID map.                                                                                       |
+| `max_wait_seconds`         | integer           | `20` (range 1–120)                      | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.                                  |
+| `default_cooldown_seconds` | integer           | `60` (range 1–3600)                     | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x.                            |
+| `empty_stream_retries`     | integer           | `2` (range 1–5)                         | Extra attempts when Google returns no visible text, reasoning text, or tool calls (including signature-only empty frames). |
 
 `host` accepts IPv4 and IPv6 loopback addresses; non-loopback values are coerced back to `127.0.0.1`. IPv6 literals are bracketed everywhere the daemon binds or builds a URL, so `host: "::1"` yields `[::1]:51400`.
 
@@ -104,6 +104,7 @@ The rotator supports three strategies, configured through `strategy` in `config.
 - The account is cooled down for that model and the request immediately fails over to the next available account.
 - When every account is cooling and the wait is ≤ `max_wait_seconds`, the gateway absorbs the wait transparently; beyond that it returns HTTP 429 with the exact seconds in `Retry-After`.
 - Secondary endpoints and healthy-account fallbacks are exercised on upstream 5xx errors.
+- Empty upstream streams (including frames carrying only a `thoughtSignature` or `finishReason: STOP` without visible text, reasoning text, or tool calls) are retried up to `empty_stream_retries` times independently of prompt/schema fallbacks, with linear backoff (`250ms × attempt`) and soft rotation onto another ready account before returning HTTP `502`. Explicit safety/policy stops (`SAFETY`, `RECITATION`, etc.) bypass empty-stream retries and surface `content_filter` / `refusal`.
 - HTTP 403 bodies that indicate a permanent suspension (`has been disabled`, `violation of terms of service`, `VALIDATION_REQUIRED`) disable the account persistently with the upstream reason instead of looping it through 30-minute cooldowns. Transient 403s still cool down and fail over.
 
 ### Endpoint ordering by subscription tier
