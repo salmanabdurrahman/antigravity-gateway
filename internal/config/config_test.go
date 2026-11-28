@@ -419,21 +419,33 @@ func TestEndpointsForTierOrdering(t *testing.T) {
 	}
 }
 
-// TestConfigDurationDefaults verifies the configurable rotator thresholds expose safe defaults and
-// honor explicit values.
+// TestConfigDurationDefaults verifies the configurable rotator thresholds follow the operating profile:
+// the safe profile absorbs no cooldown wait and keeps one empty-stream retry, while the manual profile
+// preserves the historical defaults. Explicit values always win over the profile.
 func TestConfigDurationDefaults(t *testing.T) {
-	cfg := DefaultConfig()
-	if got := cfg.MaxWaitDuration(); got != 20*time.Second {
-		t.Errorf("MaxWaitDuration() = %v; want 20s", got)
+	safe := DefaultConfig()
+	if got := safe.EffectiveProfile(); got != ProfileSafe {
+		t.Fatalf("DefaultConfig().EffectiveProfile() = %q; want %q", got, ProfileSafe)
 	}
-	if got := cfg.CooldownDuration(); got != 60*time.Second {
-		t.Errorf("CooldownDuration() = %v; want 60s", got)
+	if got := safe.MaxWaitDuration(); got != 0 {
+		t.Errorf("safe MaxWaitDuration() = %v; want 0", got)
 	}
-	if got := cfg.EmptyStreamRetryCount(); got != 2 {
-		t.Errorf("EmptyStreamRetryCount() = %d; want 2", got)
+	if got := safe.EmptyStreamRetryCount(); got != SafeEmptyStreamRetries {
+		t.Errorf("safe EmptyStreamRetryCount() = %d; want %d", got, SafeEmptyStreamRetries)
 	}
 
-	tuned := &Config{MaxWaitSeconds: 5, DefaultCooldownSeconds: 30, EmptyStreamRetries: 4}
+	manual := &Config{Profile: ProfileManual}
+	if got := manual.MaxWaitDuration(); got != 20*time.Second {
+		t.Errorf("manual MaxWaitDuration() = %v; want 20s", got)
+	}
+	if got := manual.EmptyStreamRetryCount(); got != 2 {
+		t.Errorf("manual EmptyStreamRetryCount() = %d; want 2", got)
+	}
+	if got := manual.CooldownDuration(); got != 60*time.Second {
+		t.Errorf("manual CooldownDuration() = %v; want 60s", got)
+	}
+
+	tuned := &Config{Profile: ProfileManual, MaxWaitSeconds: 5, DefaultCooldownSeconds: 30, EmptyStreamRetries: 4}
 	if got := tuned.MaxWaitDuration(); got != 5*time.Second {
 		t.Errorf("tuned MaxWaitDuration() = %v; want 5s", got)
 	}
@@ -444,7 +456,17 @@ func TestConfigDurationDefaults(t *testing.T) {
 		t.Errorf("tuned EmptyStreamRetryCount() = %d; want 4", got)
 	}
 
-	capped := &Config{MaxWaitSeconds: 86400, DefaultCooldownSeconds: 999999, EmptyStreamRetries: 1000}
+	// An explicit value overrides the safe profile too, so an operator can re-enable absorption on a
+	// single account without switching profiles.
+	safeTuned := &Config{MaxWaitSeconds: 8, EmptyStreamRetries: 3}
+	if got := safeTuned.MaxWaitDuration(); got != 8*time.Second {
+		t.Errorf("safe tuned MaxWaitDuration() = %v; want 8s", got)
+	}
+	if got := safeTuned.EmptyStreamRetryCount(); got != 3 {
+		t.Errorf("safe tuned EmptyStreamRetryCount() = %d; want 3", got)
+	}
+
+	capped := &Config{Profile: ProfileManual, MaxWaitSeconds: 86400, DefaultCooldownSeconds: 999999, EmptyStreamRetries: 1000}
 	if got := capped.MaxWaitDuration(); got != MaxWaitLimitSeconds*time.Second {
 		t.Errorf("capped MaxWaitDuration() = %v; want %v", got, MaxWaitLimitSeconds*time.Second)
 	}
@@ -453,6 +475,94 @@ func TestConfigDurationDefaults(t *testing.T) {
 	}
 	if got := capped.EmptyStreamRetryCount(); got != EmptyStreamRetryLimit {
 		t.Errorf("capped EmptyStreamRetryCount() = %d; want %d", got, EmptyStreamRetryLimit)
+	}
+}
+
+// TestConfigProfileResolvers verifies that the operating profile drives rotation mode and catalog
+// freshness, that explicit overrides win, and that unknown values degrade to the safe profile.
+func TestConfigProfileResolvers(t *testing.T) {
+	tests := []struct {
+		// name labels the configuration shape under test.
+		name string
+		// cfg is the configuration to resolve.
+		cfg *Config
+		// wantProfile is the normalized profile.
+		wantProfile string
+		// wantMode is the resolved rotation mode.
+		wantMode string
+		// wantCatalogAge is the resolved catalog freshness window.
+		wantCatalogAge time.Duration
+	}{
+		{
+			name:           "nil config",
+			cfg:            nil,
+			wantProfile:    ProfileSafe,
+			wantMode:       RotationModeSingle,
+			wantCatalogAge: DefaultCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "unset profile defaults to safe",
+			cfg:            &Config{},
+			wantProfile:    ProfileSafe,
+			wantMode:       RotationModeSingle,
+			wantCatalogAge: DefaultCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "explicit safe profile",
+			cfg:            &Config{Profile: ProfileSafe},
+			wantProfile:    ProfileSafe,
+			wantMode:       RotationModeSingle,
+			wantCatalogAge: DefaultCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "manual profile restores pool rotation",
+			cfg:            &Config{Profile: ProfileManual},
+			wantProfile:    ProfileManual,
+			wantMode:       RotationModePool,
+			wantCatalogAge: LegacyCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "explicit rotation mode overrides profile",
+			cfg:            &Config{Profile: ProfileManual, RotationMode: RotationModeSingle},
+			wantProfile:    ProfileManual,
+			wantMode:       RotationModeSingle,
+			wantCatalogAge: LegacyCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "explicit catalog window overrides profile",
+			cfg:            &Config{Profile: ProfileManual, CatalogMaxAgeMinutes: 5},
+			wantProfile:    ProfileManual,
+			wantMode:       RotationModePool,
+			wantCatalogAge: 5 * time.Minute,
+		},
+		{
+			name:           "unknown profile degrades to safe",
+			cfg:            &Config{Profile: "yolo"},
+			wantProfile:    ProfileSafe,
+			wantMode:       RotationModeSingle,
+			wantCatalogAge: DefaultCatalogMaxAgeMinutes * time.Minute,
+		},
+		{
+			name:           "catalog window is capped",
+			cfg:            &Config{Profile: ProfileManual, CatalogMaxAgeMinutes: 999999},
+			wantProfile:    ProfileManual,
+			wantMode:       RotationModePool,
+			wantCatalogAge: CatalogMaxAgeLimitMinutes * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.EffectiveProfile(); got != tt.wantProfile {
+				t.Errorf("EffectiveProfile() = %q; want %q", got, tt.wantProfile)
+			}
+			if got := tt.cfg.EffectiveRotationMode(); got != tt.wantMode {
+				t.Errorf("EffectiveRotationMode() = %q; want %q", got, tt.wantMode)
+			}
+			if got := tt.cfg.CatalogMaxAge(); got != tt.wantCatalogAge {
+				t.Errorf("CatalogMaxAge() = %v; want %v", got, tt.wantCatalogAge)
+			}
+		})
 	}
 }
 

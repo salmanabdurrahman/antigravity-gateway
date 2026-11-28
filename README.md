@@ -16,6 +16,7 @@ Zero-dependency, single-binary Go reverse proxy and CLI that connects AI coding 
 
 - **It may violate the provider's terms.** Review the [Google Terms of Service](https://policies.google.com/terms) and the [Generative AI Additional Terms of Service](https://policies.google.com/terms/generative-ai) yourself; judging whether proxying a subscription counts as permitted use is your responsibility.
 - **Your Google account can be restricted or disabled.** Community proxies built on the same endpoints report accounts being suspended, shadow-restricted, or permanently disabled for terms-of-service violations. Prefer a secondary account you can afford to lose over the account you depend on.
+- **Safe defaults, by design.** `agw` serves one account at a time and does not fail over to siblings by default; see `profile` and `rotation_mode` in the [Configuration Reference](docs/configuration.md) before changing that.
 - **Nothing here is guaranteed.** Upstream endpoints, quota rules, model availability, and authentication can change without notice and break the gateway.
 - **No warranty.** The software is provided "as is" under the [MIT license](LICENSE); the authors accept no liability for lost access, lost data, or quota spend.
 - **Credentials stay local.** Tokens are stored only in `~/.agw/` with `0600` permissions behind a loopback-only daemon, and nothing is reported back to the project. See [SECURITY.md](SECURITY.md) for the security invariants and the public-client OAuth disclosure.

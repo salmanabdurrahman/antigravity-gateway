@@ -61,10 +61,13 @@ func setupTestHarness(t *testing.T, upstreamHandler http.HandlerFunc) *testHarne
 	accEmail := "test-user@gmail.com"
 
 	cfg := &config.Config{
-		Host:        "127.0.0.1",
-		Port:        51400,
-		APIKey:      apiKey,
-		Strategy:    "sticky",
+		Host:     "127.0.0.1",
+		Port:     51400,
+		APIKey:   apiKey,
+		Strategy: "sticky",
+		// This harness exercises proxy translation and legacy pooled failover semantics, so it opts into
+		// the manual profile explicitly instead of inheriting the safe single-account default.
+		Profile:     config.ProfileManual,
 		TokenURL:    mockUpstream.URL + "/token",
 		Endpoints:   []string{mockUpstream.URL},
 		ClientID:    "test-client-id",

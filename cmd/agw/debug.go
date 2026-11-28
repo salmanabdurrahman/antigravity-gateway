@@ -61,6 +61,12 @@ type wireIdentityView struct {
 	Endpoint string `json:"endpoint"`
 	// Strategy is the configured account rotation strategy.
 	Strategy string `json:"strategy"`
+	// Profile is the resolved operating profile ("safe" or "manual").
+	Profile string `json:"profile"`
+	// RotationMode is the resolved rotation mode ("single" or "pool").
+	RotationMode string `json:"rotation_mode"`
+	// CatalogMaxAgeMinutes is the effective catalog freshness window in minutes.
+	CatalogMaxAgeMinutes int `json:"catalog_max_age_minutes"`
 	// UserAgent is the resolved User-Agent header value sent to upstream endpoints.
 	UserAgent string `json:"user_agent"`
 	// APIClient is the resolved X-Goog-Api-Client header value sent to upstream endpoints.
@@ -94,6 +100,9 @@ func buildWireIdentityView(path string, cfg *config.Config) wireIdentityView {
 		ConfigPath:             path,
 		Endpoint:               config.BaseURL(host, port),
 		Strategy:               cmp.Or(cfg.Strategy, config.DefaultStrategy),
+		Profile:                cfg.EffectiveProfile(),
+		RotationMode:           cfg.EffectiveRotationMode(),
+		CatalogMaxAgeMinutes:   int(cfg.CatalogMaxAge().Minutes()),
 		UserAgent:              config.ResolveUserAgent(cfg),
 		APIClient:              config.ResolveAPIClient(cfg),
 		ClientMetadata:         config.ResolveClientMetadata(cfg),
@@ -134,6 +143,8 @@ func runDebugWire(cmd *cobra.Command, args []string) error {
 	}
 	cmd.Printf("Gateway Endpoint:      %s\n", view.Endpoint)
 	cmd.Printf("Strategy:              %s\n", view.Strategy)
+	cmd.Printf("Profile:               %s\n", view.Profile)
+	cmd.Printf("Rotation Mode:         %s\n", view.RotationMode)
 	cmd.Printf("Quota Threshold:       %.0f%%\n", view.QuotaThreshold*100)
 	cmd.Printf("User-Agent:            %s\n", view.UserAgent)
 	cmd.Printf("X-Goog-Api-Client:     %s\n", view.APIClient)
@@ -142,6 +153,7 @@ func runDebugWire(cmd *cobra.Command, args []string) error {
 	cmd.Printf("Max Cooldown Wait:     %ds\n", view.MaxWaitSeconds)
 	cmd.Printf("Default 429 Cooldown:  %ds\n", view.DefaultCooldownSeconds)
 	cmd.Printf("Empty Stream Retries:  %d\n", view.EmptyStreamRetries)
+	cmd.Printf("Catalog Refresh:       %dm\n", view.CatalogMaxAgeMinutes)
 	if len(view.Endpoints) > 0 {
 		cmd.Println("Upstream Endpoints:")
 		for i, endpoint := range view.Endpoints {

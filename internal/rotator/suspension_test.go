@@ -80,6 +80,7 @@ func newSuspensionTestRig(t *testing.T, nowFn func() time.Time, mutate func(cfg 
 	}
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},

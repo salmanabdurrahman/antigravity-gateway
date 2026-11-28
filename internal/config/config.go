@@ -66,8 +66,40 @@ const (
 	// DefaultCooldownSeconds defines the base 429 cooldown applied when upstream omits an explicit retry delay.
 	DefaultCooldownSeconds = 60
 
-	// DefaultEmptyStreamRetries defines how many times an empty upstream stream is retried before failing.
+	// DefaultEmptyStreamRetries defines how many times an empty upstream stream is retried before failing
+	// under the manual profile.
 	DefaultEmptyStreamRetries = 2
+
+	// SafeEmptyStreamRetries is the empty-stream retry budget under the safe profile. One attempt plus
+	// a single retry keeps a struggling stream from turning into a retry storm against upstream.
+	SafeEmptyStreamRetries = 1
+
+	// ProfileSafe is the default operating profile: one primary account serves traffic, cooldown
+	// absorption is disabled, and background polling is kept to a minimum.
+	ProfileSafe = "safe"
+
+	// ProfileManual restores the legacy pooled rotation behaviour and the historical request defaults.
+	ProfileManual = "manual"
+
+	// DefaultProfile is the operating profile applied when config.json names none.
+	DefaultProfile = ProfileSafe
+
+	// RotationModeSingle serves every request from one primary account and never fails over to a
+	// sibling credential.
+	RotationModeSingle = "single"
+
+	// RotationModePool keeps the legacy multi-account failover behaviour.
+	RotationModePool = "pool"
+
+	// DefaultCatalogMaxAgeMinutes is how long a cached model catalog stays fresh under the safe
+	// profile before a background refresh is considered.
+	DefaultCatalogMaxAgeMinutes = 60
+
+	// LegacyCatalogMaxAgeMinutes is the catalog freshness window preserved under the manual profile.
+	LegacyCatalogMaxAgeMinutes = 15
+
+	// CatalogMaxAgeLimitMinutes caps the configurable catalog freshness window at 24 hours.
+	CatalogMaxAgeLimitMinutes = 1440
 
 	// DefaultSuspendPauseSeconds defines how long the rotator pauses all upstream dispatch after a
 	// terminal account-suspension verdict, so one enforcement hit cannot sweep the rest of the pool.
@@ -186,6 +218,18 @@ type Config struct {
 	// Strategy specifies the account rotation algorithm used by the rotator (e.g. "sticky" or "round-robin").
 	Strategy string `json:"strategy"`
 
+	// Profile selects the operating profile: "safe" (default) keeps one primary account serving and
+	// minimizes background traffic, while "manual" restores the legacy pooled behaviour.
+	Profile string `json:"profile,omitempty"`
+
+	// RotationMode overrides how many pooled accounts may serve requests: "single" or "pool".
+	// When empty it follows the operating profile.
+	RotationMode string `json:"rotation_mode,omitempty"`
+
+	// CatalogMaxAgeMinutes overrides how long a cached model catalog stays fresh before a background
+	// refresh is considered. A zero value follows the operating profile.
+	CatalogMaxAgeMinutes int `json:"catalog_max_age_minutes,omitzero"`
+
 	// ClientID is the Google OAuth 2.0 application client identifier utilized for PKCE authentication.
 	ClientID string `json:"client_id"`
 
@@ -240,9 +284,14 @@ type Config struct {
 	DisableSuspendPause bool `json:"disable_suspend_pause,omitzero"`
 }
 
-// MaxWaitDuration returns the configured cooldown absorption limit as a duration.
+// MaxWaitDuration returns the configured cooldown absorption limit as a duration. The safe profile
+// absorbs nothing: a cooled-down primary account fails the request instead of stalling it or rotating
+// to a sibling credential.
 func (c *Config) MaxWaitDuration() time.Duration {
 	seconds := DefaultMaxWaitSeconds
+	if c.EffectiveProfile() == ProfileSafe {
+		seconds = 0
+	}
 	if c != nil && c.MaxWaitSeconds > 0 {
 		seconds = min(c.MaxWaitSeconds, MaxWaitLimitSeconds)
 	}
@@ -258,12 +307,63 @@ func (c *Config) CooldownDuration() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-// EmptyStreamRetryCount returns the configured empty-stream retry budget.
+// EmptyStreamRetryCount returns the configured empty-stream retry budget. The safe profile defaults to
+// a single retry so a struggling stream cannot amplify into a retry storm.
 func (c *Config) EmptyStreamRetryCount() int {
 	if c != nil && c.EmptyStreamRetries > 0 {
 		return min(c.EmptyStreamRetries, EmptyStreamRetryLimit)
 	}
+	if c.EffectiveProfile() == ProfileSafe {
+		return SafeEmptyStreamRetries
+	}
 	return DefaultEmptyStreamRetries
+}
+
+// EffectiveProfile returns the normalized operating profile, defaulting to the safe profile for an
+// unset or unrecognized value. Integration builds and tests that construct Config literals directly
+// therefore get the safe behaviour unless they opt into ProfileManual.
+func (c *Config) EffectiveProfile() string {
+	if c == nil {
+		return DefaultProfile
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Profile)) {
+	case ProfileManual:
+		return ProfileManual
+	case ProfileSafe, "":
+		return ProfileSafe
+	default:
+		return DefaultProfile
+	}
+}
+
+// EffectiveRotationMode returns the resolved rotation mode. An explicit "single" or "pool" wins;
+// otherwise the operating profile decides, with the safe profile serving one primary account.
+func (c *Config) EffectiveRotationMode() string {
+	if c != nil {
+		switch strings.ToLower(strings.TrimSpace(c.RotationMode)) {
+		case RotationModeSingle:
+			return RotationModeSingle
+		case RotationModePool:
+			return RotationModePool
+		}
+	}
+	if c.EffectiveProfile() == ProfileManual {
+		return RotationModePool
+	}
+	return RotationModeSingle
+}
+
+// CatalogMaxAge returns how long a cached model catalog stays fresh before a background refresh is
+// considered. The safe profile polls less often than the legacy fifteen-minute window, and an explicit
+// catalog_max_age_minutes always wins.
+func (c *Config) CatalogMaxAge() time.Duration {
+	if c != nil && c.CatalogMaxAgeMinutes > 0 {
+		return time.Duration(min(c.CatalogMaxAgeMinutes, CatalogMaxAgeLimitMinutes)) * time.Minute
+	}
+	if c.EffectiveProfile() == ProfileManual {
+		return LegacyCatalogMaxAgeMinutes * time.Minute
+	}
+	return DefaultCatalogMaxAgeMinutes * time.Minute
 }
 
 // SuspendPauseDuration returns how long upstream dispatch stays paused after a terminal suspension
@@ -307,6 +407,7 @@ func DefaultConfig() *Config {
 		Host:                   DefaultHost,
 		Port:                   DefaultPort,
 		Strategy:               DefaultStrategy,
+		Profile:                DefaultProfile,
 		ClientID:               cmp.Or(os.Getenv(EnvClientID), DefaultClientID),
 		ClientSecret:           cmp.Or(os.Getenv(EnvClientSecret), DefaultClientSecret),
 		AuthURL:                DefaultAuthURL,
@@ -316,9 +417,7 @@ func DefaultConfig() *Config {
 		Endpoints:              DefaultEndpoints(),
 		QuotaThreshold:         0.05,
 		ModelMapping:           make(map[string]string),
-		MaxWaitSeconds:         DefaultMaxWaitSeconds,
 		DefaultCooldownSeconds: DefaultCooldownSeconds,
-		EmptyStreamRetries:     DefaultEmptyStreamRetries,
 		SuspendPauseSeconds:    DefaultSuspendPauseSeconds,
 	}
 }
@@ -396,9 +495,10 @@ func Load(path string) (*Config, error) {
 	if len(cfg.Endpoints) == 0 {
 		cfg.Endpoints = DefaultEndpoints()
 	}
-	cfg.MaxWaitSeconds = cmp.Or(cfg.MaxWaitSeconds, DefaultMaxWaitSeconds)
+	// MaxWaitSeconds and EmptyStreamRetries are intentionally not backfilled here: their effective
+	// values follow the operating profile, so writing defaults into the file would pin a profile's
+	// numbers as explicit user choices.
 	cfg.DefaultCooldownSeconds = cmp.Or(cfg.DefaultCooldownSeconds, DefaultCooldownSeconds)
-	cfg.EmptyStreamRetries = cmp.Or(cfg.EmptyStreamRetries, DefaultEmptyStreamRetries)
 	if cfg.APIKey == "" {
 		apiKey, keyErr := GenerateAPIKey()
 		if keyErr != nil {

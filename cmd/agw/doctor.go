@@ -101,7 +101,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	results = append(results, checkAPIKey(cfg)...)
 
 	// 3. Accounts Diagnostics
-	results = append(results, checkAccounts()...)
+	results = append(results, checkAccounts(cfg)...)
 
 	// 4. Upstream Google Connectivity
 	results = append(results, checkConnectivity(ctx)...)
@@ -405,7 +405,8 @@ func checkPermissions() []CheckItem {
 }
 
 // checkAccounts inspects accounts.json and verifies token presence.
-func checkAccounts() []CheckItem {
+// checkAccounts inspects the stored account pool and reports how the operating profile uses it.
+func checkAccounts(cfg *config.Config) []CheckItem {
 	var items []CheckItem
 
 	accPath, err := config.AccountsFilePath()
@@ -483,7 +484,36 @@ func checkAccounts() []CheckItem {
 		})
 	}
 
+	items = append(items, accountProfileCheck(cfg, usable)...)
+
 	return items
+}
+
+// accountProfileCheck reports how the operating profile uses the stored pool: the safe profile serves a
+// single primary account, while the manual profile rotates every active account on failure.
+func accountProfileCheck(cfg *config.Config, usable int) []CheckItem {
+	if usable <= 1 {
+		return nil
+	}
+
+	profile := cfg.EffectiveProfile()
+	if profile == config.ProfileManual {
+		return []CheckItem{{
+			Category: "Account Pool",
+			Name:     "Operating Profile",
+			Status:   StatusWarn,
+			Message:  fmt.Sprintf("manual profile rotates %d active accounts on failure", usable),
+			Hint:     "Consumer plans do not support automated account rotation: set profile to 'safe' to serve one primary account",
+		}}
+	}
+
+	return []CheckItem{{
+		Category: "Account Pool",
+		Name:     "Operating Profile",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("safe profile serves 1 primary account; %d additional account(s) stay idle", usable-1),
+		Hint:     "Set rotation_mode to 'pool' only if you accept pooled failover against the provider's consumer terms",
+	}}
 }
 
 // localSessionHint returns the re-import guidance shown when imported desktop sessions are present,

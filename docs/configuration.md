@@ -18,31 +18,48 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 
 ## 2. `config.json` keys
 
-| Key                        | Type              | Default                                 | Purpose                                                                                                                    |
-| :------------------------- | :---------------- | :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
-| `host`                     | string            | `127.0.0.1`                             | Loopback interface to bind; non-loopback values are coerced to `127.0.0.1`.                                                |
-| `port`                     | integer           | `51400`                                 | Local TCP port for the gateway.                                                                                            |
-| `api_key`                  | string            | generated `agw_` + 64 hex               | Bearer token required by `/v1/*` endpoints.                                                                                |
-| `strategy`                 | string            | `sticky`                                | Rotation strategy: `sticky`, `round-robin`, or `hybrid`.                                                                   |
-| `client_id`                | string            | bundled desktop client                  | Google OAuth client identifier (BYOC override).                                                                            |
-| `client_secret`            | string            | bundled desktop client                  | Google OAuth client secret (BYOC override; the bundled value is a public client credential).                               |
-| `auth_url`                 | string            | Google OAuth endpoint                   | Authorization endpoint override.                                                                                           |
-| `token_url`                | string            | Google OAuth endpoint                   | Token exchange endpoint override.                                                                                          |
-| `user_info_url`            | string            | Google userinfo endpoint                | Account identity endpoint override.                                                                                        |
-| `redirect_uri`             | string            | `http://127.0.0.1:51121/oauth-callback` | Local OAuth callback listener.                                                                                             |
-| `endpoints`                | array of strings  | tier-ordered default pair               | Upstream Cloud Code Assist endpoints, tried in order.                                                                      |
-| `user_agent`               | string (optional) | derived Antigravity Hub UA              | Overrides the upstream `User-Agent`.                                                                                       |
-| `api_client`               | string (optional) | derived                                 | Overrides the `X-Goog-Api-Client` header.                                                                                  |
-| `client_metadata`          | string (optional) | derived                                 | Overrides the `Client-Metadata` JSON header.                                                                               |
-| `quota_threshold`          | float (0.0–1.0)   | `0.05` (5%)                             | Remaining-quota floor before `hybrid` deprioritizes an account.                                                            |
-| `model_mapping`            | object            | empty                                   | Custom alias → backend model ID map.                                                                                       |
-| `max_wait_seconds`         | integer           | `20` (range 1–120)                      | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.                                  |
-| `default_cooldown_seconds` | integer           | `60` (range 1–3600)                     | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x.                            |
-| `empty_stream_retries`     | integer           | `2` (range 1–5)                         | Extra attempts when Google returns no visible text, reasoning text, or tool calls (including signature-only empty frames). |
-| `suspend_pause_seconds`    | integer           | `900` (range 1–86400)                   | How long all upstream dispatch stays paused after a terminal account-suspension verdict.                                   |
-| `disable_suspend_pause`    | boolean           | `false`                                 | Turns the post-suspension protection window off so the pool fails over to the next account immediately.                    |
+| Key                        | Type               | Default                                 | Purpose                                                                                                                    |
+| :------------------------- | :----------------- | :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------- |
+| `host`                     | string             | `127.0.0.1`                             | Loopback interface to bind; non-loopback values are coerced to `127.0.0.1`.                                                |
+| `port`                     | integer            | `51400`                                 | Local TCP port for the gateway.                                                                                            |
+| `api_key`                  | string             | generated `agw_` + 64 hex               | Bearer token required by `/v1/*` endpoints.                                                                                |
+| `strategy`                 | string             | `sticky`                                | Rotation strategy: `sticky`, `round-robin`, or `hybrid`.                                                                   |
+| `profile`                  | string             | `safe`                                  | Operating profile: `safe` serves one primary account, `manual` restores pooled rotation and legacy request defaults.       |
+| `rotation_mode`            | string (optional)  | derived from `profile`                  | `single` keeps every request on the primary account; `pool` allows failover to siblings.                                   |
+| `catalog_max_age_minutes`  | integer (optional) | `60` (safe) / `15` (manual)             | Catalog freshness window before a background refresh; explicit values override the profile and cap at 1440.                |
+| `client_id`                | string             | bundled desktop client                  | Google OAuth client identifier (BYOC override).                                                                            |
+| `client_secret`            | string             | bundled desktop client                  | Google OAuth client secret (BYOC override; the bundled value is a public client credential).                               |
+| `auth_url`                 | string             | Google OAuth endpoint                   | Authorization endpoint override.                                                                                           |
+| `token_url`                | string             | Google OAuth endpoint                   | Token exchange endpoint override.                                                                                          |
+| `user_info_url`            | string             | Google userinfo endpoint                | Account identity endpoint override.                                                                                        |
+| `redirect_uri`             | string             | `http://127.0.0.1:51121/oauth-callback` | Local OAuth callback listener.                                                                                             |
+| `endpoints`                | array of strings   | tier-ordered default pair               | Upstream Cloud Code Assist endpoints, tried in order.                                                                      |
+| `user_agent`               | string (optional)  | derived Antigravity Hub UA              | Overrides the upstream `User-Agent`.                                                                                       |
+| `api_client`               | string (optional)  | derived                                 | Overrides the `X-Goog-Api-Client` header.                                                                                  |
+| `client_metadata`          | string (optional)  | derived                                 | Overrides the `Client-Metadata` JSON header.                                                                               |
+| `quota_threshold`          | float (0.0–1.0)    | `0.05` (5%)                             | Remaining-quota floor before `hybrid` deprioritizes an account.                                                            |
+| `model_mapping`            | object             | empty                                   | Custom alias → backend model ID map.                                                                                       |
+| `max_wait_seconds`         | integer            | `0` (safe) / `20` (manual)              | Longest cooldown window the rotator absorbs before returning HTTP 429 with `Retry-After`.                                  |
+| `default_cooldown_seconds` | integer            | `60` (range 1–3600)                     | Base 429 cooldown when upstream omits retry metadata; repeated 429s escalate 1x, 5x, 30x, 120x.                            |
+| `empty_stream_retries`     | integer            | `1` (safe) / `2` (manual)               | Extra attempts when Google returns no visible text, reasoning text, or tool calls (including signature-only empty frames). |
+| `suspend_pause_seconds`    | integer            | `900` (range 1–86400)                   | How long all upstream dispatch stays paused after a terminal account-suspension verdict.                                   |
+| `disable_suspend_pause`    | boolean            | `false`                                 | Turns the post-suspension protection window off so the pool fails over to the next account immediately.                    |
 
 `host` accepts IPv4 and IPv6 loopback addresses; non-loopback values are coerced back to `127.0.0.1`. IPv6 literals are bracketed everywhere the daemon binds or builds a URL, so `host: "::1"` yields `[::1]:51400`.
+
+### Operating profiles
+
+`profile` decides how much of the pool the gateway is willing to use and how aggressively it retries:
+
+| Behaviour                         | `safe` (default)                             | `manual`                              |
+| :-------------------------------- | :------------------------------------------- | :------------------------------------ |
+| Account dispatch                  | One primary account, no failover to siblings | Pool rotation and failover on failure |
+| Cooldown absorption               | Off (a cooled primary fails the request)     | Absorbs up to `max_wait_seconds`      |
+| Empty-stream retries              | `1`                                          | `2`                                   |
+| Background catalog refresh        | Every 60 minutes                             | Every 15 minutes                      |
+| Post-suspension protection window | `suspend_pause_seconds` (default 900s)       | Same                                  |
+
+An explicit `rotation_mode`, `catalog_max_age_minutes`, `max_wait_seconds`, or `empty_stream_retries` always overrides the profile, so a single-account deployment can still absorb short cooldowns without switching profiles. Set `profile: manual` to restore the historical pooled behaviour.
 
 ## 3. Environment overrides
 
@@ -91,6 +108,8 @@ Aliases apply to chat completions, Anthropic messages, and `/v1/models/{id}` loo
 
 ## 5. Account rotation & failover
 
+`rotation_mode` decides whether the strategies below may spread traffic across the pool. Under the default `safe` profile it resolves to `single`: every request goes to the first usable account, which is why `strategy` only matters once rotation is enabled. Set `profile: manual` or `rotation_mode: pool` to let the strategies rotate and fail over.
+
 The rotator supports three strategies, configured through `strategy` in `config.json`, `agw config strategy <mode>`, or `agw start --strategy`:
 
 - `sticky` (default): keeps the current active account until rate limits (HTTP 429) occur, preserving upstream prompt caching.
@@ -104,9 +123,9 @@ The rotator supports three strategies, configured through `strategy` in `config.
 - Repeated 429 responses without retry metadata escalate progressively (`60s → 5m → 30m → 2h`) and zero the affected model's quota fraction so hybrid scoring stops preferring the throttled account.
 - **Per-model cooldown isolation**: an account rate-limited on one model stays available for other, non-cooling models (for example Claude or GPT-OSS).
 - The account is cooled down for that model and the request immediately fails over to the next available account.
-- When every account is cooling and the wait is ≤ `max_wait_seconds`, the gateway absorbs the wait transparently; beyond that it returns HTTP 429 with the exact seconds in `Retry-After`.
+- When every account is cooling and the wait is ≤ `max_wait_seconds`, the gateway absorbs the wait transparently; beyond that it returns HTTP 429 with the exact seconds in `Retry-After`. Under `rotation_mode: single` there is no sibling to fall back to and the safe profile absorbs nothing, so a cooled-down primary answers `429` immediately.
 - Secondary endpoints and healthy-account fallbacks are exercised on upstream 5xx errors.
-- Empty upstream streams (including frames carrying only a `thoughtSignature` or `finishReason: STOP` without visible text, reasoning text, or tool calls) are retried up to `empty_stream_retries` times independently of prompt/schema fallbacks, with linear backoff (`250ms × attempt`) and soft rotation onto another ready account before returning HTTP `502`. Explicit safety/policy stops (`SAFETY`, `RECITATION`, etc.) bypass empty-stream retries and surface `content_filter` / `refusal`.
+- Empty upstream streams (including frames carrying only a `thoughtSignature` or `finishReason: STOP` without visible text, reasoning text, or tool calls) are retried up to `empty_stream_retries` times independently of prompt/schema fallbacks, with linear backoff (`250ms × attempt`) before returning HTTP `502`; `rotation_mode: pool` additionally rotates onto another ready account. Explicit safety/policy stops (`SAFETY`, `RECITATION`, etc.) bypass empty-stream retries and surface `content_filter` / `refusal`.
 - HTTP 403 bodies and 412 `FAILED_PRECONDITION` bodies that carry a terminal suspension verdict disable the account persistently instead of looping it through 30-minute cooldowns. A suspension is recognized from structured `details[].reason` values (`TOS_VIOLATION`, `TOS_VIOLATION_CONTACT_SUPPORT`, `VALIDATION_REQUIRED`), from the plain `FAILED_PRECONDITION` wording, or from the legacy text markers (`has been disabled`, `violation of terms of service`); transient project and region 403s still cool down and fail over.
 - A suspension is account-scoped and terminal until Google lifts it, so the account leaves rotation immediately, its verdict, reason, and validated appeal link (`forms.gle`, `docs.google.com` over HTTPS only) are persisted to `accounts.json`, and no cooldown or retry cycle can bring it back. All background work skips it: token refresh, catalog refresh, quota polling, and `agw accounts --check` never send traffic to a suspended account.
 - After the first verdict the rotator pauses **all** upstream dispatch for `suspend_pause_seconds` (default 900s). Failover to a sibling account during the enforcement window is what turns a first suspension into a permanent one, so paused requests return HTTP 403 with the appeal link and a `Retry-After` header. Set `disable_suspend_pause: true` to restore immediate failover.

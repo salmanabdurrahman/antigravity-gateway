@@ -87,6 +87,8 @@ func TestDebugWireReportsResolvedIdentity(t *testing.T) {
 	wants := []string{
 		"Gateway Endpoint:      http://127.0.0.1:",
 		"Strategy:              hybrid",
+		"Profile:               safe",
+		"Rotation Mode:         single",
 		"Quota Threshold:       10%",
 		"User-Agent:            antigravity/hub/2.34.0 (aidev_client; os_type=darwin; arch=arm64; cl=1026637980)",
 		"X-Goog-Api-Client:     google-cloud-sdk vscode/1.87.0",
@@ -95,6 +97,7 @@ func TestDebugWireReportsResolvedIdentity(t *testing.T) {
 		"Max Cooldown Wait:     15s",
 		"Default 429 Cooldown:  45s",
 		"Empty Stream Retries:  2",
+		"Catalog Refresh:       60m",
 		"  1. https://daily-cloudcode-pa.googleapis.com",
 		"  2. https://cloudcode-pa.googleapis.com",
 	}

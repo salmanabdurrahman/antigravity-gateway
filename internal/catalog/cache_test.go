@@ -279,6 +279,9 @@ func TestModelCatalogStaleWhileRevalidateNonBlocking(t *testing.T) {
 
 	cfg := &config.Config{
 		Endpoints: []string{ts.URL},
+		// Pin the freshness window so the stale-while-revalidate assertion does not depend on the
+		// operating profile's catalog default.
+		CatalogMaxAgeMinutes: 15,
 	}
 
 	mockRunner := &mockAccountRunner{

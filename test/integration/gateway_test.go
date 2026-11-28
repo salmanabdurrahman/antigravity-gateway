@@ -129,6 +129,7 @@ func TestGatewayMultiAccountFailoverAndStreaming(t *testing.T) {
 	// 2. Set up Gateway Server environment
 	tempDir := t.TempDir()
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Host:      "127.0.0.1",
 		Port:      0, // Listener will allocate free port
 		APIKey:    "agw_test_secret_key",

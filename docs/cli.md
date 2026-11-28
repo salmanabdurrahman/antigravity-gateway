@@ -153,7 +153,7 @@ agw config strategy hybrid
 
 `--json` is supported across all `agw config` subcommands. Updating `strategy` rewrites only the `"strategy"` field in `config.json`; if a daemon is running, restart it (`agw stop && agw start -d`) for the new strategy to take effect.
 
-`agw config show` also reports the effective post-suspension protection window as `Suspension Pause`: the resolved number of seconds, or `disabled` when `disable_suspend_pause` is set. See the [Configuration Reference](configuration.md#5-account-rotation--failover) for the underlying keys.
+`agw config show` also reports the resolved `Profile`, `Rotation Mode`, and `Catalog Refresh` window, plus the effective post-suspension protection window as `Suspension Pause`: the resolved number of seconds, or `disabled` when `disable_suspend_pause` is set. See the [Configuration Reference](configuration.md#2-configjson-keys) for the underlying keys.
 
 ## 8. `agw start`
 
@@ -174,6 +174,8 @@ agw start --detach --config /etc/agw/config.json
 | `--config <path>`   | Config file path; forwarded to the detached child as well.     |
 
 Detached launchers forward every command-line override (`--strategy`, `--port`, `--config`) to the child process, so a custom configuration path is honored in the background exactly as in the foreground. The PID file (`~/.agw/agw.pid`) is written by the daemon once it reaches the listening state.
+
+`--strategy` only governs selection between pooled accounts; under the default `safe` profile the gateway serves a single primary account, so enable `rotation_mode: pool` (or `profile: manual`) first if you want the strategy to spread traffic.
 
 Before spawning, `agw start` probes `/health` on the configured port. If an orphaned daemon answers, the command reports it and restores the missing PID file instead of launching a second process that cannot bind. A listener that does not identify itself as `antigravity-gateway` is never touched.
 
@@ -264,7 +266,7 @@ Runs an end-to-end environment audit:
 
 1. **Network ports**: gateway port (`51400` or configured `port`) and OAuth callback port resolved from `redirect_uri` (default `51121`).
 2. **Filesystem permissions**: `0700` directory and `0600` credential files, plus API-key format validation.
-3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions.
+3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions, plus an operating-profile advisory that warns when `profile: manual` would rotate more than one active account and explains idle accounts under the safe profile.
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
@@ -286,6 +288,8 @@ Prints the values that actually leave the machine, resolved through the same hel
 | `Config File`          | Resolved `config.json` path honoring `--config` and `$AGW_HOME`                              |
 | `Gateway Endpoint`     | Clamped loopback base URL clients connect to                                                 |
 | `Strategy`             | Configured account rotation strategy                                                         |
+| `Profile`              | Resolved operating profile (`safe` or `manual`)                                              |
+| `Rotation Mode`        | Resolved dispatch mode (`single` keeps one primary account, `pool` allows failover)          |
 | `Quota Threshold`      | Fractional remaining-quota floor before an account is deprioritized                          |
 | `User-Agent`           | Effective `User-Agent` header, including `AGW_USER_AGENT` or `user_agent` overrides          |
 | `X-Goog-Api-Client`    | Effective `X-Goog-Api-Client` header value                                                   |
@@ -294,6 +298,7 @@ Prints the values that actually leave the machine, resolved through the same hel
 | `Max Cooldown Wait`    | Maximum cooldown wait absorbed before a request fails                                        |
 | `Default 429 Cooldown` | Base cooldown applied to a `429` without an explicit retry delay                             |
 | `Empty Stream Retries` | Retry budget for empty upstream streams                                                      |
+| `Catalog Refresh`      | Effective catalog freshness window in minutes                                                |
 | `Upstream Endpoints`   | Upstream Cloud Code Assist base URLs in dispatch order                                       |
 
 Use it before opening an upstream rejection report, and after an upgrade, to confirm which identity and transport a request really carried. Secrets are never printed, so the report is safe to paste into an issue.

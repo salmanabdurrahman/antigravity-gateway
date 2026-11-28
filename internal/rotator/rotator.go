@@ -103,6 +103,10 @@ type Rotator struct {
 	// lastSuspension remembers the verdict that armed the current pause so callers can surface the
 	// upstream appeal link instead of only a generic pause message.
 	lastSuspension *Suspension
+
+	// rotationMode records whether dispatch may spread across the pool or must stay on one primary
+	// account. The safe operating profile resolves to single-account dispatch.
+	rotationMode string
 }
 
 // NewRotator creates a configured Rotator coordinating accounts from the provided pool.
@@ -129,10 +133,12 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 	maxWait := config.DefaultConfig().MaxWaitDuration()
 	cooldown := config.DefaultConfig().CooldownDuration()
 	suspendPause := config.DefaultConfig().SuspendPauseDuration()
+	rotationMode := config.DefaultConfig().EffectiveRotationMode()
 	if cfg != nil {
 		maxWait = cfg.MaxWaitDuration()
 		cooldown = cfg.CooldownDuration()
 		suspendPause = cfg.SuspendPauseDuration()
+		rotationMode = cfg.EffectiveRotationMode()
 	}
 
 	return &Rotator{
@@ -146,6 +152,7 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 		maxWait:      maxWait,
 		cooldown:     cooldown,
 		suspendPause: suspendPause,
+		rotationMode: rotationMode,
 	}
 }
 
@@ -166,6 +173,18 @@ func (r *Rotator) SetMaxWait(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.maxWait = d
+}
+
+// primaryRotationStates narrows a state list to the single account the safe profile serves requests
+// from: the first usable entry in pool order. It returns nil when nothing is usable so callers keep
+// their existing empty-pool handling.
+func primaryRotationStates(states []*AccountState) []*AccountState {
+	for _, s := range states {
+		if s.Usable() {
+			return []*AccountState{s}
+		}
+	}
+	return nil
 }
 
 // SetSuspendPause configures how long upstream dispatch stays paused after a terminal suspension
@@ -389,6 +408,9 @@ func (r *Rotator) ForEachAccount(ctx context.Context, fn func(ctx context.Contex
 	states := slices.DeleteFunc(slices.Clone(r.pool.States()), func(s *AccountState) bool {
 		return !s.Usable()
 	})
+	if r.rotationMode == config.RotationModeSingle {
+		states = primaryRotationStates(states)
+	}
 	if len(states) == 0 {
 		return &RotatorError{
 			StatusCode:   http.StatusServiceUnavailable,
@@ -451,6 +473,11 @@ func (r *Rotator) GenerateWithExclude(ctx context.Context, model string, exclude
 	}
 
 	states := r.pool.States()
+	if r.rotationMode == config.RotationModeSingle {
+		// Single-account dispatch never fails over to a sibling credential; the primary account either
+		// serves the request or the request fails with the upstream reason.
+		states = primaryRotationStates(states)
+	}
 	hasUsable := false
 	for _, s := range states {
 		if s.Usable() {

@@ -46,6 +46,7 @@ func TestRotatorEndpointFallbackOn5xx(t *testing.T) {
 	defer tokenServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  tokenServer.URL,
 		Endpoints: []string{ep1.URL, ep2.URL},
@@ -108,6 +109,7 @@ func TestRotatorAccountFallbackOnPersistent5xx(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},
@@ -175,6 +177,7 @@ func TestRotatorAccountFallbackOnTransportError(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},

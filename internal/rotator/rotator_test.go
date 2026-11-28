@@ -96,6 +96,7 @@ func TestRotatorStickyAndFailover429(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
@@ -199,6 +200,7 @@ func TestRotatorBareResourceExhaustedDoesNotCoolAccount(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
@@ -288,6 +290,7 @@ func TestRotatorShortWaitAbsorption(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -341,6 +344,7 @@ func TestRotatorLongWaitFailsImmediatelyWithRetryAfter(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -398,6 +402,7 @@ func TestRotatorTerminal400DoesNotRotate(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -444,6 +449,7 @@ func TestRotatorWithAccount(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:  config.ProfileManual,
 		TokenURL: mockServer.server.URL + "/token",
 	}
 
@@ -508,6 +514,7 @@ func TestRotatorWaitAbsorptionDoesNotExhaustAttempts(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -546,6 +553,7 @@ func TestRotatorBackoffSleepCanceled(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -588,6 +596,7 @@ func TestRotatorHybridTokenBucketRefund(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyHybrid),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
@@ -664,6 +673,7 @@ func TestRotatorPermanentForbiddenDisablesAccount(t *testing.T) {
 			defer mockServer.close()
 
 			cfg := &config.Config{
+				Profile:   config.ProfileManual,
 				TokenURL:  mockServer.server.URL + "/token",
 				Endpoints: []string{mockServer.server.URL},
 				// Keep the protective pool pause out of the picture: this case isolates how a single
@@ -730,6 +740,7 @@ func TestRotatorStaticToken401CoolsDownImmediately(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -791,6 +802,7 @@ func TestRotatorProgressiveCooldownWithoutRetryInfo(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
 	}
@@ -834,6 +846,7 @@ func TestRotatorSuccessClearsZeroQuotaFraction(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyHybrid),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},
@@ -874,6 +887,7 @@ func TestRotatorGenerateWithExcludePrefersOtherUsableAccount(t *testing.T) {
 	defer mockServer.close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.server.URL + "/token",
 		Endpoints: []string{mockServer.server.URL},

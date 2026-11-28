@@ -89,6 +89,15 @@ type redactedConfigView struct {
 	// Strategy is the persisted account rotation strategy.
 	Strategy string `json:"strategy"`
 
+	// Profile is the resolved operating profile ("safe" or "manual").
+	Profile string `json:"profile"`
+
+	// RotationMode is the resolved rotation mode ("single" or "pool").
+	RotationMode string `json:"rotation_mode"`
+
+	// CatalogMaxAgeMinutes is the effective catalog freshness window in minutes.
+	CatalogMaxAgeMinutes int `json:"catalog_max_age_minutes"`
+
 	// APIKeyStatus reports whether the local API key is configured and valid without revealing it.
 	APIKeyStatus string `json:"api_key_status"`
 
@@ -151,6 +160,9 @@ func buildRedactedConfigView(path string, cfg *config.Config) redactedConfigView
 		Host:                   host,
 		Port:                   port,
 		Strategy:               cmp.Or(cfg.Strategy, config.DefaultStrategy),
+		Profile:                cfg.EffectiveProfile(),
+		RotationMode:           cfg.EffectiveRotationMode(),
+		CatalogMaxAgeMinutes:   int(cfg.CatalogMaxAge() / time.Minute),
 		APIKeyStatus:           apiKeyStatus,
 		ClientSecretStatus:     secretStatus,
 		QuotaThreshold:         cfg.QuotaThreshold,
@@ -181,12 +193,15 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	}
 	cmd.Printf("Gateway Endpoint:      %s\n", view.Endpoint)
 	cmd.Printf("Strategy:              %s\n", view.Strategy)
+	cmd.Printf("Profile:               %s\n", view.Profile)
+	cmd.Printf("Rotation Mode:         %s\n", view.RotationMode)
 	cmd.Printf("API Key:               %s\n", view.APIKeyStatus)
 	cmd.Printf("OAuth Client Secret:   %s\n", view.ClientSecretStatus)
 	cmd.Printf("Quota Threshold:       %.0f%%\n", view.QuotaThreshold*100)
 	cmd.Printf("Max Cooldown Wait:     %ds\n", view.MaxWaitSeconds)
 	cmd.Printf("Default 429 Cooldown:  %ds\n", view.DefaultCooldownSeconds)
 	cmd.Printf("Empty Stream Retries:  %d\n", view.EmptyStreamRetries)
+	cmd.Printf("Catalog Refresh:       %dm\n", view.CatalogMaxAgeMinutes)
 	if view.SuspendPauseDisabled {
 		cmd.Printf("Suspension Pause:      disabled\n")
 	} else {

@@ -40,6 +40,7 @@ func TestRotatorConcurrency(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyRoundRobin),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},
@@ -128,6 +129,7 @@ func TestRotatorConcurrent429AndReload(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyRoundRobin),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},
@@ -198,6 +200,7 @@ func TestRotatorHybridConcurrency(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyHybrid),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},
@@ -254,6 +257,7 @@ func TestRotatorSetStrategyDuringGenerate(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategySticky),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},
@@ -325,6 +329,7 @@ func TestRotatorInvalidGrantDisablesAccount(t *testing.T) {
 	defer mockServer.Close()
 
 	cfg := &config.Config{
+		Profile:   config.ProfileManual,
 		Strategy:  string(rotator.StrategyRoundRobin),
 		TokenURL:  mockServer.URL + "/token",
 		Endpoints: []string{mockServer.URL},

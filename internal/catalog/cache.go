@@ -19,7 +19,9 @@ import (
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/rotator"
 )
 
-// CacheMaxAge defines the duration after which the cached model catalog is considered stale (15 minutes).
+// CacheMaxAge defines the fallback duration after which the cached model catalog is considered stale
+// (15 minutes). Configured gateways resolve the window through Config.CatalogMaxAge instead, which
+// follows the operating profile: the safe profile polls hourly, the manual profile keeps this value.
 const CacheMaxAge = 15 * time.Minute
 
 // BackgroundRefreshTimeout bounds one background refresh across every pooled account. Each upstream
@@ -435,7 +437,11 @@ func (c *ModelCatalog) Ensure(ctx context.Context) error {
 	c.mu.RLock()
 	hasModels = len(c.snapshot.Models) > 0
 	now := c.nowFn()
-	isStale := c.fetchedAt.IsZero() || now.Sub(c.fetchedAt) > CacheMaxAge
+	maxAge := CacheMaxAge
+	if c.cfg != nil {
+		maxAge = c.cfg.CatalogMaxAge()
+	}
+	isStale := c.fetchedAt.IsZero() || now.Sub(c.fetchedAt) > maxAge
 	recentAttempt := !c.lastRefreshAttempt.IsZero() && now.Sub(c.lastRefreshAttempt) < 1*time.Minute
 	c.mu.RUnlock()
 
