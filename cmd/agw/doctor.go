@@ -108,6 +108,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	// 4. Upstream Identity Diagnostics
 	results = append(results, checkUpstreamIdentity(cfg)...)
+	results = append(results, checkPromptPreflight(cfg))
 
 	// 5. Upstream Google Connectivity
 	results = append(results, checkConnectivity(ctx)...)
@@ -620,6 +621,20 @@ func checkAdvertisedIdentity(cfg *config.Config) CheckItem {
 		item.Message = fmt.Sprintf("advertising antigravity/hub/%s (cl override %s)", version, changelistOverride)
 	}
 
+	return item
+}
+
+// checkPromptPreflight reports whether harness-fingerprint rewrites are active. Disabling them is a valid
+// debugging choice, but it re-exposes the exact instruction patterns upstream rejects with a bare 429.
+func checkPromptPreflight(cfg *config.Config) CheckItem {
+	item := CheckItem{Category: "Upstream Identity", Name: "Prompt Preflight", Status: StatusOK}
+	if cfg != nil && cfg.DisablePromptPreflight {
+		item.Status = StatusWarn
+		item.Message = "disabled; harness fingerprints stay in system instructions"
+		item.Hint = "Remove disable_prompt_preflight from config.json to rewrite known wrapper banners and anchors"
+		return item
+	}
+	item.Message = "enabled; known wrapper banners and tool anchors are rewritten"
 	return item
 }
 

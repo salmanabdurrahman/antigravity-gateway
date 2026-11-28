@@ -316,6 +316,10 @@ type BuildOptions struct {
 	// systemInstruction field. It is used for the single prompt-rejection retry before the
 	// gateway surfaces the upstream error.
 	InlineSystem bool
+
+	// DisablePromptPreflight keeps third-party harness fingerprints in the instruction stack. It exists as
+	// an operator escape hatch and leaves billing/identity scrubbing untouched.
+	DisablePromptPreflight bool
 }
 
 // ErrInvalidRequest indicates a malformed OpenAI Chat completions payload.
@@ -545,7 +549,7 @@ func BuildRequest(req *ChatRequest, opts BuildOptions) (*GeminiRequest, error) {
 		GenerationConfig: genConfig,
 	}
 
-	systemText := ScrubAgentMarkers(strings.Join(systemTexts, "\n\n"))
+	systemText, _ := ScrubSystemInstruction(strings.Join(systemTexts, "\n\n"), opts.DisablePromptPreflight)
 	if systemText != "" {
 		if opts.InlineSystem {
 			result.Contents = inlineSystemText(contents, systemText)

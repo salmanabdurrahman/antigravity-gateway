@@ -205,7 +205,7 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 
 	var systemTexts []string
 	if req.System != nil {
-		extractAnthropicSystem(req.System, &systemTexts)
+		extractAnthropicSystem(req.System, &systemTexts, opts.DisablePromptPreflight)
 	}
 
 	// Protocol Quirk: Inject interleaved thinking hint for Claude thinking models when tools are present
@@ -389,23 +389,24 @@ func BuildAnthropicRequest(req *AnthropicRequest, opts BuildOptions) (*GeminiReq
 	}, nil
 }
 
-// extractAnthropicSystem collects plain text from string or structured system blocks,
-// scrubbing billing pseudo-headers and third-party agent identity fingerprints.
-func extractAnthropicSystem(sys any, out *[]string) {
-	switch v := sys.(type) {
-	case string:
-		stripped := ScrubAgentMarkers(v)
+// extractAnthropicSystem collects plain text from string or structured system blocks, scrubbing harness
+// fingerprints, billing pseudo-headers, and third-party agent identity lines.
+func extractAnthropicSystem(sys any, out *[]string, disablePreflight bool) {
+	appendScrubbed := func(raw string) {
+		stripped, _ := ScrubSystemInstruction(raw, disablePreflight)
 		if stripped != "" {
 			*out = append(*out, stripped)
 		}
+	}
+
+	switch v := sys.(type) {
+	case string:
+		appendScrubbed(v)
 	case []any:
 		for _, item := range v {
 			if m, ok := item.(map[string]any); ok {
 				if txt, ok := m["text"].(string); ok {
-					stripped := ScrubAgentMarkers(txt)
-					if stripped != "" {
-						*out = append(*out, stripped)
-					}
+					appendScrubbed(txt)
 				}
 			}
 		}

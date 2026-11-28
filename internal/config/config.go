@@ -328,6 +328,10 @@ type Config struct {
 	// DisableSuspendPause turns the post-suspension protection window off entirely, restoring the
 	// legacy behaviour of failing over to the next pooled account immediately.
 	DisableSuspendPause bool `json:"disable_suspend_pause,omitzero"`
+
+	// DisablePromptPreflight keeps third-party harness fingerprints in system instructions instead of
+	// rewriting them. Billing pseudo-headers and third-party identity lines are always scrubbed.
+	DisablePromptPreflight bool `json:"disable_prompt_preflight,omitzero"`
 }
 
 // MaxWaitDuration returns the configured cooldown absorption limit as a duration. The safe profile

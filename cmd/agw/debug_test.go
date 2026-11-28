@@ -101,6 +101,7 @@ func TestDebugWireReportsResolvedIdentity(t *testing.T) {
 		"Max In Flight:         2 per account",
 		"Dispatch Budget:       profile default",
 		"Prompt Rejection Guard: 3 bare 429s / 900s",
+		"Prompt Preflight:      enabled",
 		"  1. https://daily-cloudcode-pa.googleapis.com",
 		"  2. https://cloudcode-pa.googleapis.com",
 	}

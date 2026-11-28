@@ -475,10 +475,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	attemptedAccounts := make(map[string]struct{})
 	for range maxEmptyRetries + 4 {
 		opts := translate.BuildOptions{
-			Info:          info,
-			LegacySchemas: s.legacySchemas.Load(),
-			SessionID:     sessionID,
-			InlineSystem:  promptFallback,
+			Info:                   info,
+			LegacySchemas:          s.legacySchemas.Load(),
+			SessionID:              sessionID,
+			InlineSystem:           promptFallback,
+			DisablePromptPreflight: s.config().DisablePromptPreflight,
 		}
 
 		geminiReq, reqErr := translate.BuildRequest(&chatReq, opts)
@@ -769,10 +770,11 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	attemptedAccounts := make(map[string]struct{})
 	for range maxEmptyRetries + 4 {
 		opts := translate.BuildOptions{
-			Info:          info,
-			LegacySchemas: s.legacySchemas.Load(),
-			SessionID:     sessionID,
-			InlineSystem:  promptFallback,
+			Info:                   info,
+			LegacySchemas:          s.legacySchemas.Load(),
+			SessionID:              sessionID,
+			InlineSystem:           promptFallback,
+			DisablePromptPreflight: s.config().DisablePromptPreflight,
 		}
 
 		geminiReq, reqErr := translate.BuildAnthropicRequest(&anthReq, opts)

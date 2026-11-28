@@ -154,7 +154,7 @@ agw config strategy hybrid
 
 `--json` is supported across all `agw config` subcommands. Updating `strategy` rewrites only the `"strategy"` field in `config.json`; if a daemon is running, restart it (`agw stop && agw start -d`) for the new strategy to take effect.
 
-`agw config show` also reports the resolved `Profile`, `Rotation Mode`, and `Catalog Refresh` window, the pacing posture (`Max In Flight`, `Dispatch Budget`, `Prompt Rejection Guard`), and the effective post-suspension protection window as `Suspension Pause`: the resolved number of seconds, or `disabled` when `disable_suspend_pause` is set. See the [Configuration Reference](configuration.md#2-configjson-keys) for the underlying keys.
+`agw config show` also reports the resolved `Profile`, `Rotation Mode`, and `Catalog Refresh` window, the pacing posture (`Max In Flight`, `Dispatch Budget`, `Prompt Rejection Guard`), whether instruction preflight is active (`Prompt Preflight`), and the effective post-suspension protection window as `Suspension Pause`: the resolved number of seconds, or `disabled` when `disable_suspend_pause` is set. See the [Configuration Reference](configuration.md#2-configjson-keys) for the underlying keys.
 
 ## 8. `agw start`
 
@@ -268,7 +268,7 @@ Runs an end-to-end environment audit:
 1. **Network ports**: gateway port (`51400` or configured `port`) and OAuth callback port resolved from `redirect_uri` (default `51121`).
 2. **Filesystem permissions**: `0700` directory and `0600` credential files, plus API-key format validation.
 3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions, plus an operating-profile advisory that warns when `profile: manual` would rotate more than one active account and explains idle accounts under the safe profile. Suspended accounts are reported with their appeal link, since they stay out of rotation until the operator appeals and clears them.
-4. **Upstream identity**: the advertised `antigravity/hub/<version>` identity with its paired `cl` changelist, warning when a version override has no matching changelist, plus the locally installed `agy` CLI version reported on its own track.
+4. **Upstream identity**: the advertised `antigravity/hub/<version>` identity with its paired `cl` changelist, warning when a version override has no matching changelist, plus the locally installed `agy` CLI version reported on its own track. The instruction preflight state is reported alongside it, warning when `disable_prompt_preflight` leaves harness fingerprints in place.
 5. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 6. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
@@ -304,6 +304,7 @@ Prints the values that actually leave the machine, resolved through the same hel
 | `Max In Flight`          | Resolved concurrent-stream ceiling per credential, or `unbounded` under the manual profile            |
 | `Dispatch Budget`        | Explicit per-request dispatch budget, or `profile default` when the profile decides                   |
 | `Prompt Rejection Guard` | Bare-429 threshold and park duration, or `off` when the guard is disabled                             |
+| `Prompt Preflight`       | Whether known wrapper banners and tool anchors are rewritten before dispatch                          |
 | `Upstream Endpoints`     | Upstream Cloud Code Assist base URLs in dispatch order                                                |
 
 Use it before opening an upstream rejection report, and after an upgrade, to confirm which identity and transport a request really carried. Secrets are never printed, so the report is safe to paste into an issue.

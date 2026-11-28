@@ -92,6 +92,8 @@ type wireIdentityView struct {
 	PromptRejectionLimit int `json:"prompt_rejection_limit"`
 	// PromptRejectionCooldownSeconds is the resolved park duration for a rejection storm.
 	PromptRejectionCooldownSeconds int `json:"prompt_rejection_cooldown_seconds"`
+	// PromptPreflightEnabled reports whether harness-fingerprint rewrites are applied to instructions.
+	PromptPreflightEnabled bool `json:"prompt_preflight_enabled"`
 	// Endpoints lists the upstream Cloud Code Assist base URLs in dispatch order.
 	Endpoints []string `json:"endpoints,omitempty"`
 }
@@ -126,6 +128,7 @@ func buildWireIdentityView(path string, cfg *config.Config) wireIdentityView {
 		MaxDispatchesPerRequest:        cfg.MaxDispatchesPerRequest,
 		PromptRejectionLimit:           rejectionLimit,
 		PromptRejectionCooldownSeconds: int(rejectionCooldown / time.Second),
+		PromptPreflightEnabled:         !cfg.DisablePromptPreflight,
 		Endpoints:                      slices.Clone(cfg.Endpoints),
 	}
 }
@@ -182,6 +185,11 @@ func runDebugWire(cmd *cobra.Command, args []string) error {
 		cmd.Printf("Prompt Rejection Guard: %d bare 429s / %ds\n", view.PromptRejectionLimit, view.PromptRejectionCooldownSeconds)
 	} else {
 		cmd.Printf("Prompt Rejection Guard: off\n")
+	}
+	if view.PromptPreflightEnabled {
+		cmd.Printf("Prompt Preflight:      enabled\n")
+	} else {
+		cmd.Printf("Prompt Preflight:      disabled\n")
 	}
 	if len(view.Endpoints) > 0 {
 		cmd.Println("Upstream Endpoints:")

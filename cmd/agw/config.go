@@ -135,6 +135,9 @@ type redactedConfigView struct {
 	// PromptRejectionCooldownSeconds is the resolved park duration for a rejection storm.
 	PromptRejectionCooldownSeconds int `json:"prompt_rejection_cooldown_seconds"`
 
+	// PromptPreflightEnabled reports whether harness-fingerprint rewrites are applied to instructions.
+	PromptPreflightEnabled bool `json:"prompt_preflight_enabled"`
+
 	// Endpoints lists configured upstream Cloud Code Assist base URLs.
 	Endpoints []string `json:"endpoints,omitempty"`
 
@@ -189,6 +192,7 @@ func buildRedactedConfigView(path string, cfg *config.Config) redactedConfigView
 		MaxDispatchesPerRequest:        cfg.MaxDispatchesPerRequest,
 		PromptRejectionLimit:           promptRejectionLimit,
 		PromptRejectionCooldownSeconds: int(promptRejectionCooldown / time.Second),
+		PromptPreflightEnabled:         !cfg.DisablePromptPreflight,
 		Endpoints:                      slices.Clone(cfg.Endpoints),
 		ModelMapping:                   mapping,
 	}
@@ -239,6 +243,11 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		cmd.Printf("Prompt Rejection Guard: %d bare 429s / %ds\n", view.PromptRejectionLimit, view.PromptRejectionCooldownSeconds)
 	} else {
 		cmd.Printf("Prompt Rejection Guard: off\n")
+	}
+	if view.PromptPreflightEnabled {
+		cmd.Printf("Prompt Preflight:      enabled\n")
+	} else {
+		cmd.Printf("Prompt Preflight:      disabled\n")
 	}
 	if len(view.Endpoints) > 0 {
 		cmd.Printf("Upstream Endpoints:    %s\n", strings.Join(view.Endpoints, ", "))

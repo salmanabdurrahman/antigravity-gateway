@@ -167,3 +167,25 @@ func TestParseSemanticVersion(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckPromptPreflightReportsState verifies the preflight advisory: enabled is OK, while the operator
+// escape hatch is flagged because it leaves the rejected harness fingerprints in place.
+func TestCheckPromptPreflightReportsState(t *testing.T) {
+	enabled := checkPromptPreflight(config.DefaultConfig())
+	if enabled.Status != StatusOK {
+		t.Errorf("Status = %v; want OK with preflight enabled", enabled.Status)
+	}
+	if !strings.Contains(enabled.Message, "enabled") {
+		t.Errorf("Message = %q; want the enabled phrasing", enabled.Message)
+	}
+
+	disabled := config.DefaultConfig()
+	disabled.DisablePromptPreflight = true
+	item := checkPromptPreflight(disabled)
+	if item.Status != StatusWarn {
+		t.Errorf("Status = %v; want WARN with preflight disabled", item.Status)
+	}
+	if !strings.Contains(item.Hint, "disable_prompt_preflight") {
+		t.Errorf("Hint = %q; want the config key to remove", item.Hint)
+	}
+}

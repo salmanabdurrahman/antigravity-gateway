@@ -53,6 +53,7 @@ func TestConfigShowReportsOperatingProfile(t *testing.T) {
 		"Catalog Refresh:       60m",
 		"Max In Flight:         2 per account",
 		"Prompt Rejection Guard: 3 bare 429s / 900s",
+		"Prompt Preflight:      enabled",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("config show output missing %q:\n%s", want, out)
