@@ -68,6 +68,7 @@ Deeper design notes: [Architecture Overview](docs/architecture.md).
 | `agw logout <email>`             | Remove an account from the local store                         |
 | `agw models list [--refresh]`    | Inspect catalog models, context windows, limits (`--quota`)    |
 | `agw config [show\|strategy]`    | Inspect redacted config or update rotation strategy            |
+| `agw debug wire`                 | Print effective upstream identity headers and request defaults |
 | `agw start [--detach]`           | Run the gateway (`--strategy`, `--port`, `--config`)           |
 | `agw status`                     | Show daemon state, active strategy, and runtime account stats  |
 | `agw stop`                       | Stop the daemon, rediscovering it from `/health` if needed     |

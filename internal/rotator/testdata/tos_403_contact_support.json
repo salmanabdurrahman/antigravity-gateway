@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": 403,
+    "message": "This service has been disabled in this account for a violation of the Terms of Service. Please contact Google Cloud Support for assistance.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TOS_VIOLATION_CONTACT_SUPPORT",
+        "domain": "cloudcode-pa.googleapis.com"
+      }
+    ]
+  }
+}

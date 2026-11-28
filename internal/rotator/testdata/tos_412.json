@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 412,
+    "message": "Google has suspended Antigravity access for this account.",
+    "status": "FAILED_PRECONDITION"
+  }
+}

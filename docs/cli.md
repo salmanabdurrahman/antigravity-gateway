@@ -10,17 +10,18 @@ Available Commands:
   accounts    List configured Google Antigravity accounts
   completion  Generate the autocompletion script for the specified shell
   config      Inspect and update gateway configuration
+  debug       Inspect the effective upstream wire identity without changing anything
   doctor      Run diagnostics on ports, permissions, accounts, and network connectivity
   help        Help about any command
   login       Authenticate a Google Antigravity account via OAuth PKCE
   logout      Remove a Google account from the local account store
   models      Inspect available chat models and token limits
   quota       Inspect live rolling (5h), weekly, and per-model account quotas
-  setup       Configure AI coding agents (Pi Coding Agent, OpenCode, Claude Code CLI)
+  setup       Configure AI coding agents to use Antigravity Gateway
   start       Start the local OpenAI-compatible gateway reverse proxy
   status      Show gateway daemon status, active strategy, and runtime metrics
   stop        Stop the running background gateway daemon
-  update      Update the gateway executable in place from GitHub Releases (alias: upgrade)
+  update      Update Antigravity Gateway to the latest release
   version     Print the semantic version of agw
 ```
 
@@ -263,6 +264,36 @@ Runs an end-to-end environment audit:
 4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
 5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
-## 13. `agw version`
+## 13. `agw debug`
+
+Read-only diagnostics for the identity the gateway presents to Google Cloud Code Assist. Nothing here contacts Google, writes `config.json`, or prints an API key, OAuth client secret, access token, or refresh token.
+
+### `agw debug wire`
+
+```bash
+agw debug wire
+agw debug wire --json
+```
+
+Prints the values that actually leave the machine, resolved through the same helpers the daemon uses:
+
+| Field                  | Meaning                                                                                      |
+| :--------------------- | :------------------------------------------------------------------------------------------- |
+| `Config File`          | Resolved `config.json` path honoring `--config` and `$AGW_HOME`                              |
+| `Gateway Endpoint`     | Clamped loopback base URL clients connect to                                                 |
+| `Strategy`             | Configured account rotation strategy                                                         |
+| `Quota Threshold`      | Fractional remaining-quota floor before an account is deprioritized                          |
+| `User-Agent`           | Effective `User-Agent` header, including `AGW_USER_AGENT` or `user_agent` overrides          |
+| `X-Goog-Api-Client`    | Effective `X-Goog-Api-Client` header value                                                   |
+| `Client-Metadata`      | Effective `Client-Metadata` JSON header value                                                |
+| `Upstream Transport`   | HTTP version and connection-pool scope negotiated upstream, derived from the built transport |
+| `Max Cooldown Wait`    | Maximum cooldown wait absorbed before a request fails                                        |
+| `Default 429 Cooldown` | Base cooldown applied to a `429` without an explicit retry delay                             |
+| `Empty Stream Retries` | Retry budget for empty upstream streams                                                      |
+| `Upstream Endpoints`   | Upstream Cloud Code Assist base URLs in dispatch order                                       |
+
+Use it before opening an upstream rejection report, and after an upgrade, to confirm which identity and transport a request really carried. Secrets are never printed, so the report is safe to paste into an issue.
+
+## 14. `agw version`
 
 Prints the semantic version embedded at build time (for example `agw version 0.2.1`).

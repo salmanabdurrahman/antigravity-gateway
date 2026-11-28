@@ -1,0 +1,19 @@
+{
+  "error": {
+    "code": 403,
+    "message": "This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TOS_VIOLATION",
+        "domain": "cloudcode-pa.googleapis.com",
+        "metadata": {
+          "uiMessage": "true",
+          "appeal_url": "https://forms.gle/EXAMPLEEXAMPLE",
+          "appeal_url_link_text": "Submit Appeal"
+        }
+      }
+    ]
+  }
+}
