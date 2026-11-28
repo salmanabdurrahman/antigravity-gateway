@@ -474,8 +474,17 @@ func checkAccounts(cfg *config.Config) []CheckItem {
 			Hint:     "Run 'agw login' to authenticate an account",
 		})
 	} else {
-		disabledCount := len(accounts) - usable
+		suspendedCount := 0
+		for _, account := range accounts {
+			if account.Suspended() {
+				suspendedCount++
+			}
+		}
+		disabledCount := len(accounts) - usable - suspendedCount
 		msg := fmt.Sprintf("%d active account(s) ready", usable)
+		if suspendedCount > 0 {
+			msg += fmt.Sprintf(" (%d suspended)", suspendedCount)
+		}
 		if disabledCount > 0 {
 			msg += fmt.Sprintf(" (%d disabled)", disabledCount)
 		}
@@ -513,7 +522,7 @@ func suspendedAccountCheck(accounts []*auth.Account) []CheckItem {
 
 	kinds := make([]string, 0, len(suspended))
 	for _, acc := range suspended {
-		kinds = append(kinds, fmt.Sprintf("%s (%s)", risk.MaskEmail(acc.Email), acc.SuspendKind))
+		kinds = append(kinds, fmt.Sprintf("%s (%s)", risk.MaskEmail(acc.Email), acc.SuspensionKind()))
 	}
 
 	hint := "Appeal once, then revoke third-party access at https://myaccount.google.com/permissions before signing in again"

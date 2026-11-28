@@ -247,15 +247,15 @@ func buildRiskSnapshot(cfg *config.Config, stored []*auth.Account, runtime []rot
 			Credential:  acc.CredentialKey(),
 			Email:       risk.MaskEmail(acc.Email),
 			Suspended:   acc.Suspended(),
-			SuspendKind: acc.SuspendKind,
-			LastError:   risk.RedactEmails(acc.LastError),
+			SuspendKind: acc.SuspensionKind(),
+			LastError:   risk.Truncate(risk.RedactEmails(acc.LastError), risk.MaxErrorTextRunes),
 		}
 		if live, ok := counters[strings.ToLower(acc.Email)]; ok {
 			entry.Requests = live.Requests
 			entry.RateLimits = live.RateLimits
 			entry.PromptRejections = live.PromptRejections
 			entry.LastUpstreamOK = live.LastUpstreamOK
-			entry.LastError = risk.RedactEmails(cmp.Or(live.LastError, acc.LastError))
+			entry.LastError = risk.Truncate(risk.RedactEmails(cmp.Or(live.LastError, acc.LastError)), risk.MaxErrorTextRunes)
 		}
 		snapshot.Accounts = append(snapshot.Accounts, entry)
 	}
@@ -345,10 +345,15 @@ func renderStatusReport(cmd *cobra.Command, report statusReport, now time.Time) 
 	_, _ = fmt.Fprintln(w, "EMAIL\tTIER\tSTATUS\tHEALTH\tREQUESTS\t429S\tCOOLDOWNS\tLAST USED\tLAST ERROR")
 	for _, acc := range report.RuntimeAccounts {
 		tier := cmp.Or(acc.Tier, "-")
+		// A suspension verdict is terminal and outranks the generic disabled/cooling labels, so the runtime
+		// table agrees with the risk block printed below it.
 		status := "Active"
-		if acc.Disabled {
+		switch {
+		case acc.SuspendKind != "":
+			status = fmt.Sprintf("Suspended (%s)", acc.SuspendKind)
+		case acc.Disabled:
 			status = "Disabled"
-		} else if len(acc.Cooldowns) > 0 {
+		case len(acc.Cooldowns) > 0:
 			status = "Cooling"
 		}
 

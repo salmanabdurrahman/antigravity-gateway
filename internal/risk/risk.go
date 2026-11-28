@@ -29,6 +29,10 @@ const (
 
 	// filePerm keeps telemetry owner-only, like every other file under the configuration root.
 	filePerm os.FileMode = 0o600
+
+	// MaxErrorTextRunes bounds the stored free-text error so one verbose upstream message cannot inflate the
+	// telemetry file. The value keeps actionable wording while discarding payload-like tails.
+	MaxErrorTextRunes = 300
 )
 
 // Account captures one account's traffic counters and suspension state at capture time. Identity is
@@ -171,6 +175,19 @@ func (s *Store) Append(snapshot Snapshot) error {
 		return fmt.Errorf("persisting risk telemetry to %s: %w", s.path, err)
 	}
 	return nil
+}
+
+// Truncate clips text to maxRunes runes, appending an ellipsis when it had to cut. It counts runes rather than
+// bytes so multi-byte characters are never split.
+func Truncate(text string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 // MaskEmail reduces an address to `first-character***@domain` so telemetry can attribute counters to an

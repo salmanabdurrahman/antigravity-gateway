@@ -345,3 +345,76 @@ func TestStatusRiskWithoutAccounts(t *testing.T) {
 		t.Errorf("accounts = %d; want none for an empty pool", len(document.Snapshots[0].Accounts))
 	}
 }
+
+// TestStatusRuntimeTableLabelsSuspension verifies that the runtime account table reports a suspended verdict
+// instead of the generic disabled label, so it agrees with the risk block printed below it.
+func TestStatusRuntimeTableLabelsSuspension(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv(config.EnvHome, tempHome)
+
+	cfg := config.DefaultConfig()
+	cfg.APIKey = config.APIKeyPrefix + strings.Repeat("a", config.APIKeyHexLen)
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("resolving config path: %v", err)
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("saving config: %v", err)
+	}
+
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(server.HealthResponse{OK: true, Name: server.ServerName, Version: config.Version, Accounts: 0})
+		case "/v1/accounts":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(server.AccountsResponse{
+				Strategy: "sticky",
+				Accounts: []rotator.AccountSnapshot{{
+					Email:       "flagged@example.com",
+					Disabled:    true,
+					SuspendKind: "tos_violation",
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer daemon.Close()
+
+	parsed, err := url.Parse(daemon.URL)
+	if err != nil {
+		t.Fatalf("parsing fake daemon URL: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parsing fake daemon port: %v", err)
+	}
+
+	prevPort, prevJSON, prevRisk := statusPort, statusJSON, statusRisk
+	t.Cleanup(func() {
+		statusPort, statusJSON, statusRisk = prevPort, prevJSON, prevRisk
+		statusCmd.SetOut(nil)
+		statusCmd.SetErr(nil)
+		statusCmd.SetContext(nil)
+	})
+	statusPort = port
+	statusJSON = false
+	statusRisk = false
+
+	buf := new(bytes.Buffer)
+	statusCmd.SetOut(buf)
+	statusCmd.SetErr(buf)
+	statusCmd.SetContext(t.Context())
+	if err := statusCmd.RunE(statusCmd, nil); err != nil {
+		t.Fatalf("statusCmd.RunE failed: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Suspended (tos_violation)") {
+		t.Errorf("runtime table did not label the suspension:\n%s", out)
+	}
+	// The local runtime table deliberately keeps the operator's own full address; only the persisted risk
+	// block masks it.
+}

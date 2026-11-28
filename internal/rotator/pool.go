@@ -385,7 +385,7 @@ func (s *AccountState) Snapshot(now time.Time) AccountSnapshot {
 		projectID = s.account.ProjectID
 		disabled = s.account.Disabled
 		tier = s.account.Tier
-		suspendKind = s.account.SuspendKind
+		suspendKind = s.account.SuspensionKind()
 		appealURL = s.account.AppealURL
 	}
 	lastErr := s.lastError

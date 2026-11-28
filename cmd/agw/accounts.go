@@ -128,7 +128,7 @@ func accountBaseStatus(acc *auth.Account) string {
 		return "Active"
 	}
 	if acc.Suspended() {
-		return fmt.Sprintf("Suspended (%s)", acc.SuspendKind)
+		return fmt.Sprintf("Suspended (%s)", acc.SuspensionKind())
 	}
 	if acc.LastError != "" {
 		return fmt.Sprintf("Disabled (%s)", acc.LastError)

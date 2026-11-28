@@ -162,7 +162,8 @@ func TestAccountsCheckDoesNotReEnableWithoutOptIn(t *testing.T) {
 		RefreshToken: "refresh-secret",
 		ProjectID:    "project-disabled",
 		Disabled:     true,
-		LastError:    "violation of terms of service",
+		// A transient disable reason: suspension messages are classified as legacy verdicts instead.
+		LastError: "refresh token revoked",
 	}); err != nil {
 		t.Fatalf("seeding account: %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/salmanabdurrahman/antigravity-gateway/internal/auth"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/updater"
 )
@@ -34,6 +35,7 @@ func runDoctorTolerant(t *testing.T) string {
 // link, since they stay out of rotation until the operator appeals and clears them locally.
 func TestDoctorReportsSuspendedAccounts(t *testing.T) {
 	seedSuspendedAccount(t, "suspended@example.com", "https://forms.gle/DOCRISK")
+	seedActiveAccountInCurrentHome(t, "active@example.com")
 
 	originalChecker := versionChecker
 	versionChecker = func(ctx context.Context) (*updater.ReleaseInfo, error) {
@@ -51,6 +53,7 @@ func TestDoctorReportsSuspendedAccounts(t *testing.T) {
 		"Suspended Accounts",
 		"1 suspended: s***@example.com (tos_violation)",
 		"Appeal once: https://forms.gle/DOCRISK",
+		"1 active account(s) ready (1 suspended)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor output missing %q:\n%s", want, out)
@@ -79,5 +82,23 @@ func TestDoctorStaysQuietWithoutSuspensions(t *testing.T) {
 	out := runDoctorTolerant(t)
 	if strings.Contains(out, "Suspended Accounts") {
 		t.Errorf("doctor reported a suspension advisory for a healthy pool:\n%s", out)
+	}
+}
+
+// seedActiveAccountInCurrentHome stores one healthy account inside the AGW_HOME the caller already isolated.
+func seedActiveAccountInCurrentHome(t *testing.T, email string) {
+	t.Helper()
+
+	accPath, err := config.AccountsFilePath()
+	if err != nil {
+		t.Fatalf("resolving accounts path: %v", err)
+	}
+	if _, err := auth.NewStore(accPath).Upsert(&auth.Account{
+		Email:        email,
+		RefreshToken: "refresh-" + email,
+		ProjectID:    "project-" + email,
+		AddedAt:      "2026-11-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seeding active account: %v", err)
 	}
 }

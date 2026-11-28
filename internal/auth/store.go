@@ -78,9 +78,56 @@ type Account struct {
 	AppealURL string `json:"appeal_url,omitempty"`
 }
 
-// Suspended reports whether upstream returned a terminal suspension verdict for this account.
+// legacySuspensionMarkers are phrases found in disabled records written before structured suspension
+// verdicts existed; the pre-verdict rotator persisted `HTTP 403 permanent suspension: ...` as LastError.
+var legacySuspensionMarkers = []string{
+	"permanent suspension",
+	"violation of terms of service",
+	"terms of service violation",
+}
+
+// Suspended reports whether upstream returned a terminal suspension verdict for this account. Disabled
+// records from older releases that only carry the suspension message are recognized too, so upgrading does
+// not resurrect a flagged credential or hide it from the risk surfaces.
 func (a *Account) Suspended() bool {
-	return a != nil && strings.TrimSpace(a.SuspendKind) != ""
+	return a != nil && (strings.TrimSpace(a.SuspendKind) != "" || a.legacySuspensionReason() != "")
+}
+
+// SuspensionKind returns the structured suspension classification, or the legacy-derived kind when only the
+// recorded message identifies a suspension. Nothing is written to disk: the value is derived on read so an old
+// record is never rewritten behind the operator's back.
+func (a *Account) SuspensionKind() string {
+	if a == nil {
+		return ""
+	}
+	if kind := strings.TrimSpace(a.SuspendKind); kind != "" {
+		return kind
+	}
+	if reason := a.legacySuspensionReason(); reason != "" {
+		// The pre-verdict rotator stored every permanent 403 under the same prefix, so the recorded message is
+		// the only remaining signal for which verdict it was.
+		lower := strings.ToLower(reason)
+		if strings.Contains(lower, "validation_required") || strings.Contains(lower, "verify your account") {
+			return "validation_required"
+		}
+		return "tos_violation"
+	}
+	return ""
+}
+
+// legacySuspensionReason returns the recorded error when a disabled account only carries a legacy suspension
+// marker. Re-enabled accounts return nothing, so clearing a verdict clears the derived state as well.
+func (a *Account) legacySuspensionReason() string {
+	if a == nil || !a.Disabled {
+		return ""
+	}
+	lower := strings.ToLower(a.LastError)
+	for _, marker := range legacySuspensionMarkers {
+		if strings.Contains(lower, marker) {
+			return a.LastError
+		}
+	}
+	return ""
 }
 
 // CredentialKey returns the opaque connection-pool key for this account's Google credential. The key

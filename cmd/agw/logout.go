@@ -71,7 +71,7 @@ func printSuspensionGuidance(cmd *cobra.Command, acc *auth.Account) {
 		return
 	}
 
-	cmd.Printf("\nThis account was suspended upstream (%s).\n", acc.SuspendKind)
+	cmd.Printf("\nThis account was suspended upstream (%s).\n", acc.SuspensionKind())
 	cmd.Println("Revoke third-party access at https://myaccount.google.com/permissions before signing in again.")
 	if acc.AppealURL != "" {
 		cmd.Printf("Appeal once: %s\n", acc.AppealURL)

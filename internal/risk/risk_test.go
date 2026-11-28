@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,5 +173,27 @@ func TestRedactEmails(t *testing.T) {
 		if got := RedactEmails(raw); got != want {
 			t.Errorf("RedactEmails(%q) = %q; want %q", raw, got, want)
 		}
+	}
+}
+
+// TestTruncate verifies the error-text bound counts runes and only marks text it actually cut.
+func TestTruncate(t *testing.T) {
+	if got := Truncate("short", 10); got != "short" {
+		t.Errorf("Truncate(short) = %q; want the input unchanged", got)
+	}
+
+	exact := strings.Repeat("a", 10)
+	if got := Truncate(exact, 10); got != exact {
+		t.Errorf("Truncate(exact boundary) = %q; want the input unchanged with no ellipsis", got)
+	}
+
+	long := strings.Repeat("é", 12)
+	got := Truncate(long, 10)
+	if runes := []rune(got); len(runes) != 11 || runes[10] != '…' {
+		t.Errorf("Truncate(long) = %q (%d runes); want 10 runes plus an ellipsis", got, len([]rune(got)))
+	}
+
+	if got := Truncate("anything", 0); got != "" {
+		t.Errorf("Truncate with a non-positive limit = %q; want empty", got)
 	}
 }
