@@ -140,6 +140,21 @@ func TestAntigravityVersionOverrides(t *testing.T) {
 	}
 }
 
+// TestUserAgentOmitsLegacyIdePrefix verifies the modern Hub fingerprint never regresses to the retired
+// antigravity/ide prefix, which upstream rejects through its minimum client version gate.
+func TestUserAgentOmitsLegacyIdePrefix(t *testing.T) {
+	t.Setenv(EnvAntigravityVersion, "")
+	t.Setenv(EnvAltAntigravityVersion, "")
+
+	ua := DefaultUserAgent()
+	if strings.Contains(ua, "antigravity/ide/") {
+		t.Errorf("DefaultUserAgent() = %q; legacy antigravity/ide prefix must never be sent", ua)
+	}
+	if !strings.HasPrefix(ua, "antigravity/hub/") {
+		t.Errorf("DefaultUserAgent() = %q; want an antigravity/hub prefix", ua)
+	}
+}
+
 // TestBuildHTTPHeaders verifies conversion from raw header key-value maps to standard net/http Header objects.
 func TestBuildHTTPHeaders(t *testing.T) {
 	cfg := DefaultConfig()

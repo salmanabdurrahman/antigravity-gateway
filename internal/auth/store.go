@@ -83,6 +83,15 @@ func (a *Account) Suspended() bool {
 	return a != nil && strings.TrimSpace(a.SuspendKind) != ""
 }
 
+// CredentialKey returns the opaque connection-pool key for this account's Google credential. The key
+// is a truncated digest, so callers may use it in maps and logs without exposing credential material.
+func (a *Account) CredentialKey() string {
+	if a == nil {
+		return ""
+	}
+	return config.CredentialKey(a.RefreshToken, a.AccessToken, a.Email)
+}
+
 // HasCredentials reports whether the account holds at least one usable credential: an OAuth refresh
 // token or an imported desktop access token.
 func (a *Account) HasCredentials() bool {

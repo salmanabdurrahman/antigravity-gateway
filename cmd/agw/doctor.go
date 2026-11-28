@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -103,10 +105,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// 3. Accounts Diagnostics
 	results = append(results, checkAccounts(cfg)...)
 
-	// 4. Upstream Google Connectivity
+	// 4. Upstream Identity Diagnostics
+	results = append(results, checkUpstreamIdentity(cfg)...)
+
+	// 5. Upstream Google Connectivity
 	results = append(results, checkConnectivity(ctx)...)
 
-	// 5. Client Integrations
+	// 6. Client Integrations
 	results = append(results, checkClientIntegrations(cfg)...)
 
 	// 6. Release & Version Status (Non-blocking probe)
@@ -514,6 +519,90 @@ func accountProfileCheck(cfg *config.Config, usable int) []CheckItem {
 		Message:  fmt.Sprintf("safe profile serves 1 primary account; %d additional account(s) stay idle", usable-1),
 		Hint:     "Set rotation_mode to 'pool' only if you accept pooled failover against the provider's consumer terms",
 	}}
+}
+
+// semverPattern matches the first MAJOR.MINOR.PATCH token in a version banner.
+var semverPattern = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// agyVersionDetector resolves the locally installed Antigravity CLI version. It is injectable so the
+// diagnostic stays offline and deterministic in tests.
+var agyVersionDetector = detectLocalAgyVersion
+
+// detectLocalAgyVersion runs `agy --version` with a short timeout and extracts its semantic version.
+func detectLocalAgyVersion(ctx context.Context) (string, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(cmdCtx, "agy", "--version").Output()
+	if err != nil {
+		return "", err
+	}
+	return parseSemanticVersion(string(output)), nil
+}
+
+// parseSemanticVersion returns the first MAJOR.MINOR.PATCH token in raw, or an empty string when the
+// banner contains none.
+func parseSemanticVersion(raw string) string {
+	return semverPattern.FindString(strings.TrimSpace(raw))
+}
+
+// checkUpstreamIdentity reports the client identity the gateway advertises and, separately, the locally
+// installed Antigravity CLI. The CLI and the Hub advertise different version tracks, so they are reported
+// side by side instead of being compared numerically.
+func checkUpstreamIdentity(cfg *config.Config) []CheckItem {
+	items := []CheckItem{checkAdvertisedIdentity(cfg)}
+	if item, ok := checkLocalAntigravityCLI(); ok {
+		items = append(items, item)
+	}
+	return items
+}
+
+// checkAdvertisedIdentity reports the Hub version and changelist the gateway sends upstream, warning when
+// an operator override left the version without its paired changelist.
+func checkAdvertisedIdentity(cfg *config.Config) CheckItem {
+	item := CheckItem{Category: "Upstream Identity", Name: "Antigravity Client Version", Status: StatusOK}
+
+	if cfg != nil && strings.TrimSpace(cfg.UserAgent) != "" {
+		item.Message = "custom user_agent configured; the version baseline is operator-managed"
+		item.Hint = "Keep the advertised version and its cl changelist paired with the installed Antigravity build"
+		return item
+	}
+
+	version := config.ResolveAntigravityVersion()
+	changelist, known := config.LookupAntigravityChangelist(version)
+	changelistOverride := strings.TrimSpace(os.Getenv(config.EnvAntigravityChangelist))
+
+	switch {
+	case known && changelistOverride == "":
+		item.Message = fmt.Sprintf("advertising antigravity/hub/%s (cl=%s)", version, changelist)
+	case !known && changelistOverride != "":
+		item.Message = fmt.Sprintf("advertising antigravity/hub/%s (cl=%s)", version, changelistOverride)
+	case !known:
+		item.Status = StatusWarn
+		item.Message = fmt.Sprintf("version override %s has no known changelist; the baseline cl would be sent", version)
+		item.Hint = fmt.Sprintf("Set %s to the Piper changelist paired with that Hub build", config.EnvAntigravityChangelist)
+	default:
+		item.Message = fmt.Sprintf("advertising antigravity/hub/%s (cl override %s)", version, changelistOverride)
+	}
+
+	return item
+}
+
+// checkLocalAntigravityCLI reports the locally installed Antigravity CLI version when one is available.
+// It never warns on absence: the CLI and the IDE Hub are separate installs, and only the Hub version is
+// advertised upstream.
+func checkLocalAntigravityCLI() (CheckItem, bool) {
+	item := CheckItem{Category: "Upstream Identity", Name: "Local Antigravity CLI", Status: StatusOK}
+
+	local, err := agyVersionDetector(context.Background())
+	if err != nil || local == "" {
+		item.Message = "local agy CLI not detected"
+		item.Hint = "Install the Antigravity CLI for local sessions, or set AGW_ANTIGRAVITY_VERSION manually if upstream gates the advertised Hub build"
+		return item, true
+	}
+
+	item.Message = fmt.Sprintf("local agy CLI %s detected (CLI and Hub versions are separate tracks)", local)
+	return item, true
 }
 
 // localSessionHint returns the re-import guidance shown when imported desktop sessions are present,

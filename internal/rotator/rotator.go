@@ -76,8 +76,12 @@ type Rotator struct {
 	// cfg holds application-level settings and fallback endpoints.
 	cfg *config.Config
 
-	// client is the HTTP client used to dispatch upstream requests.
+	// client is the HTTP client used to dispatch upstream requests when a caller pins one.
 	client *http.Client
+
+	// clientPinned records that the caller supplied an explicit client (tests, embedding). A pinned
+	// client bypasses per-credential wire selection so behaviour stays deterministic.
+	clientPinned bool
 
 	// logger is the structured slog instance used for operational diagnostics.
 	logger *slog.Logger
@@ -297,6 +301,7 @@ func (r *Rotator) SetHTTPClient(client *http.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.client = client
+	r.clientPinned = client != nil
 }
 
 // sleep pauses execution for duration d using the configured sleep function under read lock.
@@ -603,7 +608,7 @@ rotation:
 			return nil, fmt.Errorf("marshaling request payload: %w", err)
 		}
 
-		resp, err := r.post(ctx, model, s.Tier(), token, bodyBytes)
+		resp, err := r.post(ctx, model, s.Tier(), token, s.CredentialKey(), bodyBytes)
 		s.requests.Add(1)
 
 		if err != nil {
@@ -796,7 +801,9 @@ rotation:
 
 // post dispatches an HTTP POST request to Google Cloud Code Assist, cycling through endpoints ordered
 // for the account tier and falling back on 5xx, 403, and 404 responses.
-func (r *Rotator) post(ctx context.Context, model, tier, token string, body []byte) (*http.Response, error) {
+// post dispatches one generation request across the tier's endpoints, reusing the credential-scoped
+// wire client unless a caller pinned an explicit HTTP client.
+func (r *Rotator) post(ctx context.Context, model, tier, token, credentialKey string, body []byte) (*http.Response, error) {
 	endpoints := config.DefaultEndpoints()
 	if r.cfg != nil {
 		endpoints = r.cfg.EndpointsForTier(tier)
@@ -822,7 +829,11 @@ func (r *Rotator) post(ctx context.Context, model, tier, token string, body []by
 
 		r.mu.RLock()
 		client := r.client
+		pinned := r.clientPinned
 		r.mu.RUnlock()
+		if !pinned {
+			client = config.CredentialHTTPClient(0, credentialKey)
+		}
 
 		resp, err := client.Do(req)
 		if err != nil {

@@ -87,8 +87,12 @@ type ModelCatalog struct {
 	// cacheFile is the absolute filesystem destination path for models-cache.json.
 	cacheFile string
 
-	// httpClient is used to dispatch model catalog requests.
+	// httpClient is used to dispatch model catalog requests when a caller pins one.
 	httpClient *http.Client
+
+	// httpClientPinned records that the caller supplied an explicit client (tests, embedding). A pinned
+	// client bypasses per-credential wire selection so behaviour stays deterministic.
+	httpClientPinned bool
 
 	// logger is the structured logger instance for catalog events.
 	logger *slog.Logger
@@ -124,11 +128,13 @@ func (c *ModelCatalog) SetNowFn(fn func() time.Time) {
 	c.nowFn = fn
 }
 
-// SetHTTPClient overrides the HTTP client used for fetching catalog updates.
+// SetHTTPClient overrides the HTTP client used for fetching catalog updates. A pinned client bypasses
+// the per-credential wire selection applied during a live refresh.
 func (c *ModelCatalog) SetHTTPClient(client *http.Client) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.httpClient = client
+	c.httpClientPinned = client != nil
 }
 
 // LoadCache loads the cached catalog from the configured disk path.
@@ -213,6 +219,7 @@ func (c *ModelCatalog) refreshLocked(ctx context.Context) error {
 	c.mu.RLock()
 	cfg := c.cfg
 	client := c.httpClient
+	clientPinned := c.httpClientPinned
 	c.mu.RUnlock()
 
 	merged := &CatalogSnapshot{
@@ -225,12 +232,17 @@ func (c *ModelCatalog) refreshLocked(ctx context.Context) error {
 	fetch := func(ctx context.Context, token string, state *rotator.AccountState) error {
 		tier := ""
 		projectID := ""
+		accountClient := client
 		if state != nil {
 			tier = state.Tier()
 			projectID = state.ProjectID()
+			if !clientPinned {
+				// Catalog metadata keeps the same per-credential wire shape as inference traffic.
+				accountClient = config.CredentialHTTPClient(DefaultFetchTimeout, state.CredentialKey())
+			}
 		}
 
-		snap, err := FetchCatalogForTier(ctx, cfg, client, token, projectID, tier)
+		snap, err := FetchCatalogForTier(ctx, cfg, accountClient, token, projectID, tier)
 		if err != nil {
 			return err
 		}
@@ -249,7 +261,7 @@ func (c *ModelCatalog) refreshLocked(ctx context.Context) error {
 		}
 
 		// Weekly windows are fetched separately because the model catalog does not always embed them.
-		if summary, summaryErr := FetchAccountQuotaSummary(ctx, cfg, client, token, projectID, tier); summaryErr != nil {
+		if summary, summaryErr := FetchAccountQuotaSummary(ctx, cfg, accountClient, token, projectID, tier); summaryErr != nil {
 			c.logger.Debug("account quota summary unavailable", "account", stateEmail(state), "error", summaryErr)
 		} else {
 			snap.AccountQuota = MergeQuotaSummary(snap.AccountQuota, summary)

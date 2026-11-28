@@ -81,9 +81,6 @@ func DefaultPlatform() string {
 }
 
 var (
-	staticDefaultUserAgentOnce = sync.OnceValue(func() string {
-		return userAgentForVersion(DefaultAntigravityVersion)
-	})
 	staticDefaultClientMetadataOnce = sync.OnceValue(func() string {
 		return fmt.Sprintf(`{"ideType":"ANTIGRAVITY","platform":"%s","pluginType":"GEMINI"}`, DefaultPlatform())
 	})
@@ -101,6 +98,14 @@ func ResolveAntigravityChangelist(version string) string {
 	return DefaultAntigravityChangelist
 }
 
+// LookupAntigravityChangelist returns the Piper changelist mapped to a Hub release and whether the
+// built-in map knew that release. An unknown version still yields the baseline changelist at send time,
+// so callers use the boolean to warn about an unpaired version/changelist combination.
+func LookupAntigravityChangelist(version string) (string, bool) {
+	changelist, ok := antigravityChangelists[version]
+	return changelist, ok
+}
+
 // userAgentForVersion builds the modern Antigravity Hub User-Agent fingerprint.
 // Protocol Quirk: Cloud Code Assist expects `antigravity/hub/<version>` with the `cl` changelist
 // token. The older `antigravity/ide/<version>` prefix is rejected by the current minimum
@@ -112,13 +117,18 @@ func userAgentForVersion(version string) string {
 
 // DefaultUserAgent formats the standard Antigravity Hub User-Agent string matching the host architecture.
 func DefaultUserAgent() string {
+	return userAgentForVersion(ResolveAntigravityVersion())
+}
+
+// ResolveAntigravityVersion returns the Hub release baseline the gateway advertises upstream, honoring
+// the AGW_ANTIGRAVITY_VERSION and legacy PGA_ANTIGRAVITY_VERSION overrides.
+func ResolveAntigravityVersion() string {
 	v1 := os.Getenv(EnvAntigravityVersion)
 	v2 := os.Getenv(EnvAltAntigravityVersion)
 	if v1 == "" && v2 == "" {
-		return staticDefaultUserAgentOnce()
+		return DefaultAntigravityVersion
 	}
-	version := cmp.Or(v1, v2, DefaultAntigravityVersion)
-	return userAgentForVersion(version)
+	return cmp.Or(v1, v2, DefaultAntigravityVersion)
 }
 
 // DefaultAPIClient returns the standard Google Cloud SDK API client header value.

@@ -113,6 +113,17 @@ func (s *AccountState) Email() string {
 	return s.account.Email
 }
 
+// CredentialKey returns the opaque connection-pool key for this account's Google credential, or an
+// empty string when the state holds no account identity.
+func (s *AccountState) CredentialKey() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.account == nil {
+		return ""
+	}
+	return s.account.CredentialKey()
+}
+
 // Key returns the account's rotation identity: the immutable Google user ID when known, otherwise the
 // lowercased email of a legacy entry. Pool reloads key on it so an email change or alias keeps the
 // in-memory cooldowns, token cache, and request counters attached to the same account.

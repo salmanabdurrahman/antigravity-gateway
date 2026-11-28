@@ -115,15 +115,14 @@ func buildWireIdentityView(path string, cfg *config.Config) wireIdentityView {
 	}
 }
 
-// upstreamTransportMode reports the HTTP version and connection-pool scope the process-wide
-// upstream transport negotiates. The answer is derived from the transport the daemon actually
-// builds, so the diagnostic cannot drift from gateway behaviour after a transport change.
+// upstreamTransportMode reports the HTTP version and connection-pool scope upstream traffic uses. The
+// answer follows the active wire mode, so the diagnostic cannot drift from gateway behaviour after a
+// transport change and the rollback escape hatch shows up immediately.
 func upstreamTransportMode() string {
-	transport := config.NewTransport()
-	if transport.ForceAttemptHTTP2 {
-		return "http/2 (process-wide shared pool)"
+	if config.WireMode() == config.WireModeAuto {
+		return "http/2 (process-wide shared pool, ALPN)"
 	}
-	return "http/1.1 (process-wide shared pool)"
+	return "http/1.1 (per-credential pools, no ALPN)"
 }
 
 // runDebugWire renders the resolved upstream identity for the active configuration.

@@ -161,16 +161,16 @@ func TestDebugWireJSONMatchesTextReport(t *testing.T) {
 	}
 }
 
-// TestUpstreamTransportModeDerivedFromTransport verifies that the reported transport mode is derived
-// from the transport the daemon builds, so a future transport change cannot leave a stale label.
-func TestUpstreamTransportModeDerivedFromTransport(t *testing.T) {
-	transport := config.NewTransport()
-	mode := upstreamTransportMode()
-
-	if transport.ForceAttemptHTTP2 && !strings.HasPrefix(mode, "http/2") {
-		t.Errorf("upstreamTransportMode() = %q; want an http/2 label while ForceAttemptHTTP2 is enabled", mode)
+// TestUpstreamTransportModeFollowsWireMode verifies that the reported transport shape follows the active
+// wire mode, so the rollback escape hatch and the default cannot drift from one another.
+func TestUpstreamTransportModeFollowsWireMode(t *testing.T) {
+	t.Setenv(config.WireModeEnv, config.WireModeHTTP1)
+	if mode := upstreamTransportMode(); !strings.HasPrefix(mode, "http/1.1") {
+		t.Errorf("upstreamTransportMode() = %q; want an http/1.1 label in the default wire mode", mode)
 	}
-	if !transport.ForceAttemptHTTP2 && !strings.HasPrefix(mode, "http/1.1") {
-		t.Errorf("upstreamTransportMode() = %q; want an http/1.1 label while ForceAttemptHTTP2 is disabled", mode)
+
+	t.Setenv(config.WireModeEnv, config.WireModeAuto)
+	if mode := upstreamTransportMode(); !strings.HasPrefix(mode, "http/2") {
+		t.Errorf("upstreamTransportMode() = %q; want an http/2 label in auto wire mode", mode)
 	}
 }

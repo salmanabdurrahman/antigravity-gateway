@@ -267,8 +267,9 @@ Runs an end-to-end environment audit:
 1. **Network ports**: gateway port (`51400` or configured `port`) and OAuth callback port resolved from `redirect_uri` (default `51121`).
 2. **Filesystem permissions**: `0700` directory and `0600` credential files, plus API-key format validation.
 3. **Account pool**: configured accounts, refresh tokens, companion project IDs, imported desktop sessions, plus an operating-profile advisory that warns when `profile: manual` would rotate more than one active account and explains idle accounts under the safe profile.
-4. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
-5. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
+4. **Upstream identity**: the advertised `antigravity/hub/<version>` identity with its paired `cl` changelist, warning when a version override has no matching changelist, plus the locally installed `agy` CLI version reported on its own track.
+5. **Upstream connectivity**: TLS reachability and latency to `oauth2.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, and `cloudcode-pa.googleapis.com`; IPv4 versus IPv6 reachability per Cloud Code host; configured `HTTPS_PROXY` with credentials masked.
+6. **Client integrations**: whether Pi, OpenCode, and Claude Code configurations exist, point at the gateway, and carry the same API key as `config.json`.
 
 ## 13. `agw debug`
 
@@ -283,23 +284,23 @@ agw debug wire --json
 
 Prints the values that actually leave the machine, resolved through the same helpers the daemon uses:
 
-| Field                  | Meaning                                                                                      |
-| :--------------------- | :------------------------------------------------------------------------------------------- |
-| `Config File`          | Resolved `config.json` path honoring `--config` and `$AGW_HOME`                              |
-| `Gateway Endpoint`     | Clamped loopback base URL clients connect to                                                 |
-| `Strategy`             | Configured account rotation strategy                                                         |
-| `Profile`              | Resolved operating profile (`safe` or `manual`)                                              |
-| `Rotation Mode`        | Resolved dispatch mode (`single` keeps one primary account, `pool` allows failover)          |
-| `Quota Threshold`      | Fractional remaining-quota floor before an account is deprioritized                          |
-| `User-Agent`           | Effective `User-Agent` header, including `AGW_USER_AGENT` or `user_agent` overrides          |
-| `X-Goog-Api-Client`    | Effective `X-Goog-Api-Client` header value                                                   |
-| `Client-Metadata`      | Effective `Client-Metadata` JSON header value                                                |
-| `Upstream Transport`   | HTTP version and connection-pool scope negotiated upstream, derived from the built transport |
-| `Max Cooldown Wait`    | Maximum cooldown wait absorbed before a request fails                                        |
-| `Default 429 Cooldown` | Base cooldown applied to a `429` without an explicit retry delay                             |
-| `Empty Stream Retries` | Retry budget for empty upstream streams                                                      |
-| `Catalog Refresh`      | Effective catalog freshness window in minutes                                                |
-| `Upstream Endpoints`   | Upstream Cloud Code Assist base URLs in dispatch order                                       |
+| Field                  | Meaning                                                                                               |
+| :--------------------- | :---------------------------------------------------------------------------------------------------- |
+| `Config File`          | Resolved `config.json` path honoring `--config` and `$AGW_HOME`                                       |
+| `Gateway Endpoint`     | Clamped loopback base URL clients connect to                                                          |
+| `Strategy`             | Configured account rotation strategy                                                                  |
+| `Profile`              | Resolved operating profile (`safe` or `manual`)                                                       |
+| `Rotation Mode`        | Resolved dispatch mode (`single` keeps one primary account, `pool` allows failover)                   |
+| `Quota Threshold`      | Fractional remaining-quota floor before an account is deprioritized                                   |
+| `User-Agent`           | Effective `User-Agent` header, including `AGW_USER_AGENT` or `user_agent` overrides                   |
+| `X-Goog-Api-Client`    | Effective `X-Goog-Api-Client` header value                                                            |
+| `Client-Metadata`      | Effective `Client-Metadata` JSON header value                                                         |
+| `Upstream Transport`   | Active wire shape: `http/1.1` per-credential pools without ALPN, or the `AGW_WIRE_MODE=auto` fallback |
+| `Max Cooldown Wait`    | Maximum cooldown wait absorbed before a request fails                                                 |
+| `Default 429 Cooldown` | Base cooldown applied to a `429` without an explicit retry delay                                      |
+| `Empty Stream Retries` | Retry budget for empty upstream streams                                                               |
+| `Catalog Refresh`      | Effective catalog freshness window in minutes                                                         |
+| `Upstream Endpoints`   | Upstream Cloud Code Assist base URLs in dispatch order                                                |
 
 Use it before opening an upstream rejection report, and after an upgrade, to confirm which identity and transport a request really carried. Secrets are never printed, so the report is safe to paste into an issue.
 

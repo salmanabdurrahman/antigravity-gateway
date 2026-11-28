@@ -192,7 +192,10 @@ func executeTokenRequest(ctx context.Context, cfg *config.Config, form url.Value
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := config.DefaultHTTPClient(15 * time.Second)
+	// Scope the token refresh to the same credential pool the account's inference traffic uses, so one
+	// Google identity never shares a TCP/TLS connection with another. The refresh grant itself carries
+	// the credential, so the pool key is derived from it directly.
+	client := config.CredentialHTTPClient(15*time.Second, config.CredentialKey(form.Get("refresh_token"), "", ""))
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("dispatching token request to %s: %w", tokenURL, err)

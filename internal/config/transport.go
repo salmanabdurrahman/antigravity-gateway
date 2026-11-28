@@ -5,6 +5,9 @@ package config
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"os"
@@ -134,4 +137,121 @@ func DefaultHTTPClient(timeout time.Duration) *http.Client {
 		Transport: sharedTransport(),
 		Timeout:   timeout,
 	}
+}
+
+// WireModeEnv selects how the gateway speaks to upstream Google endpoints.
+const WireModeEnv = "AGW_WIRE_MODE"
+
+const (
+	// WireModeHTTP1 is the default wire mode: one HTTP/1.1 connection pool per credential, without
+	// ALPN negotiation, matching the native Antigravity client's per-process wire shape.
+	WireModeHTTP1 = "http1"
+	// WireModeAuto restores the legacy process-wide HTTP/2 multiplexed pool.
+	WireModeAuto = "auto"
+
+	// credentialTransportLimit bounds how many per-credential HTTP/1.1 pools stay alive. An idle pool
+	// costs a handful of connections, and eviction only closes idle ones, so the cap exists purely to
+	// stop unbounded growth when credentials churn.
+	credentialTransportLimit = 32
+)
+
+// WireMode returns the normalized `AGW_WIRE_MODE` value, defaulting to WireModeHTTP1 for any unset or
+// unrecognized value. The escape hatch exists so an operator can restore the legacy shared HTTP/2 pool
+// without downgrading the binary.
+func WireMode() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv(WireModeEnv)), WireModeAuto) {
+		return WireModeAuto
+	}
+	return WireModeHTTP1
+}
+
+// CredentialKey derives an opaque, non-reversible connection-pool key for one Google credential. It
+// prefers the refresh token because that value survives access-token rotation, then a desktop bearer
+// token, and finally the account identity. Only a truncated digest is returned, so the key is safe to
+// use in logs and maps without exposing credential material.
+func CredentialKey(refreshToken, accessToken, fallback string) string {
+	secret := cmp.Or(strings.TrimSpace(refreshToken), strings.TrimSpace(accessToken), strings.ToLower(strings.TrimSpace(fallback)))
+	if secret == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(secret))
+	return "k:" + hex.EncodeToString(sum[:8])
+}
+
+// CredentialHTTPClient returns an HTTP client scoped to one credential. In the default wire mode it
+// uses a dedicated HTTP/1.1 pool so two Google identities never share a TCP/TLS connection; the legacy
+// auto mode falls back to the shared multiplexed client.
+func CredentialHTTPClient(timeout time.Duration, credentialKey string) *http.Client {
+	if WireMode() == WireModeAuto {
+		return DefaultHTTPClient(timeout)
+	}
+	return &http.Client{
+		Transport: credentialTransport(credentialKey),
+		Timeout:   timeout,
+	}
+}
+
+var (
+	// credentialTransportsMu guards the per-credential pool registry below.
+	credentialTransportsMu sync.Mutex
+
+	// credentialTransports maps a credential key to its HTTP/1.1 pool, in insertion order.
+	credentialTransports = make(map[string]*http.Transport)
+
+	// credentialTransportOrder tracks insertion order so the oldest idle pool can be evicted.
+	credentialTransportOrder []string
+
+	// anonymousTransport serves callers with no credential identity, avoiding an unbounded pool per
+	// anonymous call while still keeping the HTTP/1.1 wire shape.
+	anonymousTransport = sync.OnceValue(func() *http.Transport {
+		return newHTTP1Transport()
+	})
+)
+
+// credentialTransport returns the memoized HTTP/1.1 pool for credentialKey, evicting the oldest pool
+// once the bounded registry is full. Eviction closes idle connections only, so an in-flight request
+// keeps its connection.
+func credentialTransport(credentialKey string) *http.Transport {
+	if credentialKey == "" {
+		return anonymousTransport()
+	}
+
+	credentialTransportsMu.Lock()
+	defer credentialTransportsMu.Unlock()
+
+	if transport, ok := credentialTransports[credentialKey]; ok {
+		return transport
+	}
+
+	if len(credentialTransportOrder) >= credentialTransportLimit {
+		oldest := credentialTransportOrder[0]
+		credentialTransportOrder = credentialTransportOrder[1:]
+		if evicted, ok := credentialTransports[oldest]; ok {
+			evicted.CloseIdleConnections()
+			delete(credentialTransports, oldest)
+		}
+	}
+
+	transport := newHTTP1Transport()
+	credentialTransports[credentialKey] = transport
+	credentialTransportOrder = append(credentialTransportOrder, credentialKey)
+	return transport
+}
+
+// newHTTP1Transport builds a transport matching the native client's wire shape: HTTP/1.1 only, no ALPN
+// protocol list, and a small idle pool so connections do not look like a long-lived server process.
+func newHTTP1Transport() *http.Transport {
+	transport := newTransportForMode(preferIPv4())
+	transport.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto so net/http cannot implicitly upgrade through an already-negotiated HTTP/2
+	// connection, and leave NextProtos empty so the ClientHello advertises no ALPN protocol at all.
+	transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	}
+	transport.TLSClientConfig.NextProtos = nil
+	transport.MaxIdleConns = 8
+	transport.MaxIdleConnsPerHost = 2
+	transport.IdleConnTimeout = 30 * time.Second
+	return transport
 }

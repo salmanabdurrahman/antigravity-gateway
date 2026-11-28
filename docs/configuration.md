@@ -61,6 +61,10 @@ Override the root with `AGW_HOME=/custom/path`, or point a single run at another
 
 An explicit `rotation_mode`, `catalog_max_age_minutes`, `max_wait_seconds`, or `empty_stream_retries` always overrides the profile, so a single-account deployment can still absorb short cooldowns without switching profiles. Set `profile: manual` to restore the historical pooled behaviour.
 
+### Upstream wire shape
+
+Gateway generation, catalog, and token-refresh traffic all use `HTTP/1.1` with **no ALPN protocol list**, which is what the native Antigravity client negotiates. One-off CLI probes (`agw accounts --check`, `agw quota`) keep their own short-lived client. Each credential gets its own connection pool keyed by a truncated digest of its refresh token, so two Google identities never share a TCP/TLS connection; the registry is bounded at 32 pools and evicts idle connections first. `AGW_WIRE_MODE=auto` restores the legacy process-wide HTTP/2 multiplexed pool for one release if a network path misbehaves. `agw debug wire` reports the active shape.
+
 ## 3. Environment overrides
 
 | Variable                                                     | Purpose                                                                                                                                                                    |
@@ -73,6 +77,7 @@ An explicit `rotation_mode`, `catalog_max_age_minutes`, `max_wait_seconds`, or `
 | `AGW_CLIENT_METADATA` (legacy `PGA_CLIENT_METADATA`)         | Custom `Client-Metadata` JSON header.                                                                                                                                      |
 | `AGW_ANTIGRAVITY_VERSION` (legacy `PGA_ANTIGRAVITY_VERSION`) | Antigravity Hub version advertised in the default user agent (default `2.33.0`).                                                                                           |
 | `AGW_ANTIGRAVITY_CHANGELIST`                                 | Piper changelist (`cl`) token paired with the Hub version; known releases resolve their own changelist.                                                                    |
+| `AGW_WIRE_MODE`                                              | `http1` (default) gives each credential its own HTTP/1.1 pool without ALPN; `auto` restores the shared HTTP/2 pool.                                                        |
 | `AGW_PREFER_IPV4`                                            | Set to `1` to dial IPv4 before IPv6 when a published IPv6 route blackholes traffic.                                                                                        |
 | `AGW_AGY_TOKEN_PATH`                                         | Explicit Antigravity CLI (`agy`) token file for `agw login --local`.                                                                                                       |
 | `AGW_AGY_KEYRING`                                            | Set to `1` to opt in to a read-only OS keyring lookup for the `agy` session token.                                                                                         |
