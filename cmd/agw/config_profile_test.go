@@ -51,6 +51,8 @@ func TestConfigShowReportsOperatingProfile(t *testing.T) {
 		"Profile:               safe",
 		"Rotation Mode:         single",
 		"Catalog Refresh:       60m",
+		"Max In Flight:         2 per account",
+		"Prompt Rejection Guard: 3 bare 429s / 900s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("config show output missing %q:\n%s", want, out)
@@ -62,8 +64,11 @@ func TestConfigShowReportsOperatingProfile(t *testing.T) {
 	if err := config.Save(cfgPath, manual); err != nil {
 		t.Fatalf("saving manual profile config: %v", err)
 	}
-	if out := render(); !strings.Contains(out, "Profile:               manual") || !strings.Contains(out, "Rotation Mode:         pool") {
-		t.Errorf("manual profile was not reported:\n%s", out)
+	if out := render(); !strings.Contains(out, "Profile:               manual") ||
+		!strings.Contains(out, "Rotation Mode:         pool") ||
+		!strings.Contains(out, "Max In Flight:         unbounded") ||
+		!strings.Contains(out, "Prompt Rejection Guard: off") {
+		t.Errorf("manual profile was not reported with its legacy pacing posture:\n%s", out)
 	}
 
 	configJSON = true

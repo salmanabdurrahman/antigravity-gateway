@@ -123,6 +123,18 @@ type redactedConfigView struct {
 	// SuspendPauseDisabled reports whether the post-suspension protection window is turned off.
 	SuspendPauseDisabled bool `json:"suspend_pause_disabled"`
 
+	// MaxInFlightPerAccount is the resolved per-credential concurrency ceiling, zero when unbounded.
+	MaxInFlightPerAccount int `json:"max_in_flight_per_account"`
+
+	// MaxDispatchesPerRequest is the explicit per-request dispatch budget, zero when the profile decides.
+	MaxDispatchesPerRequest int `json:"max_dispatches_per_request"`
+
+	// PromptRejectionLimit is the resolved bare-rejection threshold, zero when the guard is off.
+	PromptRejectionLimit int `json:"prompt_rejection_limit"`
+
+	// PromptRejectionCooldownSeconds is the resolved park duration for a rejection storm.
+	PromptRejectionCooldownSeconds int `json:"prompt_rejection_cooldown_seconds"`
+
 	// Endpoints lists configured upstream Cloud Code Assist base URLs.
 	Endpoints []string `json:"endpoints,omitempty"`
 
@@ -154,25 +166,31 @@ func buildRedactedConfigView(path string, cfg *config.Config) redactedConfigView
 		mapping = maps.Clone(cfg.ModelMapping)
 	}
 
+	promptRejectionLimit, promptRejectionCooldown := cfg.PromptRejectionGuard()
+
 	return redactedConfigView{
-		Path:                   path,
-		Endpoint:               config.BaseURL(host, port),
-		Host:                   host,
-		Port:                   port,
-		Strategy:               cmp.Or(cfg.Strategy, config.DefaultStrategy),
-		Profile:                cfg.EffectiveProfile(),
-		RotationMode:           cfg.EffectiveRotationMode(),
-		CatalogMaxAgeMinutes:   int(cfg.CatalogMaxAge() / time.Minute),
-		APIKeyStatus:           apiKeyStatus,
-		ClientSecretStatus:     secretStatus,
-		QuotaThreshold:         cfg.QuotaThreshold,
-		MaxWaitSeconds:         int(cfg.MaxWaitDuration() / time.Second),
-		DefaultCooldownSeconds: int(cfg.CooldownDuration() / time.Second),
-		EmptyStreamRetries:     cfg.EmptyStreamRetryCount(),
-		SuspendPauseSeconds:    int(cfg.SuspendPauseDuration() / time.Second),
-		SuspendPauseDisabled:   cfg.DisableSuspendPause,
-		Endpoints:              slices.Clone(cfg.Endpoints),
-		ModelMapping:           mapping,
+		Path:                           path,
+		Endpoint:                       config.BaseURL(host, port),
+		Host:                           host,
+		Port:                           port,
+		Strategy:                       cmp.Or(cfg.Strategy, config.DefaultStrategy),
+		Profile:                        cfg.EffectiveProfile(),
+		RotationMode:                   cfg.EffectiveRotationMode(),
+		CatalogMaxAgeMinutes:           int(cfg.CatalogMaxAge() / time.Minute),
+		APIKeyStatus:                   apiKeyStatus,
+		ClientSecretStatus:             secretStatus,
+		QuotaThreshold:                 cfg.QuotaThreshold,
+		MaxWaitSeconds:                 int(cfg.MaxWaitDuration() / time.Second),
+		DefaultCooldownSeconds:         int(cfg.CooldownDuration() / time.Second),
+		EmptyStreamRetries:             cfg.EmptyStreamRetryCount(),
+		SuspendPauseSeconds:            int(cfg.SuspendPauseDuration() / time.Second),
+		SuspendPauseDisabled:           cfg.DisableSuspendPause,
+		MaxInFlightPerAccount:          cfg.MaxInFlightPerAccountLimit(),
+		MaxDispatchesPerRequest:        cfg.MaxDispatchesPerRequest,
+		PromptRejectionLimit:           promptRejectionLimit,
+		PromptRejectionCooldownSeconds: int(promptRejectionCooldown / time.Second),
+		Endpoints:                      slices.Clone(cfg.Endpoints),
+		ModelMapping:                   mapping,
 	}
 }
 
@@ -206,6 +224,21 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 		cmd.Printf("Suspension Pause:      disabled\n")
 	} else {
 		cmd.Printf("Suspension Pause:      %ds\n", view.SuspendPauseSeconds)
+	}
+	if view.MaxInFlightPerAccount > 0 {
+		cmd.Printf("Max In Flight:         %d per account\n", view.MaxInFlightPerAccount)
+	} else {
+		cmd.Printf("Max In Flight:         unbounded\n")
+	}
+	if view.MaxDispatchesPerRequest > 0 {
+		cmd.Printf("Dispatch Budget:       %d per request\n", view.MaxDispatchesPerRequest)
+	} else {
+		cmd.Printf("Dispatch Budget:       profile default\n")
+	}
+	if view.PromptRejectionLimit > 0 {
+		cmd.Printf("Prompt Rejection Guard: %d bare 429s / %ds\n", view.PromptRejectionLimit, view.PromptRejectionCooldownSeconds)
+	} else {
+		cmd.Printf("Prompt Rejection Guard: off\n")
 	}
 	if len(view.Endpoints) > 0 {
 		cmd.Printf("Upstream Endpoints:    %s\n", strings.Join(view.Endpoints, ", "))

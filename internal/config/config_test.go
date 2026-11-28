@@ -584,3 +584,80 @@ func TestNormalizeAccountTier(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigPacingResolvers verifies the safe profile caps in-flight streams and dispatch attempts and
+// enables the bare-rejection guard, while the manual profile preserves legacy behaviour and explicit
+// values override each knob.
+func TestConfigPacingResolvers(t *testing.T) {
+	safe := DefaultConfig()
+	if got := safe.MaxInFlightPerAccountLimit(); got != DefaultMaxInFlightPerAccount {
+		t.Errorf("safe MaxInFlightPerAccountLimit() = %d; want %d", got, DefaultMaxInFlightPerAccount)
+	}
+	if got := safe.DispatchBudget(10); got != SafeMaxDispatchesPerRequest {
+		t.Errorf("safe DispatchBudget(10) = %d; want %d", got, SafeMaxDispatchesPerRequest)
+	}
+	if got := safe.DispatchBudget(1); got != 1 {
+		t.Errorf("safe DispatchBudget(1) = %d; want the legacy budget of 1", got)
+	}
+	limit, cooldown := safe.PromptRejectionGuard()
+	if limit != DefaultPromptRejectionLimit {
+		t.Errorf("safe PromptRejectionGuard limit = %d; want %d", limit, DefaultPromptRejectionLimit)
+	}
+	if cooldown != time.Duration(DefaultPromptRejectionCooldownSeconds)*time.Second {
+		t.Errorf("safe PromptRejectionGuard cooldown = %v; want %ds", cooldown, DefaultPromptRejectionCooldownSeconds)
+	}
+
+	manual := &Config{Profile: ProfileManual}
+	if got := manual.MaxInFlightPerAccountLimit(); got != 0 {
+		t.Errorf("manual MaxInFlightPerAccountLimit() = %d; want 0 (unbounded)", got)
+	}
+	if got := manual.DispatchBudget(7); got != 7 {
+		t.Errorf("manual DispatchBudget(7) = %d; want the legacy budget", got)
+	}
+	if limit, cooldown := manual.PromptRejectionGuard(); limit != 0 || cooldown != 0 {
+		t.Errorf("manual PromptRejectionGuard() = (%d, %v); want the guard disabled", limit, cooldown)
+	}
+
+	explicit := &Config{
+		MaxInFlightPerAccount:          MaxInFlightLimit + 100,
+		MaxDispatchesPerRequest:        DispatchBudgetLimit + 100,
+		PromptRejectionLimit:           PromptRejectionLimitCap + 100,
+		PromptRejectionCooldownSeconds: PromptRejectionCooldownLimitSeconds + 100,
+	}
+	if got := explicit.MaxInFlightPerAccountLimit(); got != MaxInFlightLimit {
+		t.Errorf("explicit MaxInFlightPerAccountLimit() = %d; want the cap %d", got, MaxInFlightLimit)
+	}
+	if got := explicit.DispatchBudget(3); got != DispatchBudgetLimit {
+		t.Errorf("explicit DispatchBudget(3) = %d; want the cap %d", got, DispatchBudgetLimit)
+	}
+	limit, cooldown = explicit.PromptRejectionGuard()
+	if limit != PromptRejectionLimitCap {
+		t.Errorf("explicit guard limit = %d; want the cap %d", limit, PromptRejectionLimitCap)
+	}
+	if cooldown != time.Duration(PromptRejectionCooldownLimitSeconds)*time.Second {
+		t.Errorf("explicit guard cooldown = %v; want the cap %ds", cooldown, PromptRejectionCooldownLimitSeconds)
+	}
+
+	tuned := &Config{MaxInFlightPerAccount: 4, MaxDispatchesPerRequest: 3, PromptRejectionLimit: 5, PromptRejectionCooldownSeconds: 60}
+	if got := tuned.MaxInFlightPerAccountLimit(); got != 4 {
+		t.Errorf("tuned MaxInFlightPerAccountLimit() = %d; want 4", got)
+	}
+	if got := tuned.DispatchBudget(9); got != 3 {
+		t.Errorf("tuned DispatchBudget(9) = %d; want 3", got)
+	}
+	limit, cooldown = tuned.PromptRejectionGuard()
+	if limit != 5 || cooldown != time.Minute {
+		t.Errorf("tuned PromptRejectionGuard() = (%d, %v); want (5, 1m)", limit, cooldown)
+	}
+
+	// An explicit limit enables the guard even under the manual profile, matching the override rule the
+	// other profile-derived defaults follow.
+	manualOverride := &Config{Profile: ProfileManual, PromptRejectionLimit: 2}
+	limit, cooldown = manualOverride.PromptRejectionGuard()
+	if limit != 2 {
+		t.Errorf("manual override guard limit = %d; want 2", limit)
+	}
+	if cooldown != time.Duration(DefaultPromptRejectionCooldownSeconds)*time.Second {
+		t.Errorf("manual override guard cooldown = %v; want the default window", cooldown)
+	}
+}

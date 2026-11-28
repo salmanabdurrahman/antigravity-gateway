@@ -98,6 +98,9 @@ func TestDebugWireReportsResolvedIdentity(t *testing.T) {
 		"Default 429 Cooldown:  45s",
 		"Empty Stream Retries:  2",
 		"Catalog Refresh:       60m",
+		"Max In Flight:         2 per account",
+		"Dispatch Budget:       profile default",
+		"Prompt Rejection Guard: 3 bare 429s / 900s",
 		"  1. https://daily-cloudcode-pa.googleapis.com",
 		"  2. https://cloudcode-pa.googleapis.com",
 	}

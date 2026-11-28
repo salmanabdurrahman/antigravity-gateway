@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/salmanabdurrahman/antigravity-gateway/internal/config"
 	"github.com/spf13/cobra"
@@ -83,6 +84,14 @@ type wireIdentityView struct {
 	DefaultCooldownSeconds int `json:"default_cooldown_seconds"`
 	// EmptyStreamRetries is the retry budget for empty upstream streams.
 	EmptyStreamRetries int `json:"empty_stream_retries"`
+	// MaxInFlightPerAccount is the resolved per-credential concurrency ceiling, zero when unbounded.
+	MaxInFlightPerAccount int `json:"max_in_flight_per_account"`
+	// MaxDispatchesPerRequest is the explicit per-request dispatch budget, zero when the profile decides.
+	MaxDispatchesPerRequest int `json:"max_dispatches_per_request"`
+	// PromptRejectionLimit is the resolved bare-rejection threshold, zero when the guard is off.
+	PromptRejectionLimit int `json:"prompt_rejection_limit"`
+	// PromptRejectionCooldownSeconds is the resolved park duration for a rejection storm.
+	PromptRejectionCooldownSeconds int `json:"prompt_rejection_cooldown_seconds"`
 	// Endpoints lists the upstream Cloud Code Assist base URLs in dispatch order.
 	Endpoints []string `json:"endpoints,omitempty"`
 }
@@ -96,22 +105,28 @@ func buildWireIdentityView(path string, cfg *config.Config) wireIdentityView {
 	host := config.LoopbackHost(cfg.Host)
 	port := cmp.Or(cfg.Port, config.DefaultPort)
 
+	rejectionLimit, rejectionCooldown := cfg.PromptRejectionGuard()
+
 	return wireIdentityView{
-		ConfigPath:             path,
-		Endpoint:               config.BaseURL(host, port),
-		Strategy:               cmp.Or(cfg.Strategy, config.DefaultStrategy),
-		Profile:                cfg.EffectiveProfile(),
-		RotationMode:           cfg.EffectiveRotationMode(),
-		CatalogMaxAgeMinutes:   int(cfg.CatalogMaxAge().Minutes()),
-		UserAgent:              config.ResolveUserAgent(cfg),
-		APIClient:              config.ResolveAPIClient(cfg),
-		ClientMetadata:         config.ResolveClientMetadata(cfg),
-		UpstreamTransport:      upstreamTransportMode(),
-		QuotaThreshold:         cfg.QuotaThreshold,
-		MaxWaitSeconds:         int(cfg.MaxWaitDuration().Seconds()),
-		DefaultCooldownSeconds: int(cfg.CooldownDuration().Seconds()),
-		EmptyStreamRetries:     cfg.EmptyStreamRetryCount(),
-		Endpoints:              slices.Clone(cfg.Endpoints),
+		ConfigPath:                     path,
+		Endpoint:                       config.BaseURL(host, port),
+		Strategy:                       cmp.Or(cfg.Strategy, config.DefaultStrategy),
+		Profile:                        cfg.EffectiveProfile(),
+		RotationMode:                   cfg.EffectiveRotationMode(),
+		CatalogMaxAgeMinutes:           int(cfg.CatalogMaxAge().Minutes()),
+		UserAgent:                      config.ResolveUserAgent(cfg),
+		APIClient:                      config.ResolveAPIClient(cfg),
+		ClientMetadata:                 config.ResolveClientMetadata(cfg),
+		UpstreamTransport:              upstreamTransportMode(),
+		QuotaThreshold:                 cfg.QuotaThreshold,
+		MaxWaitSeconds:                 int(cfg.MaxWaitDuration().Seconds()),
+		DefaultCooldownSeconds:         int(cfg.CooldownDuration().Seconds()),
+		EmptyStreamRetries:             cfg.EmptyStreamRetryCount(),
+		MaxInFlightPerAccount:          cfg.MaxInFlightPerAccountLimit(),
+		MaxDispatchesPerRequest:        cfg.MaxDispatchesPerRequest,
+		PromptRejectionLimit:           rejectionLimit,
+		PromptRejectionCooldownSeconds: int(rejectionCooldown / time.Second),
+		Endpoints:                      slices.Clone(cfg.Endpoints),
 	}
 }
 
@@ -153,6 +168,21 @@ func runDebugWire(cmd *cobra.Command, args []string) error {
 	cmd.Printf("Default 429 Cooldown:  %ds\n", view.DefaultCooldownSeconds)
 	cmd.Printf("Empty Stream Retries:  %d\n", view.EmptyStreamRetries)
 	cmd.Printf("Catalog Refresh:       %dm\n", view.CatalogMaxAgeMinutes)
+	if view.MaxInFlightPerAccount > 0 {
+		cmd.Printf("Max In Flight:         %d per account\n", view.MaxInFlightPerAccount)
+	} else {
+		cmd.Printf("Max In Flight:         unbounded\n")
+	}
+	if view.MaxDispatchesPerRequest > 0 {
+		cmd.Printf("Dispatch Budget:       %d per request\n", view.MaxDispatchesPerRequest)
+	} else {
+		cmd.Printf("Dispatch Budget:       profile default\n")
+	}
+	if view.PromptRejectionLimit > 0 {
+		cmd.Printf("Prompt Rejection Guard: %d bare 429s / %ds\n", view.PromptRejectionLimit, view.PromptRejectionCooldownSeconds)
+	} else {
+		cmd.Printf("Prompt Rejection Guard: off\n")
+	}
 	if len(view.Endpoints) > 0 {
 		cmd.Println("Upstream Endpoints:")
 		for i, endpoint := range view.Endpoints {

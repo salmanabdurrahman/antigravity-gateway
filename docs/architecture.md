@@ -74,7 +74,7 @@ End-to-end measurements against live accounts (macOS arm64, `gemini-2.5-flash`):
 ## 6. Design decisions
 
 - **Zero dependencies**: only the Go standard library plus Cobra — no Node, Electron, or database engine to install or audit.
-- **Safe by default**: the `safe` profile dispatches every request to one primary account, skips cooldown absorption, keeps a single empty-stream retry, and refreshes the catalog hourly. `profile: manual` restores pooled rotation, and individual knobs still override the profile.
+- **Safe by default**: the `safe` profile dispatches every request to one primary account, caps concurrent streams per credential, skips cooldown absorption, keeps a single empty-stream retry, refreshes the catalog hourly, and parks an account after a short bare-429 storm. `profile: manual` restores pooled rotation, and individual knobs still override the profile.
 - **Native wire shape**: generation, catalog, and token-refresh requests run over HTTP/1.1 with no ALPN protocol list, and each credential keeps its own bounded connection pool keyed by a refresh-token digest. `AGW_WIRE_MODE=auto` restores the legacy shared HTTP/2 pool.
 - **Single-binary distribution**: cross-compiled archives for six platform/architecture targets with per-release checksums, plus an in-place updater that verifies digests before replacing the executable.
 - **Transactional client injection**: `agw setup` writes through atomic temp-file renames, keeps timestamped backups, and verifies connectivity with a 1-token completion before declaring success.

@@ -65,6 +65,13 @@ type AccountState struct {
 	// omits an explicit retry delay. It resets on the next successful completion.
 	rateLimitStreak atomic.Int64
 
+	// promptRejections counts bare RESOURCE_EXHAUSTED rejections inside the current guard window, so an
+	// account that keeps drawing them can be parked instead of retried forever.
+	promptRejections int
+
+	// promptWindowStart records when the current bare-rejection window began; zero before the first one.
+	promptWindowStart time.Time
+
 	// bucket coordinates token bucket burst rate limiting.
 	bucket *TokenBucket
 
@@ -164,6 +171,29 @@ func (s *AccountState) NextRateLimitStreak() int64 {
 // ResetRateLimitStreak clears consecutive rate-limit tracking after a successful completion.
 func (s *AccountState) ResetRateLimitStreak() {
 	s.rateLimitStreak.Store(0)
+}
+
+// RecordPromptRejection counts one bare RESOURCE_EXHAUSTED rejection, starting a fresh window when the
+// previous one elapsed, and returns the count observed inside the current window.
+func (s *AccountState) RecordPromptRejection(now time.Time, window time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.promptWindowStart.IsZero() || now.Sub(s.promptWindowStart) > window {
+		s.promptWindowStart = now
+		s.promptRejections = 0
+	}
+	s.promptRejections++
+	return s.promptRejections
+}
+
+// ResetPromptRejections clears the bare-rejection window after a successful completion, so the guard only
+// reacts to a sustained storm rather than to occasional rejections across a long session.
+func (s *AccountState) ResetPromptRejections() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promptRejections = 0
+	s.promptWindowStart = time.Time{}
 }
 
 // Usable checks if the account holds credentials and is not disabled.

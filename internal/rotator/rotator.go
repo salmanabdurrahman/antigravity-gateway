@@ -111,6 +111,16 @@ type Rotator struct {
 	// rotationMode records whether dispatch may spread across the pool or must stay on one primary
 	// account. The safe operating profile resolves to single-account dispatch.
 	rotationMode string
+
+	// pacer bounds concurrent upstream streams per credential.
+	pacer *Pacer
+
+	// rejectionLimit is how many bare RESOURCE_EXHAUSTED rejections inside the guard window park an
+	// account; zero disables the guard.
+	rejectionLimit int
+
+	// rejectionCooldown is how long the guard parks an account that keeps drawing bare rejections.
+	rejectionCooldown time.Duration
 }
 
 // NewRotator creates a configured Rotator coordinating accounts from the provided pool.
@@ -138,25 +148,32 @@ func NewRotator(pool *Pool, cfg *config.Config, logger *slog.Logger, nowFn func(
 	cooldown := config.DefaultConfig().CooldownDuration()
 	suspendPause := config.DefaultConfig().SuspendPauseDuration()
 	rotationMode := config.DefaultConfig().EffectiveRotationMode()
+	maxInFlight := config.DefaultConfig().MaxInFlightPerAccountLimit()
+	rejectionLimit, rejectionCooldown := config.DefaultConfig().PromptRejectionGuard()
 	if cfg != nil {
 		maxWait = cfg.MaxWaitDuration()
 		cooldown = cfg.CooldownDuration()
 		suspendPause = cfg.SuspendPauseDuration()
 		rotationMode = cfg.EffectiveRotationMode()
+		maxInFlight = cfg.MaxInFlightPerAccountLimit()
+		rejectionLimit, rejectionCooldown = cfg.PromptRejectionGuard()
 	}
 
 	return &Rotator{
-		pool:         pool,
-		picker:       picker,
-		cfg:          cfg,
-		client:       config.DefaultHTTPClient(0), // Stream requests can be long-running
-		logger:       logger,
-		nowFn:        nowFn,
-		sleepFn:      defaultSleep,
-		maxWait:      maxWait,
-		cooldown:     cooldown,
-		suspendPause: suspendPause,
-		rotationMode: rotationMode,
+		pool:              pool,
+		picker:            picker,
+		cfg:               cfg,
+		client:            config.DefaultHTTPClient(0), // Stream requests can be long-running
+		logger:            logger,
+		nowFn:             nowFn,
+		sleepFn:           defaultSleep,
+		maxWait:           maxWait,
+		cooldown:          cooldown,
+		suspendPause:      suspendPause,
+		rotationMode:      rotationMode,
+		pacer:             NewPacer(maxInFlight),
+		rejectionLimit:    rejectionLimit,
+		rejectionCooldown: rejectionCooldown,
 	}
 }
 
@@ -197,6 +214,15 @@ func (r *Rotator) SetSuspendPause(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.suspendPause = d
+}
+
+// dispatchBudget resolves how many upstream dispatches this request may perform. The safe profile caps
+// the legacy attempt budget so a failing request cannot cycle the pool.
+func (r *Rotator) dispatchBudget(legacy int) int {
+	if r.cfg == nil {
+		return legacy
+	}
+	return r.cfg.DispatchBudget(legacy)
 }
 
 // suspensionPauseError reports the remaining protective pause after an upstream suspension verdict.
@@ -525,7 +551,7 @@ func (r *Rotator) GenerateWithExclude(ctx context.Context, model string, exclude
 	// maxAttempts bounds upstream dispatches only. Absorbing a cooldown wait must not consume the
 	// dispatch budget, otherwise a single-account pool can sleep through its final iteration and
 	// exit without ever retrying after the cooldown expired.
-	maxAttempts := len(states)*2 + 2
+	maxAttempts := r.dispatchBudget(len(states)*2 + 2)
 	dispatches := 0
 
 rotation:
@@ -608,10 +634,17 @@ rotation:
 			return nil, fmt.Errorf("marshaling request payload: %w", err)
 		}
 
+		release, paceErr := r.pacer.Acquire(ctx, s.CredentialKey())
+		if paceErr != nil {
+			r.refundToken(s, tokenCharged)
+			return nil, paceErr
+		}
+
 		resp, err := r.post(ctx, model, s.Tier(), token, s.CredentialKey(), bodyBytes)
 		s.requests.Add(1)
 
 		if err != nil {
+			release()
 			r.logger.Warn("Upstream network call failed", "account", s.Email(), "error", err)
 			serverErrors++
 			r.picker.HealthTracker().RecordFailure(s.Email())
@@ -624,7 +657,7 @@ rotation:
 			if serverErrors >= 3 {
 				break
 			}
-			if err := r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond); err != nil {
+			if err := r.sleep(ctx, backoffWithJitter(time.Duration(500*serverErrors)*time.Millisecond, r.nowFn())); err != nil {
 				return nil, err
 			}
 			continue
@@ -633,14 +666,17 @@ rotation:
 		// Success!
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			s.ResetRateLimitStreak()
+			s.ResetPromptRejections()
 			s.ResetQuotaFraction(model)
 			r.picker.HealthTracker().RecordSuccess(s.Email())
+			resp.Body = newPacedBody(resp.Body, release)
 			return &AttemptResult{Response: resp, State: s}, nil
 		}
 
 		// Read error body bounded to 1MB
 		errBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
+		release()
 		errBody := string(errBodyBytes)
 
 		// Terminal suspension verdict: Google refused the account itself, not the request. Cooling it for
@@ -676,9 +712,27 @@ rotation:
 
 		switch kind {
 		case FailurePromptRejection:
-			// Request-scoped rejection: the prompt triggered upstream content filtering, so the
-			// account stays healthy and must not receive a pooled cooldown.
+			// Request-scoped rejection: the prompt triggered upstream content filtering, so the account
+			// itself stays healthy. A sustained storm of them is different: field reports tie bare 429
+			// storms to account suspensions, so the guard parks the account instead of retrying forever.
 			r.refundToken(s, tokenCharged)
+			if r.rejectionLimit > 0 {
+				now := r.nowFn()
+				count := s.RecordPromptRejection(now, config.PromptRejectionWindow)
+				if count >= r.rejectionLimit {
+					s.ResetPromptRejections()
+					s.SetCooldown("*", now.Add(r.rejectionCooldown), now, fmt.Sprintf("prompt rejection storm (%d bare 429s)", count))
+					skip[s] = struct{}{}
+					r.logger.Warn("Prompt rejection storm; parking account", "account", s.Email(), "rejections", count, "cooldown", r.rejectionCooldown)
+					lastRotErr = &RotatorError{
+						StatusCode: http.StatusTooManyRequests,
+						RetryAfter: r.rejectionCooldown,
+						ErrorMessage: fmt.Sprintf("Google rejected %d requests for %s without quota metadata; pausing that account for %s. Reduce concurrency, shorten the system prompt, or switch model.",
+							count, s.Email(), r.rejectionCooldown),
+					}
+					continue
+				}
+			}
 			r.logger.Warn("Prompt rejected by upstream without quota metadata", "account", s.Email(), "model", model)
 			return nil, &RotatorError{
 				StatusCode:     http.StatusBadRequest,
@@ -748,7 +802,7 @@ rotation:
 			if serverErrors >= 3 {
 				break rotation
 			}
-			if err := r.sleep(ctx, time.Duration(500*serverErrors)*time.Millisecond); err != nil {
+			if err := r.sleep(ctx, backoffWithJitter(time.Duration(500*serverErrors)*time.Millisecond, r.nowFn())); err != nil {
 				return nil, err
 			}
 

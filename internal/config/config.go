@@ -101,6 +101,36 @@ const (
 	// CatalogMaxAgeLimitMinutes caps the configurable catalog freshness window at 24 hours.
 	CatalogMaxAgeLimitMinutes = 1440
 
+	// DefaultMaxInFlightPerAccount caps concurrent upstream streams per credential under the safe
+	// profile, so a client fan-out cannot turn into an upstream burst.
+	DefaultMaxInFlightPerAccount = 2
+
+	// MaxInFlightLimit caps the configurable in-flight window.
+	MaxInFlightLimit = 16
+
+	// SafeMaxDispatchesPerRequest bounds dispatch attempts for one client request under the safe
+	// profile, keeping a failing request from cycling the pool.
+	SafeMaxDispatchesPerRequest = 2
+
+	// DispatchBudgetLimit caps the configurable per-request dispatch budget.
+	DispatchBudgetLimit = 16
+
+	// DefaultPromptRejectionLimit is how many bare RESOURCE_EXHAUSTED rejections inside the guard
+	// window trip the account breaker under the safe profile.
+	DefaultPromptRejectionLimit = 3
+
+	// PromptRejectionLimitCap caps the configurable breaker threshold.
+	PromptRejectionLimitCap = 50
+
+	// PromptRejectionWindow is the rolling window used to count bare RESOURCE_EXHAUSTED rejections.
+	PromptRejectionWindow = 5 * time.Minute
+
+	// DefaultPromptRejectionCooldownSeconds parks an account that keeps drawing bare rejections.
+	DefaultPromptRejectionCooldownSeconds = 900
+
+	// PromptRejectionCooldownLimitSeconds caps that cooldown at 24 hours.
+	PromptRejectionCooldownLimitSeconds = 86400
+
 	// DefaultSuspendPauseSeconds defines how long the rotator pauses all upstream dispatch after a
 	// terminal account-suspension verdict, so one enforcement hit cannot sweep the rest of the pool.
 	DefaultSuspendPauseSeconds = 900
@@ -229,6 +259,22 @@ type Config struct {
 	// CatalogMaxAgeMinutes overrides how long a cached model catalog stays fresh before a background
 	// refresh is considered. A zero value follows the operating profile.
 	CatalogMaxAgeMinutes int `json:"catalog_max_age_minutes,omitzero"`
+
+	// MaxInFlightPerAccount overrides how many upstream streams one credential may run at once. A zero
+	// value follows the operating profile, where the manual profile keeps the legacy unbounded behaviour.
+	MaxInFlightPerAccount int `json:"max_in_flight_per_account,omitzero"`
+
+	// MaxDispatchesPerRequest overrides how many upstream dispatches one client request may perform. A
+	// zero value follows the operating profile.
+	MaxDispatchesPerRequest int `json:"max_dispatches_per_request,omitzero"`
+
+	// PromptRejectionLimit overrides how many bare RESOURCE_EXHAUSTED rejections inside the guard window
+	// park the account. A zero value follows the operating profile, where the manual profile disables it.
+	PromptRejectionLimit int `json:"prompt_rejection_limit,omitzero"`
+
+	// PromptRejectionCooldownSeconds overrides how long the guard parks an account that keeps drawing
+	// bare rejections. A zero value follows the operating profile.
+	PromptRejectionCooldownSeconds int `json:"prompt_rejection_cooldown_seconds,omitzero"`
 
 	// ClientID is the Google OAuth 2.0 application client identifier utilized for PKCE authentication.
 	ClientID string `json:"client_id"`
@@ -364,6 +410,56 @@ func (c *Config) CatalogMaxAge() time.Duration {
 		return LegacyCatalogMaxAgeMinutes * time.Minute
 	}
 	return DefaultCatalogMaxAgeMinutes * time.Minute
+}
+
+// MaxInFlightPerAccountLimit returns how many upstream streams one credential may run concurrently. The
+// safe profile caps at two; the manual profile keeps the legacy unbounded behaviour unless an explicit
+// limit is configured.
+func (c *Config) MaxInFlightPerAccountLimit() int {
+	if c != nil && c.MaxInFlightPerAccount > 0 {
+		return min(c.MaxInFlightPerAccount, MaxInFlightLimit)
+	}
+	if c.EffectiveProfile() == ProfileManual {
+		return 0
+	}
+	return DefaultMaxInFlightPerAccount
+}
+
+// DispatchBudget returns how many upstream dispatches one client request may perform. An explicit value
+// wins; otherwise the safe profile caps the legacy attempt budget while the manual profile keeps it.
+func (c *Config) DispatchBudget(legacy int) int {
+	if legacy < 1 {
+		legacy = 1
+	}
+	if c != nil && c.MaxDispatchesPerRequest > 0 {
+		return min(c.MaxDispatchesPerRequest, DispatchBudgetLimit)
+	}
+	if c.EffectiveProfile() == ProfileManual {
+		return legacy
+	}
+	return min(SafeMaxDispatchesPerRequest, legacy)
+}
+
+// PromptRejectionGuard returns the bare-429 threshold and cooldown used to park an account that keeps
+// drawing rejections without quota metadata. The manual profile keeps the legacy behaviour of no guard,
+// but an explicit prompt_rejection_limit still enables it, matching the override rule every other
+// profile-derived default follows.
+func (c *Config) PromptRejectionGuard() (int, time.Duration) {
+	limit := 0
+	if c != nil && c.PromptRejectionLimit > 0 {
+		limit = min(c.PromptRejectionLimit, PromptRejectionLimitCap)
+	} else if c.EffectiveProfile() == ProfileManual {
+		return 0, 0
+	} else {
+		limit = DefaultPromptRejectionLimit
+	}
+
+	cooldown := time.Duration(DefaultPromptRejectionCooldownSeconds) * time.Second
+	if c != nil && c.PromptRejectionCooldownSeconds > 0 {
+		cooldown = time.Duration(min(c.PromptRejectionCooldownSeconds, PromptRejectionCooldownLimitSeconds)) * time.Second
+	}
+
+	return limit, cooldown
 }
 
 // SuspendPauseDuration returns how long upstream dispatch stays paused after a terminal suspension
